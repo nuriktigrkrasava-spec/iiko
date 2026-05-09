@@ -1,0 +1,239 @@
+import sqlite3
+import os
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from cryptography.fernet import Fernet
+
+DB_PATH = os.getenv("DB_PATH", "iiko_boss.db")
+
+def _get_cipher() -> Optional[Fernet]:
+    key = os.getenv("ENCRYPTION_KEY")
+    if not key:
+        return None
+    return Fernet(key.encode())
+
+def encrypt_password(password: str) -> str:
+    cipher = _get_cipher()
+    if not cipher or not password:
+        return password
+    return cipher.encrypt(password.encode()).decode()
+
+def decrypt_password(encrypted: str) -> str:
+    cipher = _get_cipher()
+    if not cipher or not encrypted:
+        return encrypted
+    try:
+        return cipher.decrypt(encrypted.encode()).decode()
+    except Exception:
+        return encrypted
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS users (
+        telegram_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        created_at TEXT,
+        is_demo INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS restaurants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        api_login TEXT,
+        organization_id TEXT,
+        organization_name TEXT,
+        iiko_server TEXT DEFAULT NULL,
+        api_password TEXT DEFAULT NULL,
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ai_cache (
+        query_hash TEXT PRIMARY KEY,
+        response TEXT,
+        date TEXT,
+        organization_id TEXT,
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_invoices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER,
+        telegram_user TEXT,
+        raw_text TEXT,
+        supplier TEXT,
+        branch TEXT,
+        items TEXT,
+        total_amount REAL,
+        date TEXT,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS expenses_manual (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT,
+        name TEXT,
+        category TEXT,
+        amount REAL,
+        kassa TEXT,
+        date TEXT,
+        created_at TEXT
+    );
+    """)
+    conn.commit()
+    # Миграция для существующих БД
+    for col, definition in [("iiko_server", "TEXT DEFAULT NULL"), ("api_password", "TEXT DEFAULT NULL")]:
+        try:
+            conn.execute(f"ALTER TABLE restaurants ADD COLUMN {col} {definition}")
+            conn.commit()
+        except Exception:
+            pass
+    conn.close()
+
+def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def create_user(telegram_id: int, username: str = None, first_name: str = None):
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO users (telegram_id, username, first_name, created_at) VALUES (?, ?, ?, ?)",
+        (telegram_id, username, first_name, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def set_demo_mode(telegram_id: int, is_demo: int):
+    conn = get_db()
+    conn.execute(
+        "UPDATE users SET is_demo = ? WHERE telegram_id = ?",
+        (is_demo, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM restaurants WHERE telegram_id = ? ORDER BY id", (telegram_id,)
+    ).fetchall()
+    conn.close()
+    result = []
+    seen_org_ids = set()
+    for r in rows:
+        d = dict(r)
+        org_id = d.get("organization_id", "")
+        if org_id in seen_org_ids:
+            continue  # дедупликация по organization_id
+        seen_org_ids.add(org_id)
+        if d.get("api_password"):
+            d["api_password"] = decrypt_password(d["api_password"])
+        result.append(d)
+    return result
+
+def add_restaurant(telegram_id: int, api_login: str, org_id: str, org_name: str,
+                   iiko_server: str = None, api_password: str = None):
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO restaurants
+           (telegram_id, api_login, organization_id, organization_name, iiko_server, api_password, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, api_login, org_id, org_name, iiko_server,
+         encrypt_password(api_password) if api_password else None,
+         datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def delete_restaurant(restaurant_id: int, telegram_id: int):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM restaurants WHERE id = ? AND telegram_id = ?",
+        (restaurant_id, telegram_id)
+    )
+    conn.commit()
+    conn.close()
+
+def get_ai_cache(query_hash: str, org_id: str, date_str: str) -> Optional[str]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT response FROM ai_cache WHERE query_hash = ? AND organization_id = ? AND date = ?",
+        (query_hash, org_id, date_str)
+    ).fetchone()
+    conn.close()
+    return row["response"] if row else None
+
+def set_ai_cache(query_hash: str, response: str, org_id: str, date_str: str):
+    conn = get_db()
+    conn.execute(
+        """INSERT OR REPLACE INTO ai_cache (query_hash, response, date, organization_id, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (query_hash, response, date_str, org_id, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def add_manual_expense(org_id: str, name: str, category: str, amount: float, kassa: str, date: str):
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO expenses_manual (organization_id, name, category, amount, kassa, date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (org_id, name, category, amount, kassa, date, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+def get_manual_expenses(org_id: str, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM expenses_manual WHERE organization_id = ? AND date >= ? AND date <= ? ORDER BY date DESC",
+        (org_id, date_from, date_to)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def delete_manual_expense(expense_id: int, org_id: str):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM expenses_manual WHERE id = ? AND organization_id = ?",
+        (expense_id, org_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,
+                     supplier: str, branch: str, items_json: str,
+                     total_amount: float, date: str) -> int:
+    conn = get_db()
+    cur = conn.execute(
+        """INSERT INTO bot_invoices
+           (telegram_id, telegram_user, raw_text, supplier, branch, items, total_amount, date, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (telegram_id, telegram_user, raw_text, supplier, branch, items_json,
+         total_amount, date, datetime.now().isoformat())
+    )
+    conn.commit()
+    inv_id = cur.lastrowid
+    conn.close()
+    return inv_id
+
+
+def get_bot_invoices(limit: int = 50) -> List[Dict[str, Any]]:
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM bot_invoices ORDER BY created_at DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

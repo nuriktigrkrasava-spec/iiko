@@ -1,0 +1,2838 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>iiko Analytics</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --bg: #080808;
+  --bg-card: #0f0f0f;
+  --bg-secondary: #141414;
+  --text: #f0ece4;
+  --text-secondary: #6a6a6a;
+  --divider: #1e1e1e;
+  --accent: #ffffff;
+  --green: #34C759;
+  --red: #FF3B30;
+  --orange: #FF9500;
+  --blue: #5B9CF6;
+  --yellow: #FFD60A;
+  --card-border: #1e1e1e;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior-y: none;
+}
+
+#app { height: 100vh; display: flex; flex-direction: column; position: relative; }
+
+/* Splash */
+#splash {
+  position: fixed; inset: 0; background: #080808; z-index: 9999;
+  display: flex; align-items: center; justify-content: center; flex-direction: column;
+  transition: opacity 0.5s ease;
+}
+#splash .splash-title {
+  font-size: 32px; font-weight: 700; color: #f0ece4; letter-spacing: -0.5px;
+  animation: splashFadeUp 0.6s ease forwards; opacity: 0;
+}
+#splash .splash-sub {
+  font-size: 14px; color: #6a6a6a; margin-top: 8px;
+  animation: splashFadeUp 0.6s ease 0.15s forwards; opacity: 0;
+}
+@keyframes splashFadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Screens */
+.screen { display: none; flex: 1; flex-direction: column; overflow: hidden; animation: fadeIn 0.2s ease; }
+.screen.active { display: flex; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Scroll */
+.scroll-container {
+  flex: 1; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  padding: 0 16px 100px;
+}
+.scroll-container::-webkit-scrollbar { display: none; }
+
+/* Header */
+.header {
+  padding: 12px 16px 8px; background: var(--bg); position: sticky; top: 0; z-index: 10;
+  border-bottom: 1px solid var(--divider);
+}
+.header-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; }
+.header h1 { font-size: 22px; font-weight: 700; color: var(--text); }
+.header .date { font-size: 13px; color: var(--text-secondary); }
+.menu-btn {
+  width: 36px; height: 36px; border-radius: 10px; background: var(--bg-card);
+  border: 1px solid var(--card-border); display: flex; align-items: center; justify-content: center;
+  font-size: 18px; cursor: pointer; color: var(--text);
+}
+
+/* Rest selector */
+.rest-selector {
+  display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px; background: var(--bg);
+  border-bottom: 1px solid var(--divider); scrollbar-width: none;
+}
+.rest-selector::-webkit-scrollbar { display: none; }
+.rest-chip {
+  padding: 6px 14px; border-radius: 20px; border: 1px solid var(--card-border);
+  background: var(--bg-card); font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer;
+  color: var(--text-secondary);
+}
+.rest-chip.active { background: #ffffff; color: #000000; border-color: #ffffff; }
+
+/* Date filters */
+.date-filters {
+  display: flex; gap: 8px; overflow-x: auto; padding: 12px 16px; background: var(--bg);
+  scrollbar-width: none;
+}
+.date-filters::-webkit-scrollbar { display: none; }
+.date-chip {
+  padding: 8px 16px; border-radius: 20px; border: 1px solid var(--card-border);
+  background: transparent; font-size: 14px; font-weight: 500; white-space: nowrap; cursor: pointer;
+  color: var(--text-secondary); display: flex; align-items: center; gap: 6px;
+}
+.date-chip.active { background: #ffffff; color: #000000; border-color: #ffffff; font-weight: 600; }
+
+/* Demo banner */
+.demo-banner {
+  margin: 12px 0; padding: 14px; background: rgba(255,149,0,0.08); border: 1px solid rgba(255,149,0,0.25);
+  border-radius: 12px; display: flex; gap: 10px; align-items: flex-start;
+}
+.demo-banner .icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.demo-banner .content h3 { font-size: 14px; font-weight: 700; color: var(--orange); margin-bottom: 3px; }
+.demo-banner .content p { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+
+/* Cards */
+.card {
+  background: var(--bg-card); border-radius: 16px; padding: 16px;
+  margin-bottom: 12px; border: 1px solid var(--card-border);
+}
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px; }
+.card-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.card-subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+.excel-btn {
+  padding: 7px 12px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--bg-secondary);
+  font-size: 12px; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 5px;
+  color: var(--text-secondary); white-space: nowrap; flex-shrink: 0;
+}
+.excel-btn:hover { border-color: #333; color: var(--text); }
+
+/* Metrics */
+.metric-label { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+.metric-value { font-size: 32px; font-weight: 700; letter-spacing: -1px; margin-bottom: 6px; color: var(--text); }
+.metric-change { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 4px; }
+.metric-change.up { color: var(--green); }
+.metric-change.down { color: var(--red); }
+
+.metrics-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; margin-top: 16px; }
+.metric-full { grid-column: 1 / -1; }
+
+/* Tables */
+.table-container { overflow-x: auto; }
+.table-container::-webkit-scrollbar { height: 3px; }
+.table-container::-webkit-scrollbar-thumb { background: var(--divider); border-radius: 2px; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 500px; }
+.data-table th {
+  text-align: left; font-size: 11px; color: var(--text-secondary); font-weight: 500; letter-spacing: 0.3px;
+  padding: 8px 0; border-bottom: 1px solid var(--divider); white-space: nowrap; cursor: pointer;
+}
+.data-table td { padding: 13px 0; border-bottom: 1px solid var(--divider); white-space: nowrap; color: var(--text); }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table .name { font-weight: 600; }
+.data-table .num { font-variant-numeric: tabular-nums; }
+.sort-icon { font-size: 10px; margin-left: 4px; opacity: 0.4; }
+
+/* Charts */
+.chart-container { position: relative; height: 220px; margin-top: 8px; }
+.chart-container.donut { height: 240px; }
+
+/* Legend */
+.legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; justify-content: center; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* Tabs */
+.tabs {
+  display: flex; gap: 6px; overflow-x: auto; padding: 10px 16px; background: var(--bg);
+  scrollbar-width: none; border-bottom: 1px solid var(--divider);
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  padding: 8px 14px; border-radius: 20px; font-size: 13px; font-weight: 500;
+  white-space: nowrap; cursor: pointer; color: var(--text-secondary); border: 1px solid transparent;
+}
+.tab.active { background: var(--bg-card); border-color: var(--card-border); color: var(--text); font-weight: 600; }
+
+/* Sub-tabs */
+.subtabs { display: flex; gap: 6px; padding: 8px 0; margin-bottom: 8px; }
+.subtab { padding: 6px 12px; border-radius: 16px; font-size: 13px; cursor: pointer; color: var(--text-secondary); }
+.subtab.active { background: var(--bg-card); border: 1px solid var(--card-border); color: var(--text); font-weight: 600; }
+
+/* Horizontal bar chart */
+.hbar-item { display: flex; align-items: center; margin-bottom: 10px; gap: 10px; }
+.hbar-label { width: 120px; font-size: 13px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; color: var(--text-secondary); }
+.hbar-track { flex: 1; height: 28px; background: var(--bg-secondary); border-radius: 4px; overflow: hidden; position: relative; }
+.hbar-fill { height: 100%; background: #89C4F4; border-radius: 4px; transition: width 0.6s cubic-bezier(0.25,0.46,0.45,0.94); }
+.hbar-fill.orange { background: var(--orange); }
+.hbar-value { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.7); }
+
+/* Cohort table */
+.cohort-table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: center; }
+.cohort-table th { padding: 10px 8px; color: var(--text-secondary); font-weight: 500; border-bottom: 1px solid var(--divider); }
+.cohort-table td { padding: 10px 8px; border-bottom: 1px solid var(--divider); color: var(--text); }
+.cohort-table tr:last-child td { border-bottom: none; }
+.cohort-badge { display: inline-block; padding: 2px 8px; background: rgba(255,214,10,0.15); border: 1px solid rgba(255,214,10,0.3); border-radius: 6px; font-weight: 600; color: var(--yellow); }
+.cohort-na { color: var(--text-secondary); }
+
+/* Frequency cards */
+.freq-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-top: 12px; }
+.freq-card { background: var(--bg-secondary); border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 8px; text-align: center; }
+.freq-num { font-size: 20px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+.freq-label { font-size: 11px; color: var(--text-secondary); }
+
+/* Expense list */
+.expense-item { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--divider); }
+.expense-item:last-child { border-bottom: none; }
+.expense-info h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; color: var(--text); }
+.expense-meta { font-size: 12px; color: var(--text-secondary); }
+.expense-amount { font-size: 14px; font-weight: 700; color: var(--text); }
+.delete-btn { color: var(--red); font-size: 16px; margin-left: 12px; cursor: pointer; opacity: 0.7; }
+
+/* Invoice cards */
+.invoice-card { border: 1px solid var(--card-border); border-radius: 12px; padding: 14px; margin-bottom: 10px; background: var(--bg-secondary); }
+.invoice-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.invoice-id { font-weight: 700; font-size: 15px; color: var(--text); }
+.badge { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.badge-green { background: rgba(52,199,89,0.12); color: var(--green); border: 1px solid rgba(52,199,89,0.2); }
+.badge-yellow { background: rgba(255,214,10,0.1); color: var(--yellow); border: 1px solid rgba(255,214,10,0.2); }
+.invoice-meta { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
+.invoice-actions { display: flex; gap: 8px; }
+.btn { padding: 8px 14px; border-radius: 10px; font-size: 13px; font-weight: 600; border: none; cursor: pointer; }
+.btn-primary { background: #ffffff; color: #000000; }
+.btn-orange { background: var(--orange); color: #fff; }
+.btn-green { background: var(--green); color: #fff; }
+.btn-outline { background: var(--bg-card); border: 1px solid var(--card-border); color: var(--text); }
+
+/* AI Chat */
+.ai-card { margin: 0 0 12px; border: 1px solid var(--card-border); border-radius: 16px; background: var(--bg-card); overflow: hidden; }
+.ai-header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--divider); }
+.ai-dot { width: 7px; height: 7px; background: var(--green); border-radius: 50%; box-shadow: 0 0 6px var(--green); }
+.ai-title { font-weight: 600; font-size: 15px; color: var(--text); }
+.ai-model { font-size: 11px; color: var(--text-secondary); margin-left: auto; }
+.ai-suggestions { display: flex; gap: 8px; padding: 12px 16px; overflow-x: auto; scrollbar-width: none; }
+.ai-suggestions::-webkit-scrollbar { display: none; }
+.ai-chip { padding: 8px 14px; border-radius: 20px; border: 1px solid var(--card-border); font-size: 13px; white-space: nowrap; cursor: pointer; background: var(--bg-secondary); color: var(--text-secondary); }
+.ai-messages { max-height: 300px; overflow-y: auto; padding: 12px 16px; }
+.ai-msg { margin-bottom: 12px; display: flex; }
+.ai-msg.user { justify-content: flex-end; }
+.ai-msg.assistant { justify-content: flex-start; }
+.ai-bubble { max-width: 80%; padding: 10px 14px; border-radius: 16px; font-size: 14px; line-height: 1.4; }
+.ai-bubble.user { background: #ffffff; color: #000000; border-bottom-right-radius: 4px; }
+.ai-bubble.assistant { background: var(--bg-secondary); color: var(--text); border-bottom-left-radius: 4px; border: 1px solid var(--divider); }
+.ai-input-row { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--divider); }
+.ai-input { flex: 1; padding: 10px 14px; border: 1px solid var(--card-border); border-radius: 12px; font-size: 15px; outline: none; font-family: inherit; background: var(--bg-secondary); color: var(--text); }
+.ai-send { width: 40px; height: 40px; border-radius: 12px; background: #ffffff; color: #000000; border: none; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+
+/* Writeoff categories */
+.wc-item { padding: 14px 0; border-bottom: 1px solid var(--divider); }
+.wc-item:last-child { border-bottom: none; }
+.wc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.wc-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 6px; color: var(--text); }
+.wc-pct { font-weight: 700; font-size: 14px; color: var(--text-secondary); }
+.wc-pct.red { color: var(--red); }
+.wc-meta { font-size: 12px; color: var(--text-secondary); }
+
+/* Onboarding - FULL SCREEN LOCK */
+.onboarding {
+  background: var(--bg); padding: 40px 24px; text-align: center; height: 100%;
+  display: flex; flex-direction: column; justify-content: center;
+  position: fixed; inset: 0; z-index: 100;
+}
+.onboarding .emoji { font-size: 56px; margin-bottom: 20px; }
+.onboarding h2 { font-size: 24px; font-weight: 700; margin-bottom: 12px; color: var(--text); }
+.onboarding p { font-size: 16px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 32px; }
+.btn-full { width: 100%; padding: 16px; border-radius: 14px; font-size: 16px; font-weight: 600; border: none; cursor: pointer; margin-bottom: 12px; }
+.btn-black { background: #ffffff; color: #000000; }
+.btn-white { background: var(--bg-card); border: 1px solid var(--card-border); color: var(--text); }
+.input-field { width: 100%; padding: 16px; border-radius: 14px; border: 1px solid var(--card-border); font-size: 16px; margin-bottom: 16px; outline: none; font-family: inherit; background: var(--bg-card); color: var(--text); }
+.org-list { text-align: left; margin: 20px 0; flex: 1; overflow-y: auto; min-height: 0; }
+.org-item { padding: 16px; border: 1px solid var(--card-border); border-radius: 14px; margin-bottom: 10px; cursor: pointer; display: flex; align-items: center; gap: 12px; background: var(--bg-card); }
+.org-item.selected { border-color: var(--blue); }
+.org-icon { font-size: 24px; }
+
+/* Settings modal */
+.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; display: none; align-items: flex-end; }
+.modal-overlay.active { display: flex; }
+.modal-sheet { background: var(--bg-card); border-radius: 24px 24px 0 0; padding: 20px; width: 100%; max-height: 80vh; overflow-y: auto; animation: slideUp 0.3s ease; border-top: 1px solid var(--divider); }
+@keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.modal-title { font-size: 18px; font-weight: 700; margin-bottom: 16px; color: var(--text); }
+.modal-item { padding: 14px 0; border-bottom: 1px solid var(--divider); font-size: 16px; cursor: pointer; color: var(--text); }
+.modal-item:last-child { border-bottom: none; }
+.modal-item.danger { color: var(--red); }
+
+/* Navbar - HIDDEN during onboarding */
+.navbar {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 83px; background: var(--bg-card);
+  border-top: 1px solid var(--divider); display: none; justify-content: space-around; align-items: flex-start;
+  padding-top: 8px; padding-bottom: env(safe-area-inset-bottom); z-index: 50;
+}
+.navbar.visible { display: flex; }
+.nav-item { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 4px 8px; cursor: pointer; flex: 1; }
+.nav-item svg { width: 24px; height: 24px; stroke: var(--text-secondary); fill: none; stroke-width: 1.8; }
+.nav-item.active svg { stroke: #ffffff; }
+.nav-item span { font-size: 11px; color: var(--text-secondary); }
+.nav-item.active span { color: #ffffff; font-weight: 600; }
+
+/* Toast */
+.toast {
+  position: fixed; top: 20px; left: 50%; transform: translateX(-50%) translateY(-100px);
+  background: var(--bg-card); color: var(--text); padding: 12px 20px; border-radius: 12px;
+  font-size: 14px; font-weight: 500; z-index: 200; transition: transform 0.3s ease;
+  border: 1px solid var(--card-border); box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+
+/* Skeleton */
+.skeleton { background: linear-gradient(90deg, #1a1a1a 25%, #222 50%, #1a1a1a 75%); background-size: 200% 100%; animation: shimmer 1.5s infinite; border-radius: 8px; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* Pull to refresh */
+.ptr-indicator { text-align: center; padding: 10px; font-size: 13px; color: var(--text-secondary); display: none; }
+.ptr-indicator.active { display: block; }
+
+/* Foodcost color coding */
+.cost-red { color: var(--red); font-weight: 700; }
+.cost-orange { color: var(--orange); font-weight: 700; }
+.cost-green { color: var(--green); font-weight: 700; }
+
+/* Warning banner */
+.warn-banner {
+  margin: 0 0 12px; padding: 12px; background: rgba(255,214,10,0.08);
+  border-radius: 10px; font-size: 13px; color: var(--yellow); display: flex; align-items: center; gap: 8px;
+  border: 1px solid rgba(255,214,10,0.2);
+}
+
+/* Stat rows */
+.stat-row { display: flex; justify-content: space-between; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--divider); }
+.stat-row:last-child { border-bottom: none; }
+.stat-label { font-size: 15px; display: flex; align-items: center; gap: 8px; color: var(--text); }
+.stat-value { font-size: 15px; font-weight: 600; color: var(--text); }
+.badge-gray { background: var(--bg-secondary); padding: 4px 10px; border-radius: 10px; font-size: 13px; color: var(--text-secondary); border: 1px solid var(--card-border); }
+
+/* Summary row */
+.summary-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+.summary-card { background: var(--bg-secondary); border-radius: 16px; padding: 16px; text-align: center; border: 1px solid var(--card-border); }
+.summary-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.summary-value { font-size: 18px; font-weight: 700; color: var(--text); }
+
+/* Foodcost metric cards */
+.fc-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 12px; }
+.fc-card { background: var(--bg-secondary); border-radius: 16px; padding: 16px; text-align: center; border: 1px solid var(--card-border); }
+.fc-label { font-size: 11px; font-weight: 600; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.fc-label.blue { color: var(--blue); }
+.fc-label.orange { color: var(--orange); }
+.fc-label.neutral { color: var(--text-secondary); }
+.fc-value { font-size: 22px; font-weight: 700; color: var(--text); }
+.fc-sub { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+
+/* Link */
+.info-link { font-size: 13px; color: var(--blue); text-decoration: none; margin-top: 8px; display: inline-block; }
+
+/* Empty state */
+.empty-state { text-align: center; padding: 60px 20px; }
+.empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.3; }
+.empty-state h3 { font-size: 18px; font-weight: 700; margin-bottom: 8px; color: var(--text); }
+.empty-state p { font-size: 14px; color: var(--text-secondary); line-height: 1.5; }
+
+/* Engineering quadrants */
+.quad-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+.quad-card { border-radius: 12px; padding: 12px; border: 1px solid; }
+.quad-card.stars { background: rgba(52,199,89,0.06); border-color: rgba(52,199,89,0.25); }
+.quad-card.horses { background: rgba(91,156,246,0.06); border-color: rgba(91,156,246,0.25); }
+.quad-card.puzzles { background: rgba(255,214,10,0.06); border-color: rgba(255,214,10,0.25); }
+.quad-card.dogs { background: rgba(255,59,48,0.06); border-color: rgba(255,59,48,0.2); }
+.quad-label { font-size: 13px; font-weight: 700; margin-bottom: 2px; color: var(--text); }
+.quad-sub { font-size: 10px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.3; }
+.quad-item { font-size: 12px; color: var(--text-secondary); padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.quad-item:last-child { border-bottom: none; }
+
+/* ABC badges */
+.abc-badge { display: inline-block; padding: 2px 8px; border-radius: 8px; font-size: 12px; font-weight: 700; }
+.abc-a { background: rgba(52,199,89,0.15); color: var(--green); border: 1px solid rgba(52,199,89,0.3); }
+.abc-b { background: rgba(255,149,0,0.1); color: var(--orange); border: 1px solid rgba(255,149,0,0.2); }
+.abc-c { background: rgba(255,59,48,0.1); color: var(--red); border: 1px solid rgba(255,59,48,0.2); }
+.abc-counter { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+.abc-counters { display: flex; gap: 16px; margin-bottom: 16px; }
+
+/* Cart companion accordion */
+.companion-item { border-bottom: 1px solid var(--divider); }
+.companion-item:last-child { border-bottom: none; }
+.companion-header { display: flex; justify-content: space-between; align-items: center; padding: 13px 0; cursor: pointer; }
+.companion-name { font-size: 14px; font-weight: 500; color: var(--text); }
+.companion-arrow { font-size: 11px; color: var(--text-secondary); transition: transform 0.2s; }
+.companion-body { display: none; padding-bottom: 10px; }
+.companion-body.open { display: block; }
+.companion-sub { font-size: 13px; color: var(--text-secondary); padding: 5px 0; display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.03); }
+.companion-sub:last-child { border-bottom: none; }
+
+/* Cart pairs */
+.pair-item { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--divider); }
+.pair-item:last-child { border-bottom: none; }
+.pair-name { font-size: 14px; color: var(--text); }
+.pair-count { font-size: 13px; color: var(--text-secondary); white-space: nowrap; margin-left: 8px; }
+
+/* Stop list */
+.stoplist-item { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-bottom: 1px solid var(--divider); }
+.stoplist-item:last-child { border-bottom: none; }
+.stoplist-name { font-size: 14px; font-weight: 500; color: var(--text); }
+.stoplist-cat { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.stoplist-badge { padding: 4px 10px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+.stoplist-badge.stop { background: rgba(255,59,48,0.12); color: var(--red); border: 1px solid rgba(255,59,48,0.2); }
+.stoplist-badge.low { background: rgba(255,149,0,0.1); color: var(--orange); border: 1px solid rgba(255,149,0,0.2); }
+
+/* Responsive */
+@media (max-width: 380px) {
+  .metric-value { font-size: 26px; }
+  .freq-row { grid-template-columns: repeat(3, 1fr); }
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+
+<!-- Splash -->
+<div id="splash">
+  <div class="splash-title">iiko Analytics</div>
+  <div class="splash-sub">Аналитика ресторана</div>
+</div>
+
+<!-- Onboarding -->
+<div class="screen active" id="screen-onboarding">
+  <div class="onboarding" id="onboarding-step1">
+    <div class="emoji">🍽️</div>
+    <h2>Аналитика вашего ресторана</h2>
+    <p>Контролируйте выручку, персонал, расходы и лояльность гостей в одном приложении</p>
+    <button class="btn-full btn-black" onclick="nextOnboarding(2)">Начать →</button>
+    <button class="btn-full btn-white" onclick="startDemo()">Попробовать демо</button>
+  </div>
+  <div class="onboarding" id="onboarding-step2" style="display:none">
+    <div class="emoji">🔑</div>
+    <h2>API ключ iiko</h2>
+    <p>Введите API Login из личного кабинета iiko</p>
+    <input type="text" class="input-field" id="api-login-input" placeholder="API Login">
+    <div style="margin-top:8px">
+      <button class="btn-full btn-white" style="font-size:13px;padding:10px" onclick="toggleIikoWebFields()">⚙️ Свой сервер iikoWeb</button>
+      <div id="iikweb-fields" style="display:none;flex-direction:column;gap:8px;margin-top:8px">
+        <input type="text" class="input-field" id="iiko-server-input" placeholder="URL сервера (напр. https://my.iiko.it/resto)">
+        <input type="password" class="input-field" id="api-password-input" placeholder="Пароль (для iikoWeb)">
+      </div>
+    </div>
+    <button class="btn-full btn-black" style="margin-top:12px" onclick="validateApiKey()">Подключить</button>
+    <button class="btn-full btn-white" onclick="startDemo()">Пропустить (демо)</button>
+  </div>
+  <div class="onboarding" id="onboarding-step3" style="display:none">
+    <div class="emoji">🏢</div>
+    <h2>Выберите филиалы</h2>
+    <p style="font-size:13px;color:var(--text-secondary);margin-bottom:12px">Можно выбрать несколько</p>
+    <div class="org-list" id="org-list"></div>
+    <button class="btn-full btn-black" id="btn-select-org" onclick="saveOrg()" disabled>Подключить →</button>
+  </div>
+  <div class="onboarding" id="onboarding-step4" style="display:none">
+    <div class="emoji">✅</div>
+    <h2>Всё готово!</h2>
+    <p>Ваш ресторан подключён. Можно смотреть аналитику.</p>
+    <button class="btn-full btn-black" onclick="finishOnboarding()">Открыть аналитику →</button>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="screen" id="screen-main">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1 id="rest-name">Демо Ресторан</h1>
+        <div class="date" id="current-date">·</div>
+      </div>
+      <div class="menu-btn" onclick="openSettings()">⋯</div>
+    </div>
+  </div>
+  <div class="rest-selector" id="rest-selector"></div>
+  <div class="date-filters" id="main-date-filters">
+    <div class="date-chip" onclick="setPeriod('today', this)">📅 Даты</div>
+    <div class="date-chip active" onclick="setPeriod('today', this)">Сегодня</div>
+    <div class="date-chip" onclick="setPeriod('yesterday', this)">Вчера</div>
+    <div class="date-chip" onclick="setPeriod('day_before_yesterday', this)">Позавчера</div>
+    <div class="date-chip" onclick="setPeriod('week', this)">Эта н...</div>
+    <div class="date-chip" onclick="setPeriod('month', this)">Этот м...</div>
+  </div>
+  <div class="scroll-container" id="main-scroll">
+    <div class="ptr-indicator" id="main-ptr">Обновление...</div>
+    <div class="demo-banner" id="demo-banner" style="display:none">
+      <div class="icon">⚠️</div>
+      <div class="content">
+        <h3>Демо-режим</h3>
+        <p>Вы в демо-режиме. Данные примерные. Подключите свой ресторан.</p>
+      </div>
+    </div>
+    <div class="demo-banner" id="iiko-error-banner" style="display:none">
+      <div class="icon">🔴</div>
+      <div class="content">
+        <h3>Ошибка iiko</h3>
+        <p id="iiko-error-text">Не удалось получить данные из iiko.</p>
+      </div>
+    </div>
+    <div class="metrics-row">
+      <div class="card metric-full">
+        <div class="metric-label">Выручка сегодня</div>
+        <div class="metric-value" id="m-revenue">0 ₸</div>
+        <div class="metric-change up" id="m-revenue-change">↑ +0% к вчера</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Средний чек</div>
+        <div class="metric-value" style="font-size:24px;" id="m-check">0 ₸</div>
+        <div class="metric-change up" id="m-check-change">↑ +0% к вчера</div>
+      </div>
+      <div class="card">
+        <div class="metric-label">Гостей</div>
+        <div class="metric-value" style="font-size:24px;" id="m-guests">0</div>
+        <div class="metric-change up" id="m-guests-change">↑ +0% к вчера</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Выручка за 7 дней</div>
+        <button class="excel-btn" onclick="exportCSV('revenue-7days')">↓ Excel</button>
+      </div>
+      <div class="chart-container"><canvas id="chart-revenue"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">🎩 Быстрая статистика</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Открытых заказов</div>
+        <div class="stat-value"><span class="badge-gray" id="m-open">0</span></div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Выручка вчера</div>
+        <div class="stat-value" id="m-yesterday">0 ₸</div>
+      </div>
+      <div class="stat-row">
+        <div class="stat-label">Прогноз на день</div>
+        <div class="stat-value" id="m-forecast" style="font-weight:700">0 ₸</div>
+      </div>
+    </div>
+    <div class="card" id="stoplist-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">🚫 Стоп-лист</div>
+          <div class="card-subtitle" id="stoplist-updated">Обновляется...</div>
+        </div>
+        <div class="badge-gray" id="stoplist-count">0</div>
+      </div>
+      <div id="stoplist-items">
+        <div style="text-align:center;padding:16px 0;color:var(--text-secondary);font-size:14px;">✅ Все блюда в наличии</div>
+      </div>
+    </div>
+    <div class="ai-card">
+      <div class="ai-header">
+        <div class="ai-dot"></div>
+        <div class="ai-title">AI Аналитик</div>
+        <div class="ai-model">claude-sonnet</div>
+      </div>
+      <div class="ai-suggestions">
+        <div class="ai-chip" onclick="askAI('Почему упала выручка?')">Почему упала выручка?</div>
+        <div class="ai-chip" onclick="askAI('Какое блюдо продвигать?')">Какое блюдо продвигать?</div>
+        <div class="ai-chip" onclick="askAI('Оцени день')">Оцени день</div>
+      </div>
+      <div class="ai-messages" id="ai-messages"></div>
+      <div class="ai-input-row">
+        <input type="text" class="ai-input" id="ai-input" placeholder="Задайте вопрос..." onkeypress="if(event.key==='Enter')sendAI()">
+        <button class="ai-send" onclick="sendAI()">↑</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sales -->
+<div class="screen" id="screen-sales">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Продажи</h1>
+        <div class="date" id="sales-date">·</div>
+      </div>
+    </div>
+  </div>
+  <div class="date-filters" id="sales-date-filters">
+    <div class="date-chip active" onclick="setSalesPeriod('today', this)">Сегодня</div>
+    <div class="date-chip" onclick="setSalesPeriod('yesterday', this)">Вчера</div>
+    <div class="date-chip" onclick="setSalesPeriod('week', this)">Эта н...</div>
+    <div class="date-chip" onclick="setSalesPeriod('month', this)">Этот м...</div>
+  </div>
+  <div class="tabs" id="sales-tabs">
+    <div class="tab active" onclick="setSalesTab('general', this)">Общие</div>
+    <div class="tab" onclick="setSalesTab('engineering', this)">Engineering</div>
+    <div class="tab" onclick="setSalesTab('abc', this)">ABC</div>
+    <div class="tab" onclick="setSalesTab('cancels', this)">Отмены</div>
+    <div class="tab" onclick="setSalesTab('cart', this)">Корзина</div>
+  </div>
+  <div class="scroll-container" id="sales-scroll">
+    <div class="demo-banner" id="sales-demo" style="display:none">
+      <div class="icon">⚠️</div>
+      <div class="content"><h3>Демо-режим</h3><p>Данные примерные</p></div>
+    </div>
+    <div id="sales-general">
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Каналы продаж</div>
+            <div class="card-subtitle">Откуда приходят заказы и выручка</div>
+          </div>
+          <button class="excel-btn" onclick="exportCSV('channels')">↓ Excel</button>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="channels-table">
+            <thead><tr><th>Канал</th><th>Выручка</th><th>Гостей</th><th>Ср. чек</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Топ блюд по выручке</div>
+          <button class="excel-btn" onclick="exportCSV('top-dishes')">↓ Excel</button>
+        </div>
+        <div id="top-dishes-chart"></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Продажи по категориям</div>
+          <button class="excel-btn" onclick="exportCSV('categories')">↓ Excel</button>
+        </div>
+        <div class="chart-container donut"><canvas id="chart-categories"></canvas></div>
+        <div class="legend" id="cat-legend"></div>
+      </div>
+    </div>
+    <!-- Engineering tab -->
+    <div id="sales-engineering" style="display:none">
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <div class="card-title">Матрица меню</div>
+          <button class="excel-btn" onclick="exportCSV('engineering')">↓ Excel</button>
+        </div>
+        <div id="eng-note" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:8px;padding:8px;background:var(--bg-secondary);border-radius:8px;">⚠️ Себестоимость не заполнена — маржа рассчитана условно. Для точного анализа заполните техкарты в iiko.</div>
+        <div class="quad-grid">
+          <div class="quad-card stars">
+            <div class="quad-label">⭐ Звёзды</div>
+            <div class="quad-sub">Высокая выручка + высокая маржа</div>
+            <div id="eng-stars"></div>
+          </div>
+          <div class="quad-card horses">
+            <div class="quad-label">🐴 Лошади</div>
+            <div class="quad-sub">Высокая выручка + низкая маржа</div>
+            <div id="eng-horses"></div>
+          </div>
+          <div class="quad-card puzzles">
+            <div class="quad-label">❓ Загадки</div>
+            <div class="quad-sub">Низкая выручка + высокая маржа</div>
+            <div id="eng-puzzles"></div>
+          </div>
+          <div class="quad-card dogs">
+            <div class="quad-label">🐶 Собаки</div>
+            <div class="quad-sub">Низкая выручка + низкая маржа</div>
+            <div id="eng-dogs"></div>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Все позиции</div>
+        <div class="table-container">
+          <table class="data-table" id="eng-table">
+            <thead><tr><th>Блюдо</th><th>Выручка</th><th>Маржа%</th><th>Кол-во</th><th>Тип</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ABC tab -->
+    <div id="sales-abc" style="display:none">
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <div class="card-title">ABC анализ</div>
+          <button class="excel-btn" onclick="exportCSV('abc')">↓ Excel</button>
+        </div>
+        <div class="subtabs" style="margin-bottom:12px;">
+          <div class="subtab active abc-mode-btn" onclick="setAbcMode('revenue', this)">Выручка</div>
+          <div class="subtab abc-mode-btn" onclick="setAbcMode('count', this)">Кол-во</div>
+        </div>
+        <div class="abc-counters">
+          <div class="abc-counter"><span class="abc-badge abc-a">A</span><span id="abc-count-a">0</span> поз.</div>
+          <div class="abc-counter"><span class="abc-badge abc-b">B</span><span id="abc-count-b">0</span> поз.</div>
+          <div class="abc-counter"><span class="abc-badge abc-c">C</span><span id="abc-count-c">0</span> поз.</div>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="abc-table">
+            <thead><tr><th>Блюдо</th><th>Выручка</th><th>%</th><th>Нак.%</th><th>ABC</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cancels tab -->
+    <div id="sales-cancels" style="display:none">
+      <div class="metrics-row" style="margin-top:16px;">
+        <div class="card">
+          <div class="metric-label">💸 Возвраты</div>
+          <div class="metric-value" style="font-size:22px;" id="cancels-returns">—</div>
+          <div class="metric-change" id="cancels-returns-pct">нет данных</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">🚫 Отмены</div>
+          <div class="metric-value" style="font-size:22px;" id="cancels-count">—</div>
+          <div class="metric-change" id="cancels-pct">нет данных</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Возвраты по блюдам</div>
+        <div class="table-container">
+          <table class="data-table" id="cancels-table">
+            <thead><tr><th>Блюдо</th><th>Возврат</th><th>Выручка</th><th>%</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Cart tab -->
+    <div id="sales-cart" style="display:none">
+      <div class="summary-row" style="margin-top:16px;">
+        <div class="summary-card">
+          <div class="summary-label">Заказов</div>
+          <div class="summary-value" id="cart-orders">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Позиций</div>
+          <div class="summary-value" id="cart-items" style="color:var(--green)">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">В меню</div>
+          <div class="summary-value" id="cart-menu">—</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Компаньоны блюд</div>
+        <div id="cart-companions"></div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Топ пар — покупают вместе</div>
+        <div id="cart-pairs"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Staff -->
+<div class="screen" id="screen-staff">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Персонал</h1>
+        <div class="date" id="staff-date">26.04 — 02.05</div>
+      </div>
+    </div>
+  </div>
+  <div class="date-filters">
+    <div class="date-chip active">Эта н...</div>
+  </div>
+  <div class="scroll-container" id="staff-scroll">
+    <div class="demo-banner" id="staff-demo" style="display:none">
+      <div class="icon">⚠️</div>
+      <div class="content"><h3>Демо-режим</h3><p>Данные примерные</p></div>
+    </div>
+    <!-- Сейчас на смене -->
+    <div class="card" style="margin-top:16px;" id="shifts-card">
+      <div class="card-header">
+        <div class="card-title">🟢 Сейчас на смене</div>
+        <div style="font-size:12px;color:var(--text-secondary)" id="shifts-count"></div>
+      </div>
+      <div id="shifts-list" style="display:flex;flex-direction:column;gap:8px;"></div>
+    </div>
+    <div class="summary-row" style="margin-top:16px;">
+      <div class="summary-card">
+        <div class="summary-label">Выручка</div>
+        <div class="summary-value" id="staff-total-rev">0</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-label">Заказы</div>
+        <div class="summary-value" id="staff-total-orders">0</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-label">Гости</div>
+        <div class="summary-value" id="staff-total-guests">0</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Статистика официантов (7 дней)</div>
+        <button class="excel-btn" onclick="exportCSV('staff')">↓ Excel</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Прокрутите вправо → для всех колонок</div>
+      <div class="table-container">
+        <table class="data-table" id="staff-table">
+          <thead>
+            <tr>
+              <th onclick="sortStaff('name')">Имя <span class="sort-icon">↑↓</span></th>
+              <th onclick="sortStaff('revenue')">Выручка <span class="sort-icon">↑↓</span></th>
+              <th onclick="sortStaff('orders')">Заказы <span class="sort-icon">↑↓</span></th>
+              <th onclick="sortStaff('guests')">Гости <span class="sort-icon">↑↓</span></th>
+              <th>Поз/ч</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Expenses -->
+<div class="screen" id="screen-expenses">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Расходы</h1>
+      </div>
+      <div class="menu-btn" onclick="loadExpenses()">🔄</div>
+    </div>
+  </div>
+  <div class="tabs" id="expense-tabs">
+    <div class="tab active" onclick="setExpenseTab('foodcost', this)">Фудкост</div>
+    <div class="tab" onclick="setExpenseTab('expenses', this)">Расходы</div>
+    <div class="tab" onclick="setExpenseTab('invoices', this)">Накладные</div>
+    <div class="tab" onclick="setExpenseTab('writeoffs', this)">Списания</div>
+  </div>
+  <div class="scroll-container" id="expenses-scroll">
+    <div class="demo-banner" id="expenses-demo" style="display:none">
+      <div class="icon">⚠️</div>
+      <div class="content"><h3>Демо-режим</h3><p>Данные примерные</p></div>
+    </div>
+
+    <!-- Foodcost -->
+    <div id="tab-foodcost">
+      <div class="warn-banner" id="foodcost-warning" style="display:none">
+        <span>⚠</span> <span id="foodcost-warning-text"></span>
+      </div>
+      <div style="text-align:center;font-size:15px;font-weight:600;margin:16px 0 12px;" id="fc-month">Май 2026</div>
+      <div class="fc-row">
+        <div class="fc-card">
+          <div class="fc-label blue">Норматив</div>
+          <div class="fc-value" id="fc-norm-pct">30%</div>
+          <div class="fc-sub" id="fc-norm-sum">0 ₸</div>
+        </div>
+        <div class="fc-card">
+          <div class="fc-label orange">Факт</div>
+          <div class="fc-value" id="fc-fact-pct">36%</div>
+          <div class="fc-sub" id="fc-fact-sum">0 ₸</div>
+        </div>
+        <div class="fc-card">
+          <div class="fc-label neutral">Разница</div>
+          <div class="fc-value" id="fc-diff-pct" style="color:var(--red)">+6%</div>
+          <div class="fc-sub">потери</div>
+        </div>
+      </div>
+      <a class="info-link" style="margin-bottom:12px;display:block;">Что означают норматив / факт / разница?</a>
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Тренд по месяцам</div>
+            <div class="legend" style="justify-content:flex-start;margin-top:6px;">
+              <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>Факт</div>
+              <div class="legend-item"><div class="legend-dot" style="background:var(--blue)"></div>Норматив</div>
+            </div>
+          </div>
+          <div style="font-size:11px;color:var(--text-secondary);">Нажмите на столбец</div>
+        </div>
+        <div class="chart-container"><canvas id="chart-fc-trend"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Май — по блюдам (норматив)</div>
+          <button class="excel-btn" onclick="exportCSV('foodcost-dishes')">↓ Excel</button>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="fc-dishes-table">
+            <thead>
+              <tr><th>Блюдо</th><th>Выручка</th><th>Кол-во</th><th>Фудкост</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expenses tab -->
+    <div id="tab-expenses" style="display:none">
+      <div style="margin-top:16px;">
+        <div class="date-filters" style="padding:0 0 12px;">
+          <div class="date-chip active">Эта н...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="metric-label" style="margin-bottom:8px;">📄 Итого расходов</div>
+        <div class="metric-value" id="exp-total">0 ₸</div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="excel-btn" onclick="exportCSV('expenses')">↓ Excel</button>
+          <button class="btn btn-primary" onclick="showAddExpenseModal()">+ Добавить</button>
+        </div>
+      </div>
+      <div class="subtabs">
+        <div class="subtab active" id="exp-sub-all" onclick="filterExpenses('all', this)">Все</div>
+        <div class="subtab" id="exp-sub-orders" onclick="filterExpenses('orders', this)">Расх. ордера</div>
+        <div class="subtab" id="exp-sub-manual" onclick="filterExpenses('manual', this)">Ручные</div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">По категориям</div>
+        <div id="exp-categories-chart"></div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Операции</div>
+        <div id="exp-operations-list"></div>
+      </div>
+    </div>
+
+    <!-- Invoices tab -->
+    <div id="tab-invoices" style="display:none">
+      <div style="margin-top:16px;">
+        <div class="date-filters" style="padding:0 0 12px;">
+          <div class="date-chip active">Эта н...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Список накладных</div>
+        <div id="invoices-list"></div>
+      </div>
+    </div>
+
+    <!-- Writeoffs tab -->
+    <div id="tab-writeoffs" style="display:none">
+      <div style="margin-top:16px;">
+        <div class="date-filters" style="padding:0 0 12px;">
+          <div class="date-chip active">Эта н...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="summary-row">
+          <div class="summary-card">
+            <div class="summary-label">Списано</div>
+            <div class="summary-value" id="wo-total">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Закупки</div>
+            <div class="summary-value" id="wo-purchases">0</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">% потерь</div>
+            <div class="summary-value" id="wo-pct" style="color:var(--red)">0%</div>
+          </div>
+        </div>
+        <button class="excel-btn" style="margin-top:12px;" onclick="exportCSV('writeoffs')">↓ Excel</button>
+      </div>
+      <div class="subtabs">
+        <div class="subtab active" onclick="filterWriteoffs('all', this)">Все</div>
+        <div class="subtab" onclick="filterWriteoffs('goods', this)">Товары</div>
+        <div class="subtab" onclick="filterWriteoffs('dishes', this)">Блюда</div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">По категориям</div>
+        <div id="writeoff-categories"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Retention -->
+<div class="screen" id="screen-retention">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Ретеншн</h1>
+      </div>
+    </div>
+  </div>
+  <div class="tabs" id="retention-tabs">
+    <div class="tab" onclick="setRetentionTab('cards', this)">Карты</div>
+    <div class="tab active" onclick="setRetentionTab('cloud', this)">Cloud API</div>
+  </div>
+  <div class="scroll-container" id="retention-scroll">
+    <div class="demo-banner" id="retention-demo" style="display:none">
+      <div class="icon">⚠️</div>
+      <div class="content"><h3>Демо-режим</h3><p>Данные примерные</p></div>
+    </div>
+    <div id="ret-cards" style="display:none">
+      <div class="empty-state">
+        <div class="icon">💳</div>
+        <h3>Карты лояльности не найдены</h3>
+        <p>У вас не подключён модуль лояльности iikoCard, или нет данных по картам за последние 3 месяца.</p>
+      </div>
+    </div>
+    <div id="ret-cloud">
+      <div style="font-size:13px;color:var(--text-secondary);padding:16px 0 12px;line-height:1.5;">
+        Возвращаемость клиентов доставки по номеру телефона. Данные из iiko Cloud API.
+      </div>
+      <div class="metrics-row" style="margin-top:0;">
+        <div class="card">
+          <div class="metric-label">👤 Клиентов</div>
+          <div class="metric-value" style="font-size:28px;" id="ret-clients">0</div>
+        </div>
+        <div class="card">
+          <div class="metric-label">🛒 Заказов</div>
+          <div class="metric-value" style="font-size:28px;" id="ret-orders">0</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:16px;">Когортный анализ</div>
+        <div class="table-container">
+          <table class="cohort-table" id="cohort-table">
+            <thead><tr><th>Когорта</th><th>Размер</th><th>Янв</th><th>Фев</th><th>Мар</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px;">Частота визитов</div>
+        <div class="freq-row" id="freq-row"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Comparison Screen -->
+<div class="screen" id="screen-comparison">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Год к году</h1>
+        <div class="date" id="comp-years"></div>
+      </div>
+    </div>
+  </div>
+  <div class="date-filters" style="gap:6px">
+    <div class="date-chip active" onclick="setCompView('weeks', this)">По неделям</div>
+    <div class="date-chip" onclick="setCompView('months', this)">По месяцам</div>
+  </div>
+  <div class="scroll-container" id="comp-scroll">
+    <div style="margin-top:16px">
+      <!-- Фильтр каналов -->
+      <div id="comp-channels" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px"></div>
+
+      <!-- Метрики итого -->
+      <div class="summary-row" style="margin-bottom:12px">
+        <div class="summary-card">
+          <div class="summary-label" id="comp-cur-label">2026</div>
+          <div class="summary-value" id="comp-cur-rev" style="font-size:18px">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label" id="comp-prev-label">2025</div>
+          <div class="summary-value" id="comp-prev-rev" style="font-size:18px">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Рост</div>
+          <div class="summary-value" id="comp-growth" style="font-size:18px">—</div>
+        </div>
+      </div>
+
+      <!-- График -->
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:12px">Выручка</div>
+        <canvas id="comp-chart" height="200"></canvas>
+      </div>
+
+      <!-- Ср. чек -->
+      <div class="card" style="margin-bottom:12px">
+        <div class="card-title" style="margin-bottom:12px">Средний чек</div>
+        <canvas id="comp-check-chart" height="180"></canvas>
+      </div>
+
+      <!-- Таблица по периодам -->
+      <div class="card">
+        <div class="card-title" style="margin-bottom:12px" id="comp-table-title">По неделям</div>
+        <div class="table-container">
+          <table class="data-table" id="comp-table">
+            <thead>
+              <tr>
+                <th>Период</th>
+                <th id="comp-th-cur">2026</th>
+                <th id="comp-th-prev">2025</th>
+                <th>Δ%</th>
+              </tr>
+            </thead>
+            <tbody id="comp-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Navbar -->
+<div class="navbar" id="navbar">
+  <div class="nav-item active" onclick="switchTab('main')">
+    <svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+    <span>Главная</span>
+  </div>
+  <div class="nav-item" onclick="switchTab('sales')">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg>
+    <span>Продажи</span>
+  </div>
+  <div class="nav-item" onclick="switchTab('staff')">
+    <svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+    <span>Персонал</span>
+  </div>
+  <div class="nav-item" onclick="switchTab('expenses')">
+    <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+    <span>Расходы</span>
+  </div>
+  <div class="nav-item" onclick="switchTab('comparison')">
+    <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
+    <span>Год/год</span>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settings-modal" onclick="closeSettings(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">Настройки</div>
+    <div class="modal-item" onclick="addRestaurant()">+ Добавить ресторан</div>
+    <div class="modal-item danger" onclick="logout()">Выйти</div>
+    <div class="modal-item" onclick="closeSettingsDirect()">Закрыть</div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+</div>
+
+<script>
+// ============ STATE ============
+const state = {
+  currentScreen: 'onboarding',
+  currentTab: 'main',
+  restaurant: null,
+  restaurants: [],
+  period: 'today',
+  salesPeriod: 'today',
+  salesTab: 'general',
+  expenseTab: 'foodcost',
+  retentionTab: 'cloud',
+  demoMode: true,
+  staffData: [],
+  staffSort: { field: 'revenue', dir: 'desc' },
+  charts: {},
+  aiHistory: [],
+  scrollPositions: {},
+  onboardingComplete: false,
+  olapCache: {}  // кэш сырых OLAP данных по периоду
+};
+
+// ============ OLAP FRONTEND ENGINE ============
+async function fetchOlap(period) {
+  if (state.demoMode) return null;
+  const orgId = state.restaurant?.organization_id;
+  if (!orgId) return null;
+  if (state.olapCache[period]) return state.olapCache[period];
+  try {
+    const res = await apiGet(`/api/olap/${orgId}?period=${period}`);
+    if (res.demo || !res.data) return null;
+    state.olapCache[period] = res.data;
+    return res.data;
+  } catch(e) { return null; }
+}
+
+function olapGroup(rows, keyFields, valueFields) {
+  const map = {};
+  for (const row of rows) {
+    const key = keyFields.map(f => row[f] || '').join('|');
+    if (!map[key]) {
+      map[key] = {};
+      keyFields.forEach(f => map[key][f] = row[f] || '');
+      valueFields.forEach(f => map[key][f] = 0);
+    }
+    valueFields.forEach(f => map[key][f] += Number(row[f] || 0));
+  }
+  return Object.values(map);
+}
+
+function olapSum(rows, field) {
+  return rows.reduce((s, r) => s + Number(r[field] || 0), 0);
+}
+
+const API_BASE = 'https://3473-178-88-47-23.ngrok-free.app';
+c
+// ============ UTILS: XSS PROTECTION ============
+function escHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+}
+
+// ============ INIT ============
+document.addEventListener('DOMContentLoaded', () => {
+  setTimeout(() => {
+    document.getElementById('splash').style.opacity = '0';
+    setTimeout(() => {
+      document.getElementById('splash').style.display = 'none';
+      initApp();
+    }, 500);
+  }, 1500);
+});
+
+function initApp() {
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.expand(); tg.ready(); }
+  updateDate();
+  document.getElementById('navbar').classList.remove('visible');
+  checkExistingUser();
+}
+
+async function checkExistingUser() {
+  try {
+    const data = await apiGet('/api/restaurants');
+    if (data && Array.isArray(data) && data.length > 0 && data[0].organization_id !== 'demo-org-1') {
+      state.onboardingComplete = true;
+      state.restaurants = data;
+      renderRestSelector();
+      const lastId = localStorage.getItem('last_restaurant_id');
+      const def = (lastId && data.find(r => r.organization_id === lastId)) || data[0];
+      selectRestaurant(def);
+      document.getElementById('screen-onboarding').classList.remove('active');
+      document.getElementById('navbar').classList.add('visible');
+      switchTab('main');
+      startDataRefresh();
+    }
+  } catch(e) {
+    // Остаёмся на онбординге
+  }
+}
+
+function updateDate() {
+  const now = new Date();
+  const d = now.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  document.querySelectorAll('#current-date, #sales-date').forEach(el => { el.textContent = d; });
+}
+
+// ============ API ============
+async function apiGet(path) {
+  const headers = {};
+  const tg = window.Telegram?.WebApp;
+  if (tg?.initData) headers['X-Telegram-Init-Data'] = tg.initData;
+  const resp = await fetch(API_BASE + path, { headers });
+  return resp.json();
+}
+
+async function apiPost(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  const tg = window.Telegram?.WebApp;
+  if (tg?.initData) headers['X-Telegram-Init-Data'] = tg.initData;
+  const resp = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify(body) });
+  return resp.json();
+}
+
+// ============ NAVIGATION ============
+function switchTab(tab) {
+  // БЛОКИРОВКА: если онбординг не пройден, нельзя переключать вкладки
+  if (!state.onboardingComplete) {
+    showToast('Сначала пройдите онбординг');
+    return;
+  }
+
+  haptic();
+  state.scrollPositions[state.currentTab] = document.querySelector('.screen.active .scroll-container')?.scrollTop || 0;
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+
+  document.getElementById('screen-' + tab).classList.add('active');
+  const navItems = document.querySelectorAll('.nav-item');
+  const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4 };
+  if (navItems[tabMap[tab]]) navItems[tabMap[tab]].classList.add('active');
+
+  state.currentTab = tab;
+  state.currentScreen = tab;
+
+  setTimeout(() => {
+    const sc = document.querySelector('.screen.active .scroll-container');
+    if (sc && state.scrollPositions[tab]) sc.scrollTop = state.scrollPositions[tab];
+  }, 50);
+
+  if (tab === 'main') startStoplistRefresh(); else stopStoplistRefresh();
+  if (tab === 'sales') loadSales();
+  if (tab === 'staff') loadStaff();
+  if (tab === 'expenses') loadExpenses();
+  if (tab === 'comparison') loadComparison();
+}
+
+function showScreen(name) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + name).classList.add('active');
+  state.currentScreen = name;
+}
+
+// ============ ONBOARDING ============
+function nextOnboarding(step) {
+  haptic();
+  document.querySelectorAll('#screen-onboarding > div').forEach(d => d.style.display = 'none');
+  document.getElementById('onboarding-step' + step).style.display = 'flex';
+}
+
+function toggleIikoWebFields() {
+  const el = document.getElementById('iikweb-fields');
+  const isHidden = !el.style.display || el.style.display === 'none';
+  el.style.display = isHidden ? 'flex' : 'none';
+}
+
+async function validateApiKey() {
+  const login = document.getElementById('api-login-input').value.trim();
+  if (!login) return showToast('Введите API Login');
+  const iikoServer = document.getElementById('iiko-server-input')?.value.trim() || null;
+  const apiPassword = document.getElementById('api-password-input')?.value.trim() || null;
+  const btn = document.querySelector('#onboarding-step2 .btn-black');
+  btn.textContent = 'Проверяем...';
+  btn.disabled = true;
+  try {
+    const payload = { api_login: login };
+    if (iikoServer) payload.iiko_server = iikoServer;
+    if (apiPassword) payload.api_password = apiPassword;
+    const resp = await apiPost('/api/setup/validate', payload);
+    if (!resp || !resp.valid) {
+      const msg = resp?.error || 'Неверный API Login — проверьте ключ';
+      showToast(msg.length > 80 ? msg.slice(0, 80) + '...' : msg);
+      btn.textContent = 'Подключить →';
+      btn.disabled = false;
+      return;
+    }
+    window.tempOrgs = resp.organizations;
+    window.tempLogin = login;
+    window.tempIikoServer = iikoServer;
+    window.tempApiPassword = apiPassword;
+
+    if (iikoServer) {
+      // iikoWeb — все филиалы сохраняем автоматически
+      btn.textContent = 'Сохраняем...';
+      await saveOrg();
+      return;
+    }
+
+    // Облако — показываем список для выбора
+    const list = document.getElementById('org-list');
+    window.selectedOrgs = new Set();
+    list.innerHTML = resp.organizations.map((o, i) => `
+      <div class="org-item" onclick="selectOrg(${i})" data-idx="${i}">
+        <div class="org-icon" id="org-check-${i}">🍽️</div>
+        <div><div style="font-weight:600;color:var(--text)">${escHtml(o.name)}</div><div style="font-size:12px;color:var(--text-secondary)">${escHtml(o.id)}</div></div>
+      </div>
+    `).join('');
+    nextOnboarding(3);
+  } catch(e) {
+    showToast('Ошибка подключения к серверу');
+    console.error('validateApiKey error:', e);
+  } finally {
+    btn.textContent = 'Подключить →';
+    btn.disabled = false;
+  }
+}
+
+function selectOrg(idx) {
+  if (!window.selectedOrgs) window.selectedOrgs = new Set();
+  const item = document.querySelector(`.org-item[data-idx="${idx}"]`);
+  const icon = document.getElementById(`org-check-${idx}`);
+  if (window.selectedOrgs.has(idx)) {
+    window.selectedOrgs.delete(idx);
+    item.classList.remove('selected');
+    if (icon) icon.textContent = '🍽️';
+  } else {
+    window.selectedOrgs.add(idx);
+    item.classList.add('selected');
+    if (icon) icon.textContent = '✅';
+  }
+  document.getElementById('btn-select-org').disabled = window.selectedOrgs.size === 0;
+}
+
+async function saveOrg() {
+  try {
+    // Для iikoWeb — сохраняем все филиалы сразу
+    // Для облака — только выбранные
+    const orgsToSave = window.tempIikoServer
+      ? window.tempOrgs  // все филиалы iikoWeb
+      : [...(window.selectedOrgs || [])].map(i => window.tempOrgs[i]);
+
+    if (!orgsToSave || orgsToSave.length === 0) return;
+
+    for (const org of orgsToSave) {
+      const payload = { api_login: window.tempLogin, organization_id: org.id, organization_name: org.name };
+      if (window.tempIikoServer) payload.iiko_server = window.tempIikoServer;
+      if (window.tempApiPassword) payload.api_password = window.tempApiPassword;
+      await apiPost('/api/setup/save', payload);
+    }
+  } catch(e) {
+    console.error('saveOrg error:', e);
+  }
+  nextOnboarding(4);
+}
+
+function finishOnboarding() {
+  state.onboardingComplete = true;
+  loadRestaurants().then(() => startDataRefresh());
+}
+
+async function startDemo() {
+  try {
+    await apiPost('/api/demo', {});
+    state.onboardingComplete = true;
+    state.demoMode = true;
+    // Скрываем онбординг и показываем навбар
+    document.getElementById('screen-onboarding').classList.remove('active');
+    document.getElementById('navbar').classList.add('visible');
+    // Загружаем демо-ресторан
+    state.restaurant = {
+      id: 1,
+      organization_id: 'demo-org-1',
+      organization_name: 'Демо Ресторан',
+      api_login: 'demo'
+    };
+    state.restaurants = [state.restaurant];
+    renderRestSelector();
+    document.getElementById('rest-name').textContent = 'Демо Ресторан';
+    // Показываем демо-баннеры
+    ['demo-banner', 'sales-demo', 'staff-demo', 'expenses-demo', 'retention-demo'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'flex';
+    });
+    // Переходим на главную
+    switchTab('main');
+    loadDashboard();
+  } catch(e) {
+    // Если API недоступен, всё равно включаем демо локально
+    state.onboardingComplete = true;
+    state.demoMode = true;
+    document.getElementById('screen-onboarding').classList.remove('active');
+    document.getElementById('navbar').classList.add('visible');
+    state.restaurant = {
+      id: 1,
+      organization_id: 'demo-org-1',
+      organization_name: 'Демо Ресторан',
+      api_login: 'demo'
+    };
+    state.restaurants = [state.restaurant];
+    renderRestSelector();
+    document.getElementById('rest-name').textContent = 'Демо Ресторан';
+    ['demo-banner', 'sales-demo', 'staff-demo', 'expenses-demo', 'retention-demo'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'flex';
+    });
+    switchTab('main');
+    loadDashboard();
+  }
+}
+
+// ============ RESTAURANTS ============
+async function loadRestaurants() {
+  try {
+    const data = await apiGet('/api/restaurants');
+    state.restaurants = data;
+    renderRestSelector();
+    if (data.length > 0) {
+      selectRestaurant(data[0]);
+      document.getElementById('navbar').classList.add('visible');
+      switchTab('main');
+    }
+  } catch (e) {
+    // Если API недоступен, включаем демо
+    startDemo();
+  }
+}
+
+function renderRestSelector() {
+  const el = document.getElementById('rest-selector');
+  if (!el) return;
+  el.innerHTML = '';
+  el.innerHTML = state.restaurants.map(r => `
+    <div class="rest-chip ${state.restaurant?.id === r.id ? 'active' : ''}" onclick='selectRestaurant(${JSON.stringify(r)})'>
+      ${escHtml(r.organization_name)}
+    </div>
+  `).join('');
+}
+
+function showIikoError(msg) {
+  const banner = document.getElementById('iiko-error-banner');
+  const text = document.getElementById('iiko-error-text');
+  if (banner && text) {
+    text.textContent = msg || 'Не удалось получить данные из iiko.';
+    banner.style.display = 'flex';
+  }
+}
+
+function hideIikoError() {
+  const banner = document.getElementById('iiko-error-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+function selectRestaurant(rest) {
+  state.restaurant = rest;
+  state.olapCache = {};
+  localStorage.setItem('last_restaurant_id', rest.organization_id);
+  state.demoMode = rest.api_login === 'demo' || rest.organization_id === 'demo-org-1';
+  renderRestSelector();
+  const nameEl = document.getElementById('rest-name');
+  if (nameEl) nameEl.textContent = rest.organization_name;
+  ['demo-banner', 'sales-demo', 'staff-demo', 'expenses-demo', 'retention-demo'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = state.demoMode ? 'flex' : 'none';
+  });
+  hideIikoError();
+  loadDashboard();
+  // Перезагружаем текущую активную вкладку
+  const t = state.currentTab;
+  if (t === 'sales') loadSales();
+  if (t === 'staff') loadStaff();
+  if (t === 'expenses') loadExpenses();
+  if (t === 'comparison') loadComparison();
+}
+
+// ============ DASHBOARD ============
+
+async function loadDashboard() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+  startStoplistRefresh();
+
+  // Сначала пробуем OLAP (один запрос)
+  const rows = await fetchOlap(state.period);
+  if (rows && rows.length > 0) {
+    const revenue = olapSum(rows, 'DishAmountSum');
+    const guests  = olapSum(rows, 'GuestNum');
+    const orders  = olapSum(rows, 'OrdersCount');
+    const avgCheck = guests > 0 ? revenue / guests : 0;
+    hideIikoError();
+    animateValue('m-revenue', revenue, ' ₸');
+    animateValue('m-check', avgCheck, ' ₸');
+    animateValue('m-guests', guests, '');
+    document.getElementById('m-open').textContent = orders;
+    document.getElementById('m-yesterday').textContent = '—';
+    document.getElementById('m-forecast').textContent = formatMoney(revenue * 1.4);
+    document.getElementById('m-revenue-change').innerHTML = '';
+    document.getElementById('m-check-change').innerHTML = '';
+    document.getElementById('m-guests-change').innerHTML = '';
+    // График всегда за 7 дней
+    const weekRows = state.olapCache['week'] || rows;
+    const byDate = olapGroup(weekRows, ['OpenDate.Typed'], ['DishAmountSum']);
+    byDate.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
+    if (byDate.length > 0) {
+      renderRevenueChart({
+        labels: byDate.map(r => r['OpenDate.Typed']?.slice(5) || ''),
+        data: byDate.map(r => r['DishAmountSum'])
+      });
+    }
+    // Загрузить неделю для графика если ещё нет
+    if (!state.olapCache['week']) {
+      fetchOlap('week').then(wRows => {
+        if (wRows && wRows.length > 0) {
+          const wd = olapGroup(wRows, ['OpenDate.Typed'], ['DishAmountSum']);
+          wd.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
+          renderRevenueChart({ labels: wd.map(r => r['OpenDate.Typed']?.slice(5)||''), data: wd.map(r => r['DishAmountSum']) });
+        }
+      });
+    }
+    return;
+  }
+
+  // Фолбек на старый endpoint (демо или iikoWeb без OLAP)
+  try {
+    const data = await apiGet(`/api/dashboard/${orgId}?period=${state.period}`);
+    hideIikoError();
+    animateValue('m-revenue', data.revenue_today, ' ₸');
+    animateValue('m-check', data.avg_check, ' ₸');
+    animateValue('m-guests', data.guests, '');
+    document.getElementById('m-open').textContent = data.open_orders;
+    document.getElementById('m-yesterday').textContent = formatMoney(data.revenue_yesterday);
+    document.getElementById('m-forecast').textContent = formatMoney(data.forecast);
+    const revChange = document.getElementById('m-revenue-change');
+    const chChange = document.getElementById('m-check-change');
+    const gChange = document.getElementById('m-guests-change');
+    revChange.innerHTML = `↑ +${data.revenue_change}% к вчера`;
+    revChange.className = 'metric-change ' + (data.revenue_change >= 0 ? 'up' : 'down');
+    chChange.innerHTML = `↑ +${data.avg_check_change}% к вчера`;
+    gChange.innerHTML = `↑ +${data.guests_change}% к вчера`;
+    renderRevenueChart(data.chart_7days);
+  } catch(e) { console.error(e); }
+}
+
+function setPeriod(p, el) {
+  haptic();
+  state.period = p;
+  delete state.olapCache[p];  // сброс кэша для этого периода
+  document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadDashboard();
+}
+
+function renderRevenueChart(chartData) {
+  const ctx = document.getElementById('chart-revenue').getContext('2d');
+  if (state.charts.revenue) state.charts.revenue.destroy();
+  state.charts.revenue = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: chartData.labels,
+      datasets: [{
+        data: chartData.data,
+        backgroundColor: chartData.labels.map((_, i) => i === 5 ? '#333333' : '#5B9CF6'),
+        borderRadius: 6,
+        barThickness: 28
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: {
+        backgroundColor: '#1a1a1a', titleColor: '#f0ece4', bodyColor: '#5B9CF6',
+        borderColor: '#2a2a2a', borderWidth: 1, padding: 12, displayColors: false,
+        callbacks: {
+          title: (items) => items[0].label,
+          label: (item) => 'Выручка: ' + formatMoney(item.raw)
+        }
+      }},
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { callback: v => (v/1000) + 'к', color: '#6a6a6a', font: { size: 11 } },
+          grid: { color: '#1e1e1e' }, border: { display: false }
+        },
+        x: {
+          ticks: { color: '#6a6a6a', font: { size: 11 } },
+          grid: { display: false }, border: { display: false }
+        }
+      }
+    }
+  });
+}
+
+// ============ SALES ============
+async function loadSales() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+
+  const rows = await fetchOlap(state.salesPeriod);
+
+  // Каналы и персонал — через отдельный backend (точные данные по заказам)
+  apiGet(`/api/sales/${orgId}?period=${state.salesPeriod}`).then(data => {
+    if (!data.channels) return;
+    const tbody = document.querySelector('#channels-table tbody');
+    tbody.innerHTML = data.channels.map(c => `
+      <tr>
+        <td class="name">${escHtml(c.name)}</td>
+        <td class="num">${formatMoney(c.revenue)}</td>
+        <td class="num">${c.guests}</td>
+        <td class="num">${formatMoney(c.avg_check)}</td>
+      </tr>
+    `).join('');
+  }).catch(console.error);
+
+  if (rows && rows.length > 0) {
+
+    // Топ блюда
+    const dishes = olapGroup(rows, ['DishName'], ['DishAmountSum', 'DishCount'])
+      .filter(r => r.DishName)
+      .sort((a, b) => b.DishAmountSum - a.DishAmountSum)
+      .slice(0, 10);
+    state.salesData = { channels: [], top_dishes: dishes.map(d => ({
+      name: d.DishName, revenue: d.DishAmountSum, count: Math.round(d.DishCount)
+    })), categories: [] };
+    const maxRev = Math.max(...dishes.map(d => d.DishAmountSum), 1);
+    document.getElementById('top-dishes-chart').innerHTML = dishes.map(d => `
+      <div class="hbar-item">
+        <div class="hbar-label">${escHtml(d.DishName)}</div>
+        <div class="hbar-track">
+          <div class="hbar-fill" style="width:${(d.DishAmountSum/maxRev*100).toFixed(1)}%"></div>
+          <div class="hbar-value">${(d.DishAmountSum/1000).toFixed(0)}к</div>
+        </div>
+      </div>
+    `).join('');
+
+    // Категории
+    const COLORS = ["#4A90E2","#34C759","#FF9500","#AF52DE","#FF2D55","#5AC8FA","#FFD60A","#FF3B30"];
+    const cats = olapGroup(rows, ['ProductCategory.Name'], ['DishAmountSum'])
+      .filter(r => r['ProductCategory.Name'])
+      .sort((a, b) => b.DishAmountSum - a.DishAmountSum);
+    const totalRev = olapSum(cats, 'DishAmountSum') || 1;
+    const categories = cats.map((c, i) => ({
+      name: c['ProductCategory.Name'],
+      value: Math.round(c.DishAmountSum / totalRev * 100 * 10) / 10,
+      color: COLORS[i % COLORS.length]
+    }));
+    state.salesData.categories = categories;
+    renderCategoriesChart(categories);
+
+    // Обновляем статистику Корзина и Отмены
+    const totalOrders = Math.round(olapSum(rows, 'OrdersCount'));
+    const totalItems = Math.round(olapSum(rows, 'DishCount'));
+    const uniqueDishes = new Set(rows.map(r => r.DishName).filter(Boolean)).size;
+    const el = (id) => document.getElementById(id);
+    if (el('cart-orders')) el('cart-orders').textContent = totalOrders.toLocaleString('ru-RU');
+    if (el('cart-items')) el('cart-items').textContent = totalItems.toLocaleString('ru-RU');
+    if (el('cart-menu')) el('cart-menu').textContent = uniqueDishes;
+    // метрики отмен обновляются только через renderCancels()
+    return;
+  }
+
+  // Фолбек
+  try {
+    const data = await apiGet(`/api/sales/${orgId}?period=${state.salesPeriod}`);
+    state.salesData = data;
+    const tbody = document.querySelector('#channels-table tbody');
+    tbody.innerHTML = data.channels.map(c => `
+      <tr>
+        <td class="name">${escHtml(c.name)}</td>
+        <td class="num">${formatMoney(c.revenue)}</td>
+        <td class="num">${c.guests}</td>
+        <td class="num">${formatMoney(c.avg_check)}</td>
+      </tr>
+    `).join('');
+    const maxRev = Math.max(...data.top_dishes.map(d => d.revenue), 1);
+    document.getElementById('top-dishes-chart').innerHTML = data.top_dishes.map(d => `
+      <div class="hbar-item">
+        <div class="hbar-label">${escHtml(d.name)}</div>
+        <div class="hbar-track">
+          <div class="hbar-fill" style="width:${(d.revenue/maxRev*100).toFixed(1)}%"></div>
+          <div class="hbar-value">${(d.revenue/1000).toFixed(0)}к</div>
+        </div>
+      </div>
+    `).join('');
+    renderCategoriesChart(data.categories);
+  } catch(e) { console.error(e); }
+}
+
+function setSalesPeriod(p, el) {
+  haptic();
+  state.salesPeriod = p;
+  delete state.olapCache[p];
+  document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadSales();
+  // Обновляем активную подвкладку
+  if (state.salesTab === 'cancels') renderCancels().catch(console.error);
+  if (state.salesTab === 'cart') renderCart().catch(console.error);
+}
+
+async function setSalesTab(tab, el) {
+  haptic();
+  state.salesTab = tab;
+  document.querySelectorAll('#sales-tabs .tab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  ['general', 'engineering', 'abc', 'cancels', 'cart'].forEach(t => {
+    document.getElementById('sales-' + t).style.display = t === tab ? 'block' : 'none';
+  });
+  // Если salesData ещё не загружен — ждём
+  if ((tab === 'engineering' || tab === 'abc') && (!state.salesData?.top_dishes?.length)) {
+    await loadSales();
+  }
+  if (tab === 'engineering') renderEngineering();
+  if (tab === 'abc') renderABC();
+  if (tab === 'cancels') renderCancels().catch(console.error);
+  if (tab === 'cart') renderCart().catch(console.error);
+}
+
+function renderCategoriesChart(cats) {
+  const ctx = document.getElementById('chart-categories').getContext('2d');
+  if (state.charts.categories) state.charts.categories.destroy();
+  state.charts.categories = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: cats.map(c => c.name),
+      datasets: [{
+        data: cats.map(c => c.value),
+        backgroundColor: cats.map(c => c.color),
+        borderWidth: 0, borderColor: 'transparent', hoverOffset: 4
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '62%',
+      plugins: { legend: { display: false } }
+    }
+  });
+  document.getElementById('cat-legend').innerHTML = cats.map(c => `
+    <div class="legend-item"><div class="legend-dot" style="background:${c.color}"></div>${c.name}</div>
+  `).join('');
+}
+
+// ============ SALES TABS RENDER ============
+const ENG_MARGIN = {
+  "Стейк Рибай": 42, "Паста с морепродуктами": 68, "Пицца 4 сыра": 71,
+  "Лосось гриль": 55, "Стейк Мачете": 38, "Тёплый салат с говядиной": 62,
+  "Вино Prosecco": 75, "Coca-Cola 0.25": 80, "Свежевыжатый апельсиновый": 60,
+  "Доп. пармезан": 28
+};
+const ENG_EMOJI = { stars: '⭐', horses: '🐴', puzzles: '❓', dogs: '🐶' };
+
+function renderEngineering() {
+  const dishes = (state.salesData?.top_dishes || []).map(d => ({
+    ...d, margin: ENG_MARGIN[d.name] ?? 50
+  }));
+  const hasRealMargin = dishes.some(d => ENG_MARGIN[d.name] !== undefined);
+  const engNote = document.getElementById('eng-note');
+  if (engNote) engNote.style.display = hasRealMargin ? 'none' : 'block';
+  const revSorted = [...dishes].sort((a, b) => a.revenue - b.revenue);
+  const medRev = revSorted[Math.floor(revSorted.length / 2)]?.revenue || 0;
+  const groups = { stars: [], horses: [], puzzles: [], dogs: [] };
+
+  if (!hasRealMargin) {
+    // Нет данных о марже — делим только по выручке
+    dishes.forEach(d => {
+      d.type = d.revenue >= medRev ? 'stars' : 'dogs';
+      groups[d.type].push(d);
+    });
+    document.querySelector('.quad-card.stars .quad-sub').textContent = 'Топ по выручке';
+    document.querySelector('.quad-card.horses .quad-sub').textContent = '—';
+    document.querySelector('.quad-card.puzzles .quad-sub').textContent = '—';
+    document.querySelector('.quad-card.dogs .quad-sub').textContent = 'Аутсайдеры по выручке';
+  } else {
+    document.querySelector('.quad-card.stars .quad-sub').textContent = 'Высокая выручка + высокая маржа';
+    document.querySelector('.quad-card.horses .quad-sub').textContent = 'Высокая выручка + низкая маржа';
+    document.querySelector('.quad-card.puzzles .quad-sub').textContent = 'Низкая выручка + высокая маржа';
+    document.querySelector('.quad-card.dogs .quad-sub').textContent = 'Низкая выручка + низкая маржа';
+    const marRanked = [...dishes].sort((a, b) => a.margin - b.margin);
+    const highMarginSet = new Set(marRanked.slice(Math.ceil(marRanked.length / 2)).map(d => d.name));
+    dishes.forEach(d => {
+      const highMar = highMarginSet.has(d.name);
+      const key = d.revenue >= medRev
+        ? (highMar ? 'stars' : 'horses')
+        : (highMar ? 'puzzles' : 'dogs');
+      d.type = key;
+      groups[key].push(d);
+    });
+  }
+  ['stars', 'horses', 'puzzles', 'dogs'].forEach(g => {
+    document.getElementById('eng-' + g).innerHTML = groups[g].length
+      ? groups[g].map(d => `<div class="quad-item">${d.name}</div>`).join('')
+      : '<div style="font-size:11px;opacity:0.35;padding-top:4px;">—</div>';
+  });
+  document.querySelector('#eng-table tbody').innerHTML = [...dishes]
+    .sort((a, b) => b.revenue - a.revenue)
+    .map(d => `<tr>
+      <td class="name" style="white-space:normal;font-size:13px;max-width:120px;">${d.name}</td>
+      <td class="num">${(d.revenue/1000).toFixed(0)}к</td>
+      <td class="num">${d.margin}%</td>
+      <td class="num">${d.count}</td>
+      <td>${ENG_EMOJI[d.type]}</td>
+    </tr>`).join('');
+}
+
+let abcMode = 'revenue';
+
+function setAbcMode(mode, el) {
+  abcMode = mode;
+  document.querySelectorAll('.abc-mode-btn').forEach(b => b.classList.remove('active'));
+  if (el) el.classList.add('active');
+  renderABC();
+}
+
+function renderABC() {
+  const dishes = [...(state.salesData?.top_dishes || [])];
+  dishes.sort((a, b) => (abcMode === 'revenue' ? b.revenue - a.revenue : b.count - a.count));
+  const total = dishes.reduce((s, d) => s + (abcMode === 'revenue' ? d.revenue : d.count), 0);
+  let cum = 0, cA = 0, cB = 0, cC = 0;
+  const rows = dishes.map(d => {
+    const val = abcMode === 'revenue' ? d.revenue : d.count;
+    const pct = total ? val / total * 100 : 0;
+    cum += pct;
+    const abc = cum <= 80 ? 'A' : cum <= 95 ? 'B' : 'C';
+    if (abc === 'A') cA++; else if (abc === 'B') cB++; else cC++;
+    const display = abcMode === 'revenue' ? (d.revenue / 1000).toFixed(0) + 'к' : d.count;
+    return `<tr>
+      <td class="name" style="white-space:normal;font-size:13px;max-width:130px;">${d.name}</td>
+      <td class="num">${display}</td>
+      <td class="num">${pct.toFixed(1)}%</td>
+      <td class="num">${cum.toFixed(1)}%</td>
+      <td><span class="abc-badge abc-${abc.toLowerCase()}">${abc}</span></td>
+    </tr>`;
+  });
+  document.querySelector('#abc-table tbody').innerHTML = rows.join('');
+  document.getElementById('abc-count-a').textContent = cA;
+  document.getElementById('abc-count-b').textContent = cB;
+  document.getElementById('abc-count-c').textContent = cC;
+}
+
+async function renderCancels() {
+  const orgId = state.restaurant?.organization_id;
+  const el = (id) => document.getElementById(id);
+
+  if (!orgId || state.demoMode) {
+    document.querySelector('#cancels-table tbody').innerHTML =
+      '<tr><td colspan="4" style="text-align:center;color:var(--text-secondary)">Нет данных</td></tr>';
+    return;
+  }
+  try {
+    const data = await apiGet(`/api/cancels/${orgId}?period=${state.salesPeriod}`);
+    const rows = data.items || [];
+    const totalAmount = data.total_amount || 0;
+    const totalOrders = data.total_orders || 0;
+
+    // Обновляем метрики вверху
+    if (el('cancels-returns')) el('cancels-returns').textContent = formatMoney(totalAmount);
+    if (el('cancels-count')) el('cancels-count').textContent = totalOrders.toLocaleString('ru-RU');
+
+    // % от выручки из OLAP
+    const olapRows = state.olapCache[state.salesPeriod] || [];
+    const totalRev = olapRows.reduce((s, r) => s + (r.DishAmountSum || 0), 0);
+    const totalOrd = olapRows.reduce((s, r) => s + (r.OrdersCount || 0), 0);
+    if (el('cancels-returns-pct') && totalRev > 0)
+      el('cancels-returns-pct').textContent = (totalAmount / totalRev * 100).toFixed(2) + '% от выручки';
+    if (el('cancels-pct') && totalOrd > 0)
+      el('cancels-pct').textContent = (totalOrders / totalOrd * 100).toFixed(1) + '% от заказов';
+
+    if (!rows.length) {
+      document.querySelector('#cancels-table tbody').innerHTML =
+        '<tr><td colspan="4" style="text-align:center;color:var(--text-secondary)">Отмен нет</td></tr>';
+      return;
+    }
+
+    const revByDish = {};
+    olapRows.forEach(r => { revByDish[r.DishName] = (revByDish[r.DishName]||0) + (r.DishAmountSum||0); });
+    document.querySelector('#cancels-table tbody').innerHTML = rows.map(r => {
+      const rev = revByDish[r.name] || 0;
+      const pct = rev > 0 ? (r.amount / rev * 100).toFixed(1) : '—';
+      const style = parseFloat(pct) > 2.5 ? 'color:var(--red);font-weight:700;'
+                  : parseFloat(pct) > 1.5 ? 'color:var(--orange);font-weight:700;' : '';
+      return `<tr>
+        <td class="name" style="white-space:normal;font-size:13px;max-width:120px;">${escHtml(r.name)}</td>
+        <td class="num">${formatMoney(r.amount)}</td>
+        <td class="num">${formatMoney(rev)}</td>
+        <td class="num" style="${style}">${pct}%</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {
+    document.querySelector('#cancels-table tbody').innerHTML =
+      '<tr><td colspan="4" style="text-align:center;color:var(--text-secondary)">Нет данных</td></tr>';
+  }
+}
+
+async function renderCart() {
+  if (!state.demoMode && state.restaurant) {
+    const orgId = state.restaurant.organization_id;
+    try {
+      const data = await apiGet(`/api/companions/${orgId}?period=${state.salesPeriod}`);
+      const companions = data.companions || {};
+      const pairs = data.pairs || [];
+
+      // Компаньоны блюд
+      const dishes = Object.keys(companions);
+      if (dishes.length > 0) {
+        document.getElementById('cart-companions').innerHTML = dishes.map((dish, i) => `
+          <div class="companion-item">
+            <div class="companion-header" onclick="toggleCompanion(${i})">
+              <div class="companion-name">${escHtml(dish)}</div>
+              <div class="companion-arrow" id="carr-${i}">▶</div>
+            </div>
+            <div class="companion-body" id="cbody-${i}">
+              ${companions[dish].map(c => `<div class="companion-sub"><span>${escHtml(c.name)}</span><span>${c.count} раз</span></div>`).join('')}
+            </div>
+          </div>
+        `).join('');
+      } else {
+        document.getElementById('cart-companions').innerHTML =
+          '<div style="text-align:center;color:var(--text-secondary);padding:16px">Нет данных</div>';
+      }
+
+      // Топ пар
+      if (pairs.length > 0) {
+        document.getElementById('cart-pairs').innerHTML = pairs.map(p => `
+          <div class="pair-item">
+            <div class="pair-name">${escHtml(p.a)} + ${escHtml(p.b)}</div>
+            <div class="pair-count">${p.count} раз</div>
+          </div>
+        `).join('');
+      } else {
+        document.getElementById('cart-pairs').innerHTML =
+          '<div style="text-align:center;color:var(--text-secondary);padding:16px">Нет данных</div>';
+      }
+    } catch(e) {
+      document.getElementById('cart-companions').innerHTML =
+        '<div style="text-align:center;color:var(--text-secondary);padding:16px">Нет данных</div>';
+      document.getElementById('cart-pairs').innerHTML = '';
+    }
+    return;
+  }
+  const companions = [
+    { dish: "Стейк Рибай", top: [["Вино Prosecco", 187], ["Салат Цезарь", 143], ["Хлеб с маслом", 98]] },
+    { dish: "Лосось гриль", top: [["Свежевыжатый апельсиновый", 124], ["Спаржа гриль", 91], ["Вино Prosecco", 73]] },
+    { dish: "Пицца 4 сыра", top: [["Coca-Cola 0.25", 312], ["Чесночный соус", 198], ["Капучино", 87]] },
+    { dish: "Паста с морепродуктами", top: [["Вино Prosecco", 156], ["Хлеб с маслом", 109], ["Тирамису", 74]] },
+    { dish: "Стейк Мачете", top: [["Соус Барбекю", 201], ["Картофель фри", 167], ["Вино Prosecco", 89]] },
+  ];
+  document.getElementById('cart-companions').innerHTML = companions.map((c, i) => `
+    <div class="companion-item">
+      <div class="companion-header" onclick="toggleCompanion(${i})">
+        <div class="companion-name">${c.dish}</div>
+        <div class="companion-arrow" id="carr-${i}">▶</div>
+      </div>
+      <div class="companion-body" id="cbody-${i}">
+        ${c.top.map(([name, cnt]) => `<div class="companion-sub"><span>${name}</span><span>${cnt} раз</span></div>`).join('')}
+      </div>
+    </div>
+  `).join('');
+
+  const pairs = [
+    ["Стейк Рибай", "Вино Prosecco", 312],
+    ["Пицца 4 сыра", "Coca-Cola 0.25", 298],
+    ["Стейк Мачете", "Соус Барбекю", 267],
+    ["Паста с морепродуктами", "Вино Prosecco", 234],
+    ["Лосось гриль", "Свежевыжатый апельсиновый", 198],
+    ["Пицца 4 сыра", "Чесночный соус", 187],
+    ["Стейк Мачете", "Картофель фри", 176],
+    ["Лосось гриль", "Спаржа гриль", 154],
+    ["Паста с морепродуктами", "Хлеб с маслом", 143],
+    ["Стейк Рибай", "Салат Цезарь", 138],
+  ];
+  document.getElementById('cart-pairs').innerHTML = pairs.map(([a, b, cnt]) => `
+    <div class="pair-item">
+      <div class="pair-name">${a} + ${b}</div>
+      <div class="pair-count">${cnt} раз</div>
+    </div>
+  `).join('');
+}
+
+function toggleCompanion(i) {
+  const body = document.getElementById('cbody-' + i);
+  const arrow = document.getElementById('carr-' + i);
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  arrow.textContent = isOpen ? '▶' : '▼';
+}
+
+// ============ STAFF ============
+async function loadStaff() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+
+  try {
+    const [staffData, shiftsData] = await Promise.all([
+      apiGet(`/api/staff/${orgId}?period=week`),
+      apiGet(`/api/shifts/${orgId}`)
+    ]);
+    state.staffData = staffData.staff;
+    document.getElementById('staff-total-rev').textContent = formatMoney(staffData.total_revenue);
+    document.getElementById('staff-total-orders').textContent = staffData.orders;
+    document.getElementById('staff-total-guests').textContent = staffData.guests;
+    renderStaffTable();
+
+    // Блок "Сейчас на смене"
+    const shifts = shiftsData.staff || [];
+    document.getElementById('shifts-count').textContent = shifts.length + ' чел.';
+    document.getElementById('shifts-list').innerHTML = shifts.length
+      ? shifts.map(s => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--divider)">
+            <div>
+              <div style="font-weight:600;font-size:14px;color:var(--text)">${escHtml(s.name)}</div>
+              <div style="font-size:12px;color:var(--text-secondary)">с ${escHtml(s.since)} · ${s.orders} заказов</div>
+            </div>
+            <div style="font-weight:700;font-size:14px;color:var(--text)">${formatMoney(s.revenue)}</div>
+          </div>
+        `).join('')
+      : '<div style="color:var(--text-secondary);font-size:13px;text-align:center;padding:12px">Нет активных сотрудников сегодня</div>';
+  } catch(e) { console.error(e); }
+}
+
+function renderStaffTable() {
+  const sorted = [...state.staffData].sort((a, b) => {
+    const va = a[state.staffSort.field], vb = b[state.staffSort.field];
+    if (typeof va === 'string') return state.staffSort.dir === 'asc' ? va.localeCompare(vb) : vb.localeCompare(va);
+    return state.staffSort.dir === 'asc' ? va - vb : vb - va;
+  });
+  document.querySelector('#staff-table tbody').innerHTML = sorted.map(s => `
+    <tr>
+      <td class="name">${s.name}</td>
+      <td class="num">${formatMoney(s.revenue)}</td>
+      <td class="num">${s.orders}</td>
+      <td class="num">${s.guests}</td>
+      <td class="num">—</td>
+    </tr>
+  `).join('');
+}
+
+function sortStaff(field) {
+  haptic();
+  if (state.staffSort.field === field) {
+    state.staffSort.dir = state.staffSort.dir === 'asc' ? 'desc' : 'asc';
+  } else { state.staffSort.field = field; state.staffSort.dir = 'desc'; }
+  renderStaffTable();
+}
+
+// ============ EXPENSES ============
+async function loadExpenses() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+
+  if (state.expenseTab === 'foodcost') {
+    try {
+      const data = await apiGet(`/api/foodcost/${orgId}?period=month`);
+      if (data._iiko_error && !state.demoMode) showIikoError(data._iiko_error);
+      document.getElementById('fc-norm-pct').textContent = data.norm_pct + '%';
+      document.getElementById('fc-fact-pct').textContent = data.fact_pct + '%';
+      document.getElementById('fc-diff-pct').textContent = '+' + data.diff_pct + '%';
+      document.getElementById('fc-norm-sum').textContent = formatMoney(data.norm_sum);
+      document.getElementById('fc-fact-sum').textContent = formatMoney(data.fact_sum);
+      if (data.warning) {
+        document.getElementById('foodcost-warning').style.display = 'flex';
+        document.getElementById('foodcost-warning-text').textContent = data.warning;
+      } else { document.getElementById('foodcost-warning').style.display = 'none'; }
+      renderFcTrend(data.trend);
+      document.querySelector('#fc-dishes-table tbody').innerHTML = data.dishes.map(d => {
+        let cls = 'cost-green';
+        if (d.cost_pct > 35) cls = 'cost-red';
+        else if (d.cost_pct >= 28) cls = 'cost-orange';
+        return `<tr>
+          <td><div class="name">${d.name}</div><div style="font-size:12px;color:var(--text-secondary)">${d.category}</div></td>
+          <td class="num">${formatMoney(d.revenue)}</td>
+          <td class="num">${d.count}</td>
+          <td class="num ${cls}">${d.cost_pct.toFixed(1)}%</td>
+        </tr>`;
+      }).join('');
+    } catch(e) { console.error(e); }
+  }
+
+  if (state.expenseTab === 'expenses') {
+    try {
+      const data = await apiGet(`/api/expenses/${orgId}?period=week`);
+      state.expensesData = data.operations || [];
+      document.getElementById('exp-total').textContent = formatMoney(data.total);
+      const maxCat = Math.max(...data.categories.map(c => c.amount));
+      document.getElementById('exp-categories-chart').innerHTML = data.categories.map(c => `
+        <div class="hbar-item">
+          <div class="hbar-label">${c.name}</div>
+          <div class="hbar-track">
+            <div class="hbar-fill orange" style="width:${(c.amount/maxCat*100).toFixed(1)}%"></div>
+            <div class="hbar-value">${formatMoney(c.amount)}</div>
+          </div>
+        </div>
+      `).join('');
+      document.getElementById('exp-operations-list').innerHTML = data.operations.map(o => `
+        <div class="expense-item op-item" data-type="${o.type || 'order'}" data-id="${o.id || ''}">
+          <div class="expense-info">
+            <h4>${o.name}</h4>
+            <div class="expense-meta">${o.cat || o.category || ''} · ${o.date} · ${o.kassa || ''}</div>
+          </div>
+          <div style="display:flex;align-items:center;">
+            <div class="expense-amount">${formatMoney(o.amount)}</div>
+            <div class="delete-btn" onclick="deleteExpense('${o.id || ''}', '${o.type || 'order'}')">🗑️</div>
+          </div>
+        </div>
+      `).join('');
+    } catch(e) { console.error(e); }
+  }
+
+  if (state.expenseTab === 'invoices') {
+    try {
+      const data = await apiGet(`/api/invoices/${orgId}?period=week`);
+      document.getElementById('invoices-list').innerHTML = data.invoices.map(inv => `
+        <div class="invoice-card">
+          <div class="invoice-header">
+            <div class="invoice-id">#${inv.id}</div>
+            <div class="badge ${inv.status === 'Проведена' ? 'badge-green' : 'badge-yellow'}">${inv.status}</div>
+          </div>
+          <div class="invoice-meta">${inv.supplier} · ${inv.date} · ${inv.items} позиций</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}</div>
+            <div class="invoice-actions">
+              ${inv.status === 'Проведена'
+                ? `<button class="btn btn-orange" onclick="showToast('Распроведено')">Распровести</button>`
+                : `<button class="btn btn-green" onclick="showToast('Проведено')">Провести</button><button class="btn btn-outline">Ред.</button>`}
+            </div>
+          </div>
+        </div>
+      `).join('');
+    } catch(e) { console.error(e); }
+  }
+
+  if (state.expenseTab === 'writeoffs') {
+    try {
+      const data = await apiGet(`/api/writeoffs/${orgId}?period=week`);
+      state.writeoffsData = data.categories || [];
+      document.getElementById('wo-total').textContent = formatMoney(data.total_written);
+      document.getElementById('wo-purchases').textContent = formatMoney(data.purchases);
+      document.getElementById('wo-pct').textContent = data.loss_pct + '%';
+      document.getElementById('writeoff-categories').innerHTML = data.categories.map(c => `
+        <div class="wc-item">
+          <div class="wc-header">
+            <div class="wc-name">${c.alert ? '⚠ ' : ''}${c.name}</div>
+            <div class="wc-pct ${c.alert ? 'red' : ''}">${c.pct}%</div>
+          </div>
+          <div class="wc-meta">списано ${formatMoney(c.written)} закупки ${formatMoney(c.purchases)}</div>
+        </div>
+      `).join('');
+    } catch(e) { console.error(e); }
+  }
+}
+
+function setExpenseTab(tab, el) {
+  haptic();
+  state.expenseTab = tab;
+  document.querySelectorAll('#expense-tabs .tab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  ['foodcost', 'expenses', 'invoices', 'writeoffs'].forEach(t => {
+    document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
+  });
+  loadExpenses();
+}
+
+function renderFcTrend(trend) {
+  const ctx = document.getElementById('chart-fc-trend').getContext('2d');
+  if (state.charts.fcTrend) state.charts.fcTrend.destroy();
+  state.charts.fcTrend = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: trend.map(t => t.month),
+      datasets: [
+        {
+          label: 'Факт',
+          data: trend.map(t => t.fact),
+          backgroundColor: trend.map((t, i) => i === trend.length - 1 ? '#5B9CF6' : '#FF9500'),
+          borderRadius: 4, barThickness: 24
+        },
+        {
+          label: 'Норматив',
+          data: trend.map(t => t.norm),
+          type: 'line',
+          borderColor: '#5B9CF6', borderDash: [5, 5],
+          pointBackgroundColor: '#5B9CF6', pointRadius: 4,
+          borderWidth: 2, tension: 0, fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: {
+          beginAtZero: true,
+          ticks: { callback: v => v + '%', color: '#6a6a6a', font: { size: 11 } },
+          grid: { color: '#1e1e1e' }, border: { display: false }
+        },
+        x: {
+          ticks: { color: '#6a6a6a', font: { size: 11 } },
+          grid: { display: false }, border: { display: false }
+        }
+      }
+    }
+  });
+}
+
+// ============ RETENTION ============
+async function loadRetention() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+  try {
+    const data = await apiGet(`/api/retention/${orgId}`);
+    document.getElementById('ret-clients').textContent = data.clients.toLocaleString('ru');
+    document.getElementById('ret-orders').textContent = data.orders.toLocaleString('ru');
+    document.querySelector('#cohort-table tbody').innerHTML = data.cohorts.map(c => `
+      <tr>
+        <td>${c.name}</td><td>${c.size}</td>
+        <td>${c.jan !== null ? `<span class="cohort-badge">${c.jan}%</span>` : '<span class="cohort-na">—</span>'}</td>
+        <td>${c.feb !== null ? `<span class="cohort-badge">${c.feb}%</span>` : '<span class="cohort-na">—</span>'}</td>
+        <td>${c.mar !== null ? `<span class="cohort-badge">${c.mar}%</span>` : '<span class="cohort-na">—</span>'}</td>
+      </tr>
+    `).join('');
+    const freqLabels = ['1 виз.', '2 виз.', '3 виз.', '4 виз.', '5+ виз.'];
+    document.getElementById('freq-row').innerHTML = data.frequency.map((f, i) => `
+      <div class="freq-card"><div class="freq-num">${f}</div><div class="freq-label">${freqLabels[i]}</div></div>
+    `).join('');
+  } catch(e) { console.error(e); }
+}
+
+function setRetentionTab(tab, el) {
+  haptic();
+  state.retentionTab = tab;
+  document.querySelectorAll('#retention-tabs .tab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  document.getElementById('ret-cards').style.display = tab === 'cards' ? 'block' : 'none';
+  document.getElementById('ret-cloud').style.display = tab === 'cloud' ? 'block' : 'none';
+}
+
+// ============ AI ============
+async function sendAI() {
+  const input = document.getElementById('ai-input');
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = '';
+  addAIMessage(q, 'user');
+  haptic();
+  const context = {
+    date: new Date().toISOString().split('T')[0],
+    org_id: state.restaurant?.organization_id || 'demo',
+    revenue: document.getElementById('m-revenue').textContent,
+    guests: document.getElementById('m-guests').textContent,
+    avg_check: document.getElementById('m-check').textContent
+  };
+  try {
+    const resp = await apiPost('/api/ai/analyze', { question: q, context });
+    addAIMessage(resp.response, 'assistant');
+  } catch(e) {
+    addAIMessage('⚠️ Не удалось получить ответ. Попробуйте позже.', 'assistant');
+  }
+}
+
+function askAI(q) {
+  document.getElementById('ai-input').value = q;
+  sendAI();
+}
+
+function addAIMessage(text, role) {
+  const container = document.getElementById('ai-messages');
+  const div = document.createElement('div');
+  div.className = 'ai-msg ' + role;
+  div.innerHTML = `<div class="ai-bubble ${role}">${text}</div>`;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+// ============ STOP LIST ============
+let _stoplistTimer = null;
+
+async function loadStopList() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+  try {
+    const data = await apiGet(`/api/stoplist/${orgId}`);
+    document.getElementById('stoplist-count').textContent = data.total;
+    document.getElementById('stoplist-updated').textContent = 'Обновлено: ' + data.updated_at;
+    if (!data.items || data.items.length === 0) {
+      document.getElementById('stoplist-items').innerHTML =
+        '<div style="text-align:center;padding:16px 0;color:var(--text-secondary);font-size:14px;">✅ Все блюда в наличии</div>';
+    } else {
+      document.getElementById('stoplist-items').innerHTML = data.items.map(item => `
+        <div class="stoplist-item">
+          <div>
+            <div class="stoplist-name">${item.name}</div>
+            <div class="stoplist-cat">${item.category || ''}</div>
+          </div>
+          <div class="stoplist-badge ${item.status}">${item.status === 'stop' ? 'Стоп' : 'Мало'}</div>
+        </div>
+      `).join('');
+    }
+  } catch(e) { console.error('stoplist', e); }
+}
+
+function startStoplistRefresh() {
+  if (_stoplistTimer) clearInterval(_stoplistTimer);
+  loadStopList();
+  _stoplistTimer = setInterval(loadStopList, 30000);
+}
+
+function stopStoplistRefresh() {
+  if (_stoplistTimer) { clearInterval(_stoplistTimer); _stoplistTimer = null; }
+}
+
+// Автообновление данных каждые 60 секунд
+let _dataRefreshTimer = null;
+
+function startDataRefresh() {
+  if (_dataRefreshTimer) clearInterval(_dataRefreshTimer);
+  _dataRefreshTimer = setInterval(() => {
+    if (!state.restaurant || state.demoMode) return;
+    // Сбрасываем кэш текущего периода
+    delete state.olapCache[state.period];
+    delete state.olapCache[state.salesPeriod];
+    // Обновляем активную вкладку
+    const t = state.currentTab;
+    if (t === 'main')      loadDashboard();
+    if (t === 'sales')     loadSales();
+    if (t === 'staff')     loadStaff();
+    if (t === 'expenses')  loadExpenses();
+    if (t === 'comparison') loadComparison();
+  }, 60000);
+}
+
+function stopDataRefresh() {
+  if (_dataRefreshTimer) { clearInterval(_dataRefreshTimer); _dataRefreshTimer = null; }
+}
+
+// ============ COMPARISON (YoY) ============
+let _compData = null;
+let _compView = 'weeks';   // 'weeks' | 'months'
+let _compChannel = 'all';  // 'all' | channel name
+let _compChartRev = null;
+let _compChartCheck = null;
+
+function setCompView(view, el) {
+  _compView = view;
+  document.querySelectorAll('.date-filters .date-chip').forEach(c => {
+    if (c.onclick && c.onclick.toString().includes('setCompView')) c.classList.remove('active');
+  });
+  if (el) el.classList.add('active');
+  document.getElementById('comp-table-title').textContent = view === 'weeks' ? 'По неделям' : 'По месяцам';
+  if (_compData) renderComparison();
+}
+
+async function loadComparison() {
+  if (!state.restaurant) return;
+  const orgId = state.restaurant.organization_id;
+  try {
+    _compData = await apiGet(`/api/comparison/${orgId}`);
+    renderComparison();
+  } catch(e) { console.error(e); }
+}
+
+function renderComparison() {
+  if (!_compData) return;
+  const { weeks, months, channels, cur_year, prev_year } = _compData;
+  const data = _compView === 'weeks' ? weeks : months;
+
+  // Заголовки
+  document.getElementById('comp-years').textContent = `${prev_year} vs ${cur_year}`;
+  document.getElementById('comp-cur-label').textContent = cur_year;
+  document.getElementById('comp-prev-label').textContent = prev_year;
+  document.getElementById('comp-th-cur').textContent = cur_year;
+  document.getElementById('comp-th-prev').textContent = prev_year;
+
+  // Фильтр каналов
+  const deliveryChannels = channels.filter(ch => ch && ch !== 'Обычный заказ');
+  const allChannels = ['all', 'Обычный заказ', ...deliveryChannels];
+  document.getElementById('comp-channels').innerHTML = allChannels.map(ch => `
+    <div class="date-chip ${ch === _compChannel ? 'active' : ''}"
+         onclick="setCompChannel('${escHtml(ch)}')" style="font-size:12px">
+      ${ch === 'all' ? 'Все' : escHtml(ch)}
+    </div>
+  `).join('');
+
+  // Данные с фильтром канала
+  function getRevenue(period) {
+    if (_compChannel === 'all') return period.total_rev;
+    return (period.channels[_compChannel]?.rev || 0);
+  }
+  function getOrders(period) {
+    if (_compChannel === 'all') return period.total_orders;
+    return (period.channels[_compChannel]?.orders || 0);
+  }
+
+  // Итоги
+  const curTotal = data.current.reduce((s, p) => s + getRevenue(p), 0);
+  const prevTotal = data.previous.reduce((s, p) => s + getRevenue(p), 0);
+  const growth = prevTotal > 0 ? ((curTotal - prevTotal) / prevTotal * 100) : 0;
+  document.getElementById('comp-cur-rev').textContent = formatMoney(curTotal);
+  document.getElementById('comp-prev-rev').textContent = formatMoney(prevTotal);
+  const gEl = document.getElementById('comp-growth');
+  gEl.textContent = (growth >= 0 ? '+' : '') + growth.toFixed(1) + '%';
+  gEl.style.color = growth >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Выровниваем периоды текущего года (по номеру недели/месяца)
+  const curMap = {};
+  data.current.forEach(p => { curMap[p.key] = p; });
+  const prevMap = {};
+  data.previous.forEach(p => {
+    // Сдвигаем ключ прошлого года на текущий для выравнивания
+    const newKey = p.key.replace(String(prev_year), String(cur_year));
+    prevMap[newKey] = p;
+  });
+  const allKeys = [...new Set([...Object.keys(curMap), ...Object.keys(prevMap)])].sort();
+
+  const labels = allKeys.map(k => curMap[k]?.label || prevMap[k]?.label || k);
+  const curRevs  = allKeys.map(k => getRevenue(curMap[k]  || {total_rev:0,channels:{}}));
+  const prevRevs = allKeys.map(k => getRevenue(prevMap[k] || {total_rev:0,channels:{}}));
+  const curChecks  = allKeys.map((k,i) => {
+    const o = getOrders(curMap[k]  || {total_orders:0,channels:{}});
+    return o > 0 ? curRevs[i]  / o : 0;
+  });
+  const prevChecks = allKeys.map((k,i) => {
+    const o = getOrders(prevMap[k] || {total_orders:0,channels:{}});
+    return o > 0 ? prevRevs[i] / o : 0;
+  });
+
+  // График выручки
+  const ctxRev = document.getElementById('comp-chart').getContext('2d');
+  if (_compChartRev) _compChartRev.destroy();
+  _compChartRev = new Chart(ctxRev, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: String(cur_year),  data: curRevs,  borderColor: '#5B9CF6', backgroundColor: 'rgba(91,156,246,0.1)',
+          tension: 0.3, fill: true, pointRadius: 3 },
+        { label: String(prev_year), data: prevRevs, borderColor: '#FF9500', backgroundColor: 'rgba(255,149,0,0.08)',
+          tension: 0.3, fill: true, pointRadius: 3, borderDash: [4,3] }
+      ]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'top', labels: { color: '#f0ece4', font: { size: 11 } } },
+      tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + formatMoney(ctx.raw) } } },
+      scales: { y: { ticks: { callback: v => (v/1000).toFixed(0)+'к', color:'#6a6a6a' }, grid:{color:'#1e1e1e'}, border:{display:false} },
+                x: { ticks: { color:'#6a6a6a', maxRotation: 45, font:{size:10} }, grid:{display:false}, border:{display:false} } } }
+  });
+
+  // График среднего чека
+  const ctxCheck = document.getElementById('comp-check-chart').getContext('2d');
+  if (_compChartCheck) _compChartCheck.destroy();
+  _compChartCheck = new Chart(ctxCheck, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: String(cur_year),  data: curChecks,  borderColor: '#34C759', tension: 0.3, pointRadius: 3 },
+        { label: String(prev_year), data: prevChecks, borderColor: '#FF3B30', tension: 0.3, pointRadius: 3, borderDash: [4,3] }
+      ]
+    },
+    options: { responsive: true, plugins: { legend: { position: 'top', labels: { color: '#f0ece4', font: { size: 11 } } },
+      tooltip: { callbacks: { label: ctx => ctx.dataset.label + ': ' + formatMoney(ctx.raw) } } },
+      scales: { y: { ticks: { callback: v => formatMoney(v), color:'#6a6a6a' }, grid:{color:'#1e1e1e'}, border:{display:false} },
+                x: { ticks: { color:'#6a6a6a', maxRotation: 45, font:{size:10} }, grid:{display:false}, border:{display:false} } } }
+  });
+
+  // Таблица
+  document.getElementById('comp-tbody').innerHTML = allKeys.slice(-20).reverse().map((k, i) => {
+    const ci = allKeys.length - 1 - i;
+    const cr = curRevs[ci], pr = prevRevs[ci];
+    const delta = pr > 0 ? ((cr - pr) / pr * 100) : 0;
+    const cls = delta >= 10 ? 'color:var(--green)' : delta <= -10 ? 'color:var(--red)' : '';
+    return `<tr>
+      <td>${labels[ci]}</td>
+      <td class="num">${formatMoney(cr)}</td>
+      <td class="num">${formatMoney(pr)}</td>
+      <td class="num" style="${cls}">${pr>0 ? (delta>=0?'+':'')+delta.toFixed(1)+'%' : '—'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function setCompChannel(ch) {
+  _compChannel = ch;
+  if (_compData) renderComparison();
+}
+
+// ============ SETTINGS ============
+function openSettings() {
+  haptic();
+  document.getElementById('settings-modal').classList.add('active');
+}
+
+function closeSettings(e) {
+  if (e.target === document.getElementById('settings-modal')) {
+    document.getElementById('settings-modal').classList.remove('active');
+  }
+}
+
+function closeSettingsDirect() {
+  document.getElementById('settings-modal').classList.remove('active');
+}
+
+function addRestaurant() {
+  closeSettingsDirect();
+  // Сбрасываем онбординг для добавления нового ресторана
+  document.getElementById('screen-onboarding').classList.add('active');
+  document.querySelectorAll('#screen-onboarding > div').forEach(d => d.style.display = 'none');
+  document.getElementById('onboarding-step2').style.display = 'flex';
+}
+
+async function logout() {
+  closeSettingsDirect();
+  showToast('Выход...');
+  setTimeout(() => location.reload(), 500);
+}
+
+// ============ UTILS ============
+function formatMoney(v) {
+  if (typeof v !== 'number') v = Number(v) || 0;
+  // Округляем до целых — в ru-RU локали запятая это десятичный разделитель
+  return Math.round(v).toLocaleString('ru-RU') + ' ₸';
+}
+
+function animateValue(id, end, suffix) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const duration = 600;
+  const startTime = performance.now();
+  function update(currentTime) {
+    const elapsed = currentTime - startTime;
+    const progress = Math.min(elapsed / duration, 1);
+    const ease = 1 - Math.pow(1 - progress, 3);
+    const current = Math.floor(end * ease);
+    el.textContent = current.toLocaleString('ru-RU').replace(/,/g, ' ') + suffix;
+    if (progress < 1) requestAnimationFrame(update);
+  }
+  requestAnimationFrame(update);
+}
+
+function haptic() {
+  const tg = window.Telegram?.WebApp;
+  if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ============ EXPORT ============
+function exportCSV(type) {
+  haptic();
+  const rows = state.olapCache[state.salesPeriod] || state.olapCache[state.period] || [];
+  let csv = '', filename = type + '.csv';
+
+  if (type === 'channels') {
+    const channels = {};
+    rows.forEach(r => {
+      const k = r['OrderType.Name'] || '—';
+      if (!channels[k]) channels[k] = { revenue: 0, guests: 0, orders: 0 };
+      channels[k].revenue += r.DishAmountSum || 0;
+      channels[k].guests  += r.GuestNum || 0;
+      channels[k].orders  += r.OrdersCount || 0;
+    });
+    csv = '﻿Канал;Выручка;Гостей;Заказов\n' +
+      Object.entries(channels).sort((a,b) => b[1].revenue - a[1].revenue)
+        .map(([k,v]) => `${k};${Math.round(v.revenue)};${v.guests};${v.orders}`).join('\n');
+
+  } else if (type === 'staff') {
+    const staff = {};
+    rows.forEach(r => {
+      const k = r.WaiterName || '—';
+      if (!staff[k]) staff[k] = { revenue: 0, guests: 0, orders: 0 };
+      staff[k].revenue += r.DishAmountSum || 0;
+      staff[k].guests  += r.GuestNum || 0;
+      staff[k].orders  += r.OrdersCount || 0;
+    });
+    csv = '﻿Официант;Выручка;Гостей;Заказов\n' +
+      Object.entries(staff).sort((a,b) => b[1].revenue - a[1].revenue)
+        .map(([k,v]) => `${k};${Math.round(v.revenue)};${v.guests};${v.orders}`).join('\n');
+
+  } else if (type === 'abc' || type === 'engineering') {
+    const dishes = {};
+    rows.forEach(r => {
+      const k = r.DishName || '—';
+      if (!dishes[k]) dishes[k] = { revenue: 0, count: 0, cat: r['ProductCategory.Name'] || '' };
+      dishes[k].revenue += r.DishAmountSum || 0;
+      dishes[k].count   += r.DishCount || 0;
+    });
+    const arr = Object.entries(dishes).sort((a,b) => b[1].revenue - a[1].revenue);
+    const total = arr.reduce((s,[,v]) => s + v.revenue, 0);
+    let cum = 0;
+    csv = '﻿Блюдо;Категория;Выручка;Кол-во;%;Накоп.%;ABC\n' +
+      arr.map(([name, v]) => {
+        const pct = total ? v.revenue / total * 100 : 0;
+        cum += pct;
+        const abc = cum <= 80 ? 'A' : cum <= 95 ? 'B' : 'C';
+        return `${name};${v.cat};${Math.round(v.revenue)};${Math.round(v.count)};${pct.toFixed(1)};${cum.toFixed(1)};${abc}`;
+      }).join('\n');
+
+  } else if (type === 'top-dishes') {
+    const dishes = {};
+    rows.forEach(r => {
+      const k = r.DishName || '—';
+      if (!dishes[k]) dishes[k] = { revenue: 0, count: 0 };
+      dishes[k].revenue += r.DishAmountSum || 0;
+      dishes[k].count   += r.DishCount || 0;
+    });
+    csv = '﻿Блюдо;Выручка;Кол-во\n' +
+      Object.entries(dishes).sort((a,b) => b[1].revenue - a[1].revenue).slice(0,50)
+        .map(([n,v]) => `${n};${Math.round(v.revenue)};${Math.round(v.count)}`).join('\n');
+
+  } else if (type === 'categories') {
+    const cats = {};
+    rows.forEach(r => {
+      const k = r['ProductCategory.Name'] || '—';
+      if (!cats[k]) cats[k] = { revenue: 0 };
+      cats[k].revenue += r.DishAmountSum || 0;
+    });
+    const total = Object.values(cats).reduce((s,v) => s + v.revenue, 0) || 1;
+    csv = '﻿Категория;Выручка;%\n' +
+      Object.entries(cats).sort((a,b) => b[1].revenue - a[1].revenue)
+        .map(([n,v]) => `${n};${Math.round(v.revenue)};${(v.revenue/total*100).toFixed(1)}`).join('\n');
+
+  } else if (type === 'revenue-7days') {
+    const byDate = {};
+    const weekRows = state.olapCache['week'] || rows;
+    weekRows.forEach(r => {
+      const d = (r['OpenDate.Typed'] || '').slice(0,10);
+      if (!d) return;
+      if (!byDate[d]) byDate[d] = 0;
+      byDate[d] += r.DishAmountSum || 0;
+    });
+    csv = '﻿Дата;Выручка\n' +
+      Object.entries(byDate).sort().map(([d,v]) => `${d};${Math.round(v)}`).join('\n');
+
+  } else if (type === 'foodcost-dishes') {
+    const dishes = state.salesData?.top_dishes || [];
+    csv = '﻿Блюдо;Выручка;Кол-во\n' +
+      dishes.map(d => `${d.name};${Math.round(d.revenue)};${d.count}`).join('\n');
+
+  } else if (type === 'expenses') {
+    const data = state.expensesData || [];
+    csv = '﻿Название;Категория;Сумма;Дата\n' +
+      data.map(e => `${e.name || ''};${e.cat || ''};${Math.round(e.amount || 0)};${e.date || ''}`).join('\n');
+
+  } else if (type === 'writeoffs') {
+    const data = state.writeoffsData || [];
+    csv = '﻿Категория;Сумма;%\n' +
+      data.map(w => `${w.name};${Math.round(w.written)};${w.pct}`).join('\n');
+
+  } else {
+    showToast('Нет данных для экспорта');
+    return;
+  }
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+  showToast('Файл скачан');
+}
+
+// ============ EXPENSE MODAL ============
+function showAddExpenseModal() {
+  haptic();
+  // Ставим сегодняшнюю дату по умолчанию
+  document.getElementById('exp-date').value = new Date().toISOString().split('T')[0];
+  document.getElementById('exp-name').value = '';
+  document.getElementById('exp-amount').value = '';
+  document.getElementById('exp-category').value = '';
+  document.getElementById('add-expense-modal').classList.add('active');
+}
+
+function closeExpenseModal(e) {
+  if (e.target === document.getElementById('add-expense-modal')) {
+    document.getElementById('add-expense-modal').classList.remove('active');
+  }
+}
+
+async function saveManualExpense() {
+  const name = document.getElementById('exp-name').value.trim();
+  const amount = parseFloat(document.getElementById('exp-amount').value);
+  const category = document.getElementById('exp-category').value;
+  const date = document.getElementById('exp-date').value;
+
+  if (!name) return showToast('Введите название');
+  if (!amount || isNaN(amount)) return showToast('Введите сумму');
+  if (!category) return showToast('Выберите категорию');
+  if (!date) return showToast('Выберите дату');
+
+  const orgId = state.restaurant?.organization_id || 'demo-org-1';
+  try {
+    await apiPost(`/api/expenses/manual?org_id=${orgId}`, { name, amount, category, kassa: '', date });
+    document.getElementById('add-expense-modal').classList.remove('active');
+    showToast('✅ Расход добавлен');
+    loadExpenses();
+  } catch(e) {
+    showToast('Ошибка сохранения');
+  }
+}
+
+async function deleteExpense(id, type) {
+  if (!id || type !== 'manual') { showToast('Демо-данные нельзя удалить'); return; }
+  const orgId = state.restaurant?.organization_id || 'demo-org-1';
+  try {
+    await fetch(`${API_BASE}/api/expenses/manual/${id}?org_id=${orgId}`, {
+      method: 'DELETE',
+      headers: (() => { const h = {}; const tg = window.Telegram?.WebApp; if (tg?.initData) h['X-Telegram-Init-Data'] = tg.initData; return h; })()
+    });
+    showToast('✅ Расход удалён');
+    loadExpenses();
+  } catch(e) { showToast('Ошибка удаления'); }
+}
+
+// ============ EXPENSE FILTERS ============
+let expenseFilter = 'all';
+let writeoffFilter = 'all';
+
+function filterExpenses(filter, el) {
+  haptic();
+  expenseFilter = filter;
+  document.querySelectorAll('#tab-expenses .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  const ops = document.querySelectorAll('#exp-operations-list .op-item');
+  ops.forEach(op => {
+    const type = op.dataset.type || 'orders';
+    if (filter === 'all') op.style.display = '';
+    else if (filter === 'orders') op.style.display = type === 'order' ? '' : 'none';
+    else if (filter === 'manual') op.style.display = type === 'manual' ? '' : 'none';
+  });
+}
+
+function filterWriteoffs(filter, el) {
+  haptic();
+  writeoffFilter = filter;
+  document.querySelectorAll('#tab-writeoffs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  const items = document.querySelectorAll('#writeoff-categories .wo-item');
+  items.forEach(item => {
+    const type = item.dataset.type || 'goods';
+    if (filter === 'all') item.style.display = '';
+    else item.style.display = type === filter ? '' : 'none';
+  });
+}
+
+let ptrStartY = 0, ptrPulling = false;
+document.querySelectorAll('.scroll-container').forEach(sc => {
+  sc.addEventListener('touchstart', e => {
+    if (sc.scrollTop <= 0) { ptrStartY = e.touches[0].clientY; ptrPulling = true; }
+  });
+  sc.addEventListener('touchmove', e => {
+    if (!ptrPulling) return;
+    const diff = e.touches[0].clientY - ptrStartY;
+    if (diff > 60) {
+      const ind = sc.querySelector('.ptr-indicator');
+      if (ind) ind.classList.add('active');
+    }
+  });
+  sc.addEventListener('touchend', () => {
+    if (!ptrPulling) return;
+    ptrPulling = false;
+    const ind = sc.querySelector('.ptr-indicator');
+    if (ind && ind.classList.contains('active')) {
+      ind.classList.remove('active');
+      if (state.currentTab === 'main') loadDashboard();
+      if (state.currentTab === 'sales') loadSales();
+      if (state.currentTab === 'staff') loadStaff();
+      if (state.currentTab === 'expenses') loadExpenses();
+      if (state.currentTab === 'retention') loadRetention();
+      showToast('Обновлено');
+    }
+  });
+});
+</script>
+<!-- Add Expense Modal -->
+<div class="modal-overlay" id="add-expense-modal" onclick="closeExpenseModal(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">+ Добавить расход</div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <input type="text" class="input-field" id="exp-name" placeholder="Название расхода">
+      <input type="number" class="input-field" id="exp-amount" placeholder="Сумма (₸)" inputmode="decimal">
+      <select class="input-field" id="exp-category" style="color:var(--text);background:var(--bg-secondary);">
+        <option value="">Категория</option>
+        <option>Аренда</option>
+        <option>Зарплата</option>
+        <option>Коммунальные</option>
+        <option>Маркетинг</option>
+        <option>Оборудование</option>
+        <option>Прочее</option>
+      </select>
+      <input type="date" class="input-field" id="exp-date" style="color:var(--text);background:var(--bg-secondary);">
+      <button class="btn-full btn-primary" onclick="saveManualExpense()">Сохранить</button>
+      <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="document.getElementById('add-expense-modal').classList.remove('active')">Отмена</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
