@@ -5,10 +5,10 @@ import os
 import hmac
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from enum import Enum
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, Header, HTTPException, Request, Depends
+from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -143,8 +143,22 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, al
     return user
 
 
-def get_period_dates(period: str) -> tuple:
+def get_period_dates(period: str, custom_from: Optional[str] = None,
+                     custom_to: Optional[str] = None) -> tuple:
     today = datetime.now().date()
+    if period == "custom":
+        if not custom_from or not custom_to:
+            raise HTTPException(status_code=400, detail="custom period requires from/to")
+        try:
+            df = date.fromisoformat(custom_from)
+            dt = date.fromisoformat(custom_to)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format, use YYYY-MM-DD")
+        if df > dt:
+            raise HTTPException(status_code=400, detail="from must be <= to")
+        if (dt - df).days > 366:
+            raise HTTPException(status_code=400, detail="Range too large (max 366 days)")
+        return df.isoformat(), dt.isoformat()
     if period == "today":
         return today.isoformat(), today.isoformat()
     elif period == "yesterday":
@@ -392,6 +406,12 @@ class ExpenseCreate(BaseModel):
     date: str
 
 
+class ExportSendPayload(BaseModel):
+    filename: str = Field(..., max_length=200)
+    content: str = Field(..., max_length=5_000_000)
+    caption: Optional[str] = None
+
+
 # ============ ENDPOINTS ============
 @app.on_event("startup")
 async def startup():
@@ -502,35 +522,72 @@ def _olap_dept(real_org: str, info: Dict) -> str:
     return real_org
 
 
+def _parse_org_ids(org_ids_csv: Optional[str], path_org_id: str,
+                   user: Dict) -> List[str]:
+    """Список валидных org_id. Если org_ids_csv пуст — fallback на path_org_id."""
+    if not org_ids_csv:
+        return [_get_org_id(path_org_id, user)]
+    ids = [x.strip() for x in org_ids_csv.split(",") if x.strip()]
+    if not ids:
+        return [_get_org_id(path_org_id, user)]
+    valid = []
+    for oid in ids:
+        try:
+            valid.append(_get_org_id(oid, user))
+        except HTTPException:
+            continue
+    if not valid:
+        raise HTTPException(status_code=404, detail="No accessible restaurants")
+    return valid
+
+
+def _cache_period_part(period: str, custom_from: Optional[str], custom_to: Optional[str]) -> str:
+    if period == "custom":
+        return f"custom:{custom_from}:{custom_to}"
+    return period
+
+
 def _get_api_login(org_id: str, user: Dict) -> str:
     return _get_restaurant_info(org_id, user)["api_login"]
 
 
 @app.get("/api/dashboard/{org_id}")
-async def dashboard(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
+async def dashboard(org_id: str, period: str = "today",
+                    from_: Optional[str] = Query(None, alias="from"),
+                    to: Optional[str] = Query(None),
+                    org_ids: Optional[str] = Query(None),
+                    user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
         return DEMO_DASHBOARD
 
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    login = info["api_login"]
-    key = _cache_key(user.get("id", 0), "dashboard", real_org, period)
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    date_from, date_to = get_period_dates(period, from_, to)
+    branches_key = ",".join(sorted(orgs))
+    cache_period_key = _cache_period_part(period, from_, to) + ":" + branches_key
+    key = _cache_key(user.get("id", 0), "dashboard", branches_key, cache_period_key)
     cached = _get_cached(key)
     if cached:
         return cached
 
-    date_from, date_to = get_period_dates(period)
-    client = get_client(login, info.get("iiko_server"), info.get("api_password"))
+    async def fetch_one(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        try:
+            r = await client.olap_report(
+                _olap_dept(real_org, info), date_from, date_to,
+                ["OpenDate.Typed"], ["GuestNum", "DishAmountSum", "OrdersCount"]
+            )
+            return r.get("data", [])
+        except Exception as e:
+            logger.warning(f"[dashboard] {real_org}: {e}")
+            return []
+
     try:
-        result = await client.olap_report(
-            _olap_dept(real_org, info), date_from, date_to,
-            ["OpenDate.Typed"], ["GuestNum", "DishAmountSum", "OrdersCount"]
-        )
-        data = result.get("data", [])
-        # Simplified aggregation
-        total = sum(r.get("DishAmountSum", 0) for r in data)
-        guests = sum(r.get("GuestNum", 0) for r in data)
-        orders = sum(r.get("OrdersCount", 0) for r in data)
+        results = await asyncio.gather(*(fetch_one(o) for o in orgs))
+        all_rows = [row for batch in results for row in batch]
+        total = sum(r.get("DishAmountSum", 0) for r in all_rows)
+        guests = sum(r.get("GuestNum", 0) for r in all_rows)
+        orders = sum(r.get("OrdersCount", 0) for r in all_rows)
         avg_check = total / guests if guests else 0
 
         resp = {
@@ -543,92 +600,107 @@ async def dashboard(org_id: str, period: str = "today", user: Dict = Depends(get
             "open_orders": orders,
             "revenue_yesterday": 0,
             "forecast": total * 1.4,
-            "chart_7days": DEMO_DASHBOARD["chart_7days"]
+            "chart_7days": DEMO_DASHBOARD["chart_7days"],
+            "branches_count": len(orgs),
         }
         _set_cached(key, resp)
         return resp
     except Exception as e:
         print(f"[dashboard] {e}")
-        demo = dict(DEMO_DASHBOARD)
-        return demo
+        return dict(DEMO_DASHBOARD)
 
 
 @app.get("/api/sales/{org_id}")
-async def sales(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
+async def sales(org_id: str, period: str = "today",
+                from_: Optional[str] = Query(None, alias="from"),
+                to: Optional[str] = Query(None),
+                org_ids: Optional[str] = Query(None),
+                user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
         return DEMO_SALES
 
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    login = info["api_login"]
-    key = _cache_key(user.get("id", 0), "sales", real_org, period)
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    date_from, date_to = get_period_dates(period, from_, to)
+    branches_key = ",".join(sorted(orgs))
+    cache_period_key = _cache_period_part(period, from_, to) + ":" + branches_key
+    key = _cache_key(user.get("id", 0), "sales", branches_key, cache_period_key)
     cached = _get_cached(key)
     if cached:
         return cached
 
-    date_from, date_to = get_period_dates(period)
-    client = get_client(login, info.get("iiko_server"), info.get("api_password"))
-    try:
+    async def fetch_one(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         async def safe_olap(*args, **kwargs):
             try:
                 return await client.olap_report(*args, **kwargs)
             except Exception:
                 return {"data": []}
-
         dept = _olap_dept(real_org, info)
-        channels_raw, dishes_raw, cats_raw = await asyncio.gather(
+        return await asyncio.gather(
             safe_olap(dept, date_from, date_to, ["OrderType.Name"], ["DishAmountSum", "GuestNum"]),
             safe_olap(dept, date_from, date_to, ["DishName"], ["DishAmountSum", "DishCount"]),
             safe_olap(dept, date_from, date_to, ["ProductCategory.Name"], ["DishAmountSum"]),
         )
 
-        channels = []
-        for row in channels_raw.get("data", []):
+    try:
+        per_org = await asyncio.gather(*(fetch_one(o) for o in orgs))
+        channels_rows = [r for t in per_org for r in t[0].get("data", [])]
+        dishes_rows   = [r for t in per_org for r in t[1].get("data", [])]
+        cats_rows     = [r for t in per_org for r in t[2].get("data", [])]
+
+        # Дедупликация по имени для каналов (несколько филиалов могут вернуть один и тот же канал)
+        ch_agg: Dict[str, Dict[str, float]] = {}
+        for row in channels_rows:
             name = row.get("OrderType.Name") or row.get("OrderTypeName", "")
             if not name:
                 continue
-            revenue = float(row.get("DishAmountSum", 0) or 0)
-            guests = int(row.get("GuestNum", 0) or 0)
-            channels.append({
-                "name": name, "revenue": revenue, "guests": guests,
-                "avg_check": revenue / guests if guests else 0, "top": True
-            })
+            if name not in ch_agg:
+                ch_agg[name] = {"revenue": 0.0, "guests": 0}
+            ch_agg[name]["revenue"] += float(row.get("DishAmountSum", 0) or 0)
+            ch_agg[name]["guests"]  += int(row.get("GuestNum", 0) or 0)
+        channels = [{
+            "name": n, "revenue": v["revenue"], "guests": int(v["guests"]),
+            "avg_check": v["revenue"] / v["guests"] if v["guests"] else 0, "top": True
+        } for n, v in ch_agg.items()]
         channels.sort(key=lambda x: x["revenue"], reverse=True)
 
-        dishes = []
-        for row in dishes_raw.get("data", []):
+        # Дедупликация по названию блюда
+        di_agg: Dict[str, Dict[str, float]] = {}
+        for row in dishes_rows:
             name = row.get("DishName", "")
             if not name:
                 continue
-            dishes.append({
-                "name": name,
-                "revenue": float(row.get("DishAmountSum", 0) or 0),
-                "count": int(row.get("DishCount", 0) or 0)
-            })
+            if name not in di_agg:
+                di_agg[name] = {"revenue": 0.0, "count": 0}
+            di_agg[name]["revenue"] += float(row.get("DishAmountSum", 0) or 0)
+            di_agg[name]["count"]   += int(row.get("DishCount", 0) or 0)
+        dishes = [{"name": n, "revenue": v["revenue"], "count": int(v["count"])} for n, v in di_agg.items()]
         dishes.sort(key=lambda x: x["revenue"], reverse=True)
 
-        COLORS = ["#4A90E2", "#34C759", "#FF9500", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFD60A", "#FF3B30"]
-        cats_sorted = sorted(cats_raw.get("data", []), key=lambda x: float(x.get("DishAmountSum", 0) or 0), reverse=True)
-        total_rev = sum(float(r.get("DishAmountSum", 0) or 0) for r in cats_sorted)
-        categories = []
-        for i, row in enumerate(cats_sorted):
+        # Дедупликация по категории
+        cat_agg: Dict[str, float] = {}
+        for row in cats_rows:
             name = row.get("ProductCategory.Name") or row.get("ProductCategoryName", "")
             if not name:
                 continue
-            amount = float(row.get("DishAmountSum", 0) or 0)
-            categories.append({
-                "name": name,
-                "value": round(amount / total_rev * 100, 1) if total_rev else 0,
-                "color": COLORS[i % len(COLORS)]
-            })
+            cat_agg[name] = cat_agg.get(name, 0.0) + float(row.get("DishAmountSum", 0) or 0)
+        COLORS = ["#4A90E2", "#34C759", "#FF9500", "#AF52DE", "#FF2D55", "#5AC8FA", "#FFD60A", "#FF3B30"]
+        cats_sorted = sorted(cat_agg.items(), key=lambda kv: kv[1], reverse=True)
+        total_rev = sum(v for _, v in cats_sorted)
+        categories = [{
+            "name": name,
+            "value": round(amount / total_rev * 100, 1) if total_rev else 0,
+            "color": COLORS[i % len(COLORS)]
+        } for i, (name, amount) in enumerate(cats_sorted)]
 
-        result = {"channels": channels, "top_dishes": dishes[:10], "categories": categories}
+        result = {"channels": channels, "top_dishes": dishes[:10], "categories": categories,
+                  "branches_count": len(orgs)}
         _set_cached(key, result)
         return result
     except Exception as e:
         print(f"[sales] {e}")
-        demo = dict(DEMO_SALES)
-        return demo
+        return dict(DEMO_SALES)
 
 
 @app.get("/api/shifts/{org_id}")
@@ -1061,19 +1133,20 @@ async def retention(org_id: str, user: Dict = Depends(get_current_user)):
 
 
 @app.get("/api/comparison/{org_id}")
-async def comparison(org_id: str, user: Dict = Depends(get_current_user)):
+async def comparison(org_id: str,
+                     org_ids: Optional[str] = Query(None),
+                     user: Dict = Depends(get_current_user)):
     """YoY сравнение по неделям и месяцам с разбивкой по каналам."""
     if _is_demo_user(user) or org_id == "demo-org-1":
         return {"weeks": [], "months": [], "channels": []}
 
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    orgs = _parse_org_ids(org_ids, org_id, user)
 
-    import calendar
     from datetime import date as date_cls
 
-    async def fetch_year(year: int):
+    async def fetch_year_for_org(real_org: str, year: int):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         start = f"{year}-01-01"
         end = f"{year}-12-31"
         try:
@@ -1084,11 +1157,16 @@ async def comparison(org_id: str, user: Dict = Depends(get_current_user)):
             )
             return result.get("data", [])
         except Exception as e:
-            logger.warning(f"[comparison] {year}: {e}")
+            logger.warning(f"[comparison] {real_org}/{year}: {e}")
             return []
 
     cur_year = datetime.now().year
-    cur_rows, prev_rows = await asyncio.gather(fetch_year(cur_year), fetch_year(cur_year - 1))
+    cur_batches, prev_batches = await asyncio.gather(
+        asyncio.gather(*(fetch_year_for_org(o, cur_year) for o in orgs)),
+        asyncio.gather(*(fetch_year_for_org(o, cur_year - 1) for o in orgs)),
+    )
+    cur_rows  = [r for batch in cur_batches  for r in batch]
+    prev_rows = [r for batch in prev_batches for r in batch]
 
     def aggregate(rows, by: str):
         result = {}
@@ -1110,7 +1188,7 @@ async def comparison(org_id: str, user: Dict = Depends(get_current_user)):
                 label = f"Нед {iso.week}"
             else:
                 key = f"{dt.year}-{dt.month:02d}"
-                label = f"{['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'][dt.month-1]} {dt.year}"
+                label = ['Янв','Фев','Мар','Апр','Май','Июн','Июл','Авг','Сен','Окт','Ноя','Дек'][dt.month-1]
 
             if key not in result:
                 result[key] = {"key": key, "label": label, "year": dt.year,
@@ -1145,34 +1223,45 @@ async def comparison(org_id: str, user: Dict = Depends(get_current_user)):
 
 
 @app.get("/api/olap/{org_id}")
-async def olap_raw(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
+async def olap_raw(org_id: str, period: str = "today",
+                   from_: Optional[str] = Query(None, alias="from"),
+                   to: Optional[str] = Query(None),
+                   org_ids: Optional[str] = Query(None),
+                   user: Dict = Depends(get_current_user)):
     """Один большой OLAP-запрос — фронтенд сам фильтрует."""
     if _is_demo_user(user) or org_id == "demo-org-1":
         return {"data": [], "demo": True}
 
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    key = _cache_key(user.get("id", 0), "olap_raw", real_org, period)
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    date_from, date_to = get_period_dates(period, from_, to)
+    branches_key = ",".join(sorted(orgs))
+    cache_period_key = _cache_period_part(period, from_, to) + ":" + branches_key
+    key = _cache_key(user.get("id", 0), "olap_raw", branches_key, cache_period_key)
     cached = _get_cached(key)
     if cached:
         return cached
 
-    date_from, date_to = get_period_dates(period)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-    try:
-        result = await client.olap_report(
-            _olap_dept(real_org, info), date_from, date_to,
-            group_by=["OpenDate.Typed", "DishName", "ProductCategory.Name",
-                      "WaiterName", "OrderType.Name"],
-            aggregates=["DishAmountSum", "GuestNum", "OrdersCount", "DishCount"]
-        )
-        resp = {"data": result.get("data", []), "demo": False,
-                "date_from": date_from, "date_to": date_to}
-        _set_cached(key, resp)
-        return resp
-    except Exception as e:
-        logger.warning(f"[olap_raw] {e}")
-        return {"data": [], "demo": False, "error": str(e)}
+    async def fetch_one(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        try:
+            r = await client.olap_report(
+                _olap_dept(real_org, info), date_from, date_to,
+                group_by=["OpenDate.Typed", "DishName", "ProductCategory.Name",
+                          "WaiterName", "OrderType.Name"],
+                aggregates=["DishAmountSum", "GuestNum", "OrdersCount", "DishCount"]
+            )
+            return r.get("data", [])
+        except Exception as e:
+            logger.warning(f"[olap_raw] {real_org}: {e}")
+            return []
+
+    results = await asyncio.gather(*(fetch_one(o) for o in orgs))
+    merged = [row for batch in results for row in batch]
+    resp = {"data": merged, "demo": False, "date_from": date_from, "date_to": date_to,
+            "branches_count": len(orgs)}
+    _set_cached(key, resp)
+    return resp
 
 
 @app.get("/api/stoplist/{org_id}")
@@ -1298,6 +1387,46 @@ async def export_report(report_type: str, org_id: str = "demo-org-1", period: st
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+@app.post("/api/export-send")
+@limiter.limit("10/minute")
+async def export_send(request: Request, payload: ExportSendPayload,
+                      user: Dict = Depends(get_current_user)):
+    """Отправляет CSV/текстовый файл в чат с пользователем через бота."""
+    chat_id = user.get("id")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="no chat_id")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="bot not configured")
+
+    safe_name = "".join(c for c in payload.filename if c.isalnum() or c in "._- ") or "export.csv"
+    if not safe_name.lower().endswith((".csv", ".txt")):
+        safe_name += ".csv"
+
+    content_bytes = payload.content.encode("utf-8")
+    if not content_bytes.startswith(b"\xef\xbb\xbf"):
+        content_bytes = b"\xef\xbb\xbf" + content_bytes
+
+    files = {"document": (safe_name, content_bytes, "text/csv")}
+    data = {"chat_id": str(chat_id)}
+    if payload.caption:
+        data["caption"] = payload.caption[:1000]
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                             data=data, files=files)
+        result = r.json()
+        if not result.get("ok"):
+            desc = result.get("description", "send failed")
+            if "chat not found" in desc.lower() or "bot was blocked" in desc.lower():
+                raise HTTPException(status_code=409,
+                    detail="Откройте чат с ботом и нажмите Start, потом повторите.")
+            raise HTTPException(status_code=502, detail=f"Telegram: {desc}")
+        return {"ok": True}
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"Telegram request failed: {e}")
 
 
 # Временное хранилище ожидающих подтверждения накладных: {chat_id: {данные}}
