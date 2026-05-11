@@ -472,7 +472,7 @@ html, body {
   </div>
   <div class="rest-selector" id="rest-selector"></div>
   <div class="date-filters" id="main-date-filters">
-    <div class="date-chip" onclick="setPeriod('today', this)">📅 Даты</div>
+    <div class="date-chip" id="main-date-chip" onclick="openDateRangeModal('main')">📅 Даты</div>
     <div class="date-chip active" onclick="setPeriod('today', this)">Сегодня</div>
     <div class="date-chip" onclick="setPeriod('yesterday', this)">Вчера</div>
     <div class="date-chip" onclick="setPeriod('day_before_yesterday', this)">Позавчера</div>
@@ -515,7 +515,7 @@ html, body {
     <div class="card">
       <div class="card-header">
         <div class="card-title">Выручка за 7 дней</div>
-        <button class="excel-btn" onclick="exportCSV('revenue-7days')">↓ Excel</button>
+        <button class="excel-btn" onclick="exportReport('revenue-7days')">↓ Excel</button>
       </div>
       <div class="chart-container"><canvas id="chart-revenue"></canvas></div>
     </div>
@@ -579,6 +579,7 @@ html, body {
     </div>
   </div>
   <div class="date-filters" id="sales-date-filters">
+    <div class="date-chip" id="sales-date-chip" onclick="openDateRangeModal('sales')">📅 Даты</div>
     <div class="date-chip active" onclick="setSalesPeriod('today', this)">Сегодня</div>
     <div class="date-chip" onclick="setSalesPeriod('yesterday', this)">Вчера</div>
     <div class="date-chip" onclick="setSalesPeriod('week', this)">Эта н...</div>
@@ -603,7 +604,7 @@ html, body {
             <div class="card-title">Каналы продаж</div>
             <div class="card-subtitle">Откуда приходят заказы и выручка</div>
           </div>
-          <button class="excel-btn" onclick="exportCSV('channels')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('channels')">↓ Excel</button>
         </div>
         <div class="table-container">
           <table class="data-table" id="channels-table">
@@ -615,14 +616,14 @@ html, body {
       <div class="card">
         <div class="card-header">
           <div class="card-title">Топ блюд по выручке</div>
-          <button class="excel-btn" onclick="exportCSV('top-dishes')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('top-dishes')">↓ Excel</button>
         </div>
         <div id="top-dishes-chart"></div>
       </div>
       <div class="card">
         <div class="card-header">
           <div class="card-title">Продажи по категориям</div>
-          <button class="excel-btn" onclick="exportCSV('categories')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('categories')">↓ Excel</button>
         </div>
         <div class="chart-container donut"><canvas id="chart-categories"></canvas></div>
         <div class="legend" id="cat-legend"></div>
@@ -633,7 +634,7 @@ html, body {
       <div class="card" style="margin-top:16px;">
         <div class="card-header">
           <div class="card-title">Матрица меню</div>
-          <button class="excel-btn" onclick="exportCSV('engineering')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('engineering')">↓ Excel</button>
         </div>
         <div id="eng-note" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:8px;padding:8px;background:var(--bg-secondary);border-radius:8px;">⚠️ Себестоимость не заполнена — маржа рассчитана условно. Для точного анализа заполните техкарты в iiko.</div>
         <div class="quad-grid">
@@ -675,7 +676,7 @@ html, body {
       <div class="card" style="margin-top:16px;">
         <div class="card-header">
           <div class="card-title">ABC анализ</div>
-          <button class="excel-btn" onclick="exportCSV('abc')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('abc')">↓ Excel</button>
         </div>
         <div class="subtabs" style="margin-bottom:12px;">
           <div class="subtab active abc-mode-btn" onclick="setAbcMode('revenue', this)">Выручка</div>
@@ -791,7 +792,7 @@ html, body {
     <div class="card">
       <div class="card-header">
         <div class="card-title">Статистика официантов (7 дней)</div>
-        <button class="excel-btn" onclick="exportCSV('staff')">↓ Excel</button>
+        <button class="excel-btn" onclick="exportReport('staff')">↓ Excel</button>
       </div>
       <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Прокрутите вправо → для всех колонок</div>
       <div class="table-container">
@@ -874,7 +875,7 @@ html, body {
       <div class="card">
         <div class="card-header">
           <div class="card-title">Май — по блюдам (норматив)</div>
-          <button class="excel-btn" onclick="exportCSV('foodcost-dishes')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('foodcost-dishes')">↓ Excel</button>
         </div>
         <div class="table-container">
           <table class="data-table" id="fc-dishes-table">
@@ -898,7 +899,7 @@ html, body {
         <div class="metric-label" style="margin-bottom:8px;">📄 Итого расходов</div>
         <div class="metric-value" id="exp-total">0 ₸</div>
         <div style="display:flex;gap:8px;margin-top:12px;">
-          <button class="excel-btn" onclick="exportCSV('expenses')">↓ Excel</button>
+          <button class="excel-btn" onclick="exportReport('expenses')">↓ Excel</button>
           <button class="btn btn-primary" onclick="showAddExpenseModal()">+ Добавить</button>
         </div>
       </div>
@@ -952,7 +953,7 @@ html, body {
             <div class="summary-value" id="wo-pct" style="color:var(--red)">0%</div>
           </div>
         </div>
-        <button class="excel-btn" style="margin-top:12px;" onclick="exportCSV('writeoffs')">↓ Excel</button>
+        <button class="excel-btn" style="margin-top:12px;" onclick="exportReport('writeoffs')">↓ Excel</button>
       </div>
       <div class="subtabs">
         <div class="subtab active" onclick="filterWriteoffs('all', this)">Все</div>
@@ -1073,7 +1074,7 @@ html, body {
       <!-- Таблица по периодам -->
       <div class="card">
         <div class="card-title" style="margin-bottom:12px" id="comp-table-title">По неделям</div>
-        <div class="table-container">
+        <div class="table-container" style="max-height:420px;overflow-y:auto;">
           <table class="data-table" id="comp-table">
             <thead>
               <tr>
@@ -1125,6 +1126,38 @@ html, body {
   </div>
 </div>
 
+<!-- Date range modal -->
+<div class="modal-overlay" id="date-range-modal" onclick="closeDateRangeModal(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">Выбор периода</div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <label style="font-size:13px;color:var(--text-secondary);">С</label>
+      <input type="date" class="input-field" id="dr-from" style="color:var(--text);background:var(--bg-secondary);">
+      <label style="font-size:13px;color:var(--text-secondary);">По</label>
+      <input type="date" class="input-field" id="dr-to" style="color:var(--text);background:var(--bg-secondary);">
+      <button class="btn-full btn-primary" onclick="applyDateRange()">Применить</button>
+      <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="closeDateRangeModalDirect()">Отмена</button>
+    </div>
+  </div>
+</div>
+
+<!-- Branches modal -->
+<div class="modal-overlay" id="branches-modal" onclick="closeBranchesModal(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">Филиалы</div>
+    <div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;">
+      <label style="display:flex;gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--bg-secondary);font-weight:600;">
+        <input type="checkbox" id="br-all" onchange="toggleAllBranches(this.checked)"> Все филиалы
+      </label>
+      <div id="br-list"></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px;">
+      <button class="btn-full btn-primary" onclick="applyBranches()">Применить</button>
+      <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="closeBranchesModalDirect()">Отмена</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -1139,6 +1172,9 @@ const state = {
   restaurants: [],
   period: 'today',
   salesPeriod: 'today',
+  customRange: null,       // {from, to} | null — выбранный диапазон на главной
+  salesCustomRange: null,  // {from, to} | null — выбранный диапазон в Продажах
+  selectedBranches: null,  // null = single (use state.restaurant); string[] = multi
   salesTab: 'general',
   expenseTab: 'foodcost',
   retentionTab: 'cloud',
@@ -1149,19 +1185,26 @@ const state = {
   aiHistory: [],
   scrollPositions: {},
   onboardingComplete: false,
-  olapCache: {}  // кэш сырых OLAP данных по периоду
+  olapCache: {}  // кэш сырых OLAP данных: ключ "period[:customFrom:customTo]:branches"
 };
 
 // ============ OLAP FRONTEND ENGINE ============
 async function fetchOlap(period) {
   if (state.demoMode) return null;
-  const orgId = state.restaurant?.organization_id;
+  const orgId = getActiveOrgIds()[0] || state.restaurant?.organization_id;
   if (!orgId) return null;
-  if (state.olapCache[period]) return state.olapCache[period];
+  // Определяем какой customRange используется: для main/comparison — state.customRange,
+  // для sales — state.salesCustomRange. Эвристика: если period совпадает с state.salesPeriod
+  // и тот в custom-режиме — берём salesCustomRange, иначе customRange.
+  const isSales = period === state.salesPeriod && state.salesPeriod === 'custom';
+  const range = period === 'custom' ? (isSales ? state.salesCustomRange : state.customRange) : null;
+  const cKey = cacheKeyFor(period, range);
+  if (state.olapCache[cKey]) return state.olapCache[cKey];
   try {
-    const res = await apiGet(`/api/olap/${orgId}?period=${period}`);
+    const q = buildPeriodQuery(period, range);
+    const res = await apiGet(`/api/olap/${orgId}?${q}${getOrgIdsParam()}`);
     if (res.demo || !res.data) return null;
-    state.olapCache[period] = res.data;
+    state.olapCache[cKey] = res.data;
     return res.data;
   } catch(e) { return null; }
 }
@@ -1217,10 +1260,31 @@ async function checkExistingUser() {
     if (data && Array.isArray(data) && data.length > 0 && data[0].organization_id !== 'demo-org-1') {
       state.onboardingComplete = true;
       state.restaurants = data;
+      // Восстановим мульти-выбор филиалов
+      try {
+        const sb = localStorage.getItem('selected_branches');
+        if (sb) {
+          const parsed = JSON.parse(sb);
+          if (Array.isArray(parsed) && parsed.length > 1) {
+            const valid = parsed.filter(id => data.find(r => r.organization_id === id));
+            if (valid.length > 1) state.selectedBranches = valid;
+          }
+        }
+      } catch(e) {}
       renderRestSelector();
       const lastId = localStorage.getItem('last_restaurant_id');
       const def = (lastId && data.find(r => r.organization_id === lastId)) || data[0];
-      selectRestaurant(def);
+      // selectRestaurant сбросит selectedBranches — обходим: вручную ставим restaurant
+      if (state.selectedBranches) {
+        state.restaurant = def;
+        state.demoMode = false;
+        localStorage.setItem('last_restaurant_id', def.organization_id);
+        const nameEl = document.getElementById('rest-name');
+        if (nameEl) nameEl.textContent = getCurrentRestaurantTitle();
+        loadDashboard();
+      } else {
+        selectRestaurant(def);
+      }
       document.getElementById('screen-onboarding').classList.remove('active');
       document.getElementById('navbar').classList.add('visible');
       switchTab('main');
@@ -1252,6 +1316,43 @@ async function apiPost(path, body) {
   if (tg?.initData) headers['X-Telegram-Init-Data'] = tg.initData;
   const resp = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify(body) });
   return resp.json();
+}
+
+// ============ HELPERS: query-string и активные филиалы ============
+function buildPeriodQuery(period, customRange) {
+  if (period === 'custom' && customRange?.from && customRange?.to) {
+    return `period=custom&from=${customRange.from}&to=${customRange.to}`;
+  }
+  return `period=${period}`;
+}
+function getOrgIdsParam() {
+  if (state.selectedBranches && state.selectedBranches.length > 1) {
+    return '&org_ids=' + encodeURIComponent(state.selectedBranches.join(','));
+  }
+  return '';
+}
+function getActiveOrgIds() {
+  if (state.selectedBranches && state.selectedBranches.length) return state.selectedBranches;
+  return state.restaurant ? [state.restaurant.organization_id] : [];
+}
+function withOrgIds(url) {
+  const p = getOrgIdsParam();
+  if (!p) return url;
+  return url + (url.includes('?') ? p : '?' + p.slice(1));
+}
+function cacheKeyFor(period, customRange) {
+  const base = period === 'custom' && customRange?.from
+    ? `custom:${customRange.from}:${customRange.to}`
+    : period;
+  const branches = (state.selectedBranches || []).slice().sort().join(',') || 'single';
+  return `${base}:${branches}`;
+}
+function getCurrentRestaurantTitle() {
+  if (state.selectedBranches && state.selectedBranches.length > 1) {
+    if (state.selectedBranches.length === state.restaurants.length) return 'Все филиалы';
+    return `${state.selectedBranches.length} филиалов`;
+  }
+  return state.restaurant?.organization_name || '';
 }
 
 // ============ NAVIGATION ============
@@ -1470,12 +1571,19 @@ async function loadRestaurants() {
 function renderRestSelector() {
   const el = document.getElementById('rest-selector');
   if (!el) return;
-  el.innerHTML = '';
-  el.innerHTML = state.restaurants.map(r => `
-    <div class="rest-chip ${state.restaurant?.id === r.id ? 'active' : ''}" onclick='selectRestaurant(${JSON.stringify(r)})'>
-      ${escHtml(r.organization_name)}
-    </div>
-  `).join('');
+  const multi = state.selectedBranches && state.selectedBranches.length > 1;
+  const allSelected = multi && state.selectedBranches.length === state.restaurants.length;
+  const multiLabel = allSelected ? '🏢 Все филиалы'
+    : multi ? `🏢 ${state.selectedBranches.length} филиалов`
+    : '🏢 Филиалы';
+  const chips = [];
+  if (state.restaurants.length > 1) {
+    chips.push(`<div class="rest-chip ${multi ? 'active' : ''}" onclick="openBranchesModal()">${multiLabel}</div>`);
+  }
+  state.restaurants.forEach(r => {
+    chips.push(`<div class="rest-chip ${!multi && state.restaurant?.id === r.id ? 'active' : ''}" onclick='selectRestaurant(${JSON.stringify(r)})'>${escHtml(r.organization_name)}</div>`);
+  });
+  el.innerHTML = chips.join('');
 }
 
 function showIikoError(msg) {
@@ -1494,12 +1602,14 @@ function hideIikoError() {
 
 function selectRestaurant(rest) {
   state.restaurant = rest;
+  state.selectedBranches = null;
+  localStorage.removeItem('selected_branches');
   state.olapCache = {};
   localStorage.setItem('last_restaurant_id', rest.organization_id);
   state.demoMode = rest.api_login === 'demo' || rest.organization_id === 'demo-org-1';
   renderRestSelector();
   const nameEl = document.getElementById('rest-name');
-  if (nameEl) nameEl.textContent = rest.organization_name;
+  if (nameEl) nameEl.textContent = getCurrentRestaurantTitle();
   ['demo-banner', 'sales-demo', 'staff-demo', 'expenses-demo', 'retention-demo'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.style.display = state.demoMode ? 'flex' : 'none';
@@ -1518,7 +1628,7 @@ function selectRestaurant(rest) {
 
 async function loadDashboard() {
   if (!state.restaurant) return;
-  const orgId = state.restaurant.organization_id;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
   startStoplistRefresh();
 
   // Сначала пробуем OLAP (один запрос)
@@ -1539,7 +1649,8 @@ async function loadDashboard() {
     document.getElementById('m-check-change').innerHTML = '';
     document.getElementById('m-guests-change').innerHTML = '';
     // График всегда за 7 дней
-    const weekRows = state.olapCache['week'] || rows;
+    const weekCacheKey = cacheKeyFor('week', null);
+    const weekRows = state.olapCache[weekCacheKey] || rows;
     const byDate = olapGroup(weekRows, ['OpenDate.Typed'], ['DishAmountSum']);
     byDate.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
     if (byDate.length > 0) {
@@ -1549,7 +1660,7 @@ async function loadDashboard() {
       });
     }
     // Загрузить неделю для графика если ещё нет
-    if (!state.olapCache['week']) {
+    if (!state.olapCache[weekCacheKey]) {
       fetchOlap('week').then(wRows => {
         if (wRows && wRows.length > 0) {
           const wd = olapGroup(wRows, ['OpenDate.Typed'], ['DishAmountSum']);
@@ -1563,7 +1674,7 @@ async function loadDashboard() {
 
   // Фолбек на старый endpoint (демо или iikoWeb без OLAP)
   try {
-    const data = await apiGet(`/api/dashboard/${orgId}?period=${state.period}`);
+    const data = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
     hideIikoError();
     animateValue('m-revenue', data.revenue_today, ' ₸');
     animateValue('m-check', data.avg_check, ' ₸');
@@ -1585,7 +1696,12 @@ async function loadDashboard() {
 function setPeriod(p, el) {
   haptic();
   state.period = p;
-  delete state.olapCache[p];  // сброс кэша для этого периода
+  if (p !== 'custom') {
+    state.customRange = null;
+    const dateChip = document.getElementById('main-date-chip');
+    if (dateChip) dateChip.textContent = '📅 Даты';
+  }
+  delete state.olapCache[cacheKeyFor(p, state.customRange)];
   document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
   if (el) el.classList.add('active');
   loadDashboard();
@@ -1633,12 +1749,12 @@ function renderRevenueChart(chartData) {
 // ============ SALES ============
 async function loadSales() {
   if (!state.restaurant) return;
-  const orgId = state.restaurant.organization_id;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
 
   const rows = await fetchOlap(state.salesPeriod);
 
   // Каналы и персонал — через отдельный backend (точные данные по заказам)
-  apiGet(`/api/sales/${orgId}?period=${state.salesPeriod}`).then(data => {
+  apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`).then(data => {
     if (!data.channels) return;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -1700,7 +1816,7 @@ async function loadSales() {
 
   // Фолбек
   try {
-    const data = await apiGet(`/api/sales/${orgId}?period=${state.salesPeriod}`);
+    const data = await apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`);
     state.salesData = data;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -1728,13 +1844,109 @@ async function loadSales() {
 function setSalesPeriod(p, el) {
   haptic();
   state.salesPeriod = p;
-  delete state.olapCache[p];
+  if (p !== 'custom') {
+    state.salesCustomRange = null;
+    const dateChip = document.getElementById('sales-date-chip');
+    if (dateChip) dateChip.textContent = '📅 Даты';
+  }
+  delete state.olapCache[cacheKeyFor(p, state.salesCustomRange)];
   document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
   if (el) el.classList.add('active');
   loadSales();
   // Обновляем активную подвкладку
   if (state.salesTab === 'cancels') renderCancels().catch(console.error);
   if (state.salesTab === 'cart') renderCart().catch(console.error);
+}
+
+// ============ DATE RANGE MODAL ============
+let _dateModalScope = 'main';
+
+function openDateRangeModal(scope) {
+  haptic();
+  _dateModalScope = scope;
+  const cur = scope === 'sales' ? state.salesCustomRange : state.customRange;
+  const today = new Date().toISOString().slice(0, 10);
+  document.getElementById('dr-from').value = cur?.from || today;
+  document.getElementById('dr-to').value = cur?.to || today;
+  document.getElementById('date-range-modal').classList.add('active');
+}
+function closeDateRangeModal(e) {
+  if (e.target === document.getElementById('date-range-modal')) closeDateRangeModalDirect();
+}
+function closeDateRangeModalDirect() {
+  document.getElementById('date-range-modal').classList.remove('active');
+}
+function applyDateRange() {
+  const from = document.getElementById('dr-from').value;
+  const to = document.getElementById('dr-to').value;
+  if (!from || !to) { showToast('Укажи обе даты'); return; }
+  if (from > to) { showToast('Дата "С" должна быть раньше "По"'); return; }
+  closeDateRangeModalDirect();
+  const range = { from, to };
+  const fmt = s => s.slice(8, 10) + '.' + s.slice(5, 7);
+  if (_dateModalScope === 'sales') {
+    state.salesCustomRange = range;
+    state.salesPeriod = 'custom';
+    document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
+    const chip = document.getElementById('sales-date-chip');
+    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
+    delete state.olapCache[cacheKeyFor('custom', range)];
+    loadSales();
+    if (state.salesTab === 'cancels') renderCancels().catch(console.error);
+    if (state.salesTab === 'cart') renderCart().catch(console.error);
+  } else {
+    state.customRange = range;
+    state.period = 'custom';
+    document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
+    const chip = document.getElementById('main-date-chip');
+    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
+    delete state.olapCache[cacheKeyFor('custom', range)];
+    loadDashboard();
+  }
+}
+
+// ============ BRANCHES MODAL ============
+function openBranchesModal() {
+  haptic();
+  const list = document.getElementById('br-list');
+  const sel = new Set(state.selectedBranches || (state.restaurant ? [state.restaurant.organization_id] : []));
+  list.innerHTML = state.restaurants.map(r => `
+    <label style="display:flex;gap:10px;align-items:center;padding:10px 0;">
+      <input type="checkbox" value="${escHtml(r.organization_id)}" ${sel.has(r.organization_id) ? 'checked' : ''}>
+      ${escHtml(r.organization_name)}
+    </label>
+  `).join('');
+  document.getElementById('br-all').checked = sel.size === state.restaurants.length;
+  document.getElementById('branches-modal').classList.add('active');
+}
+function closeBranchesModal(e) {
+  if (e.target === document.getElementById('branches-modal')) closeBranchesModalDirect();
+}
+function closeBranchesModalDirect() {
+  document.getElementById('branches-modal').classList.remove('active');
+}
+function toggleAllBranches(checked) {
+  document.querySelectorAll('#br-list input[type=checkbox]').forEach(c => c.checked = checked);
+}
+function applyBranches() {
+  const checked = Array.from(document.querySelectorAll('#br-list input[type=checkbox]:checked'))
+    .map(c => c.value);
+  if (!checked.length) { showToast('Выбери хотя бы один филиал'); return; }
+  closeBranchesModalDirect();
+  if (checked.length === 1) {
+    const r = state.restaurants.find(x => x.organization_id === checked[0]);
+    if (r) selectRestaurant(r);
+    return;
+  }
+  state.selectedBranches = checked;
+  localStorage.setItem('selected_branches', JSON.stringify(checked));
+  state.olapCache = {};
+  renderRestSelector();
+  const nameEl = document.getElementById('rest-name');
+  if (nameEl) nameEl.textContent = getCurrentRestaurantTitle();
+  loadDashboard();
+  if (state.currentTab === 'sales') loadSales();
+  if (state.currentTab === 'comparison') loadComparison();
 }
 
 async function setSalesTab(tab, el) {
@@ -1895,7 +2107,7 @@ async function renderCancels() {
     if (el('cancels-count')) el('cancels-count').textContent = totalOrders.toLocaleString('ru-RU');
 
     // % от выручки из OLAP
-    const olapRows = state.olapCache[state.salesPeriod] || [];
+    const olapRows = state.olapCache[cacheKeyFor(state.salesPeriod, state.salesCustomRange)] || [];
     const totalRev = olapRows.reduce((s, r) => s + (r.DishAmountSum || 0), 0);
     const totalOrd = olapRows.reduce((s, r) => s + (r.OrdersCount || 0), 0);
     if (el('cancels-returns-pct') && totalRev > 0)
@@ -2353,8 +2565,8 @@ function startDataRefresh() {
   _dataRefreshTimer = setInterval(() => {
     if (!state.restaurant || state.demoMode) return;
     // Сбрасываем кэш текущего периода
-    delete state.olapCache[state.period];
-    delete state.olapCache[state.salesPeriod];
+    delete state.olapCache[cacheKeyFor(state.period, state.customRange)];
+    delete state.olapCache[cacheKeyFor(state.salesPeriod, state.salesCustomRange)];
     // Обновляем активную вкладку
     const t = state.currentTab;
     if (t === 'main')      loadDashboard();
@@ -2388,9 +2600,9 @@ function setCompView(view, el) {
 
 async function loadComparison() {
   if (!state.restaurant) return;
-  const orgId = state.restaurant.organization_id;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
   try {
-    _compData = await apiGet(`/api/comparison/${orgId}`);
+    _compData = await apiGet(withOrgIds(`/api/comparison/${orgId}`));
     renderComparison();
   } catch(e) { console.error(e); }
 }
@@ -2499,7 +2711,7 @@ function renderComparison() {
   });
 
   // Таблица
-  document.getElementById('comp-tbody').innerHTML = allKeys.slice(-20).reverse().map((k, i) => {
+  document.getElementById('comp-tbody').innerHTML = allKeys.slice().reverse().map((k, i) => {
     const ci = allKeys.length - 1 - i;
     const cr = curRevs[ci], pr = prevRevs[ci];
     const delta = pr > 0 ? ((cr - pr) / pr * 100) : 0;
@@ -2584,9 +2796,12 @@ function showToast(msg) {
 }
 
 // ============ EXPORT ============
-function exportCSV(type) {
+async function exportReport(type) {
   haptic();
-  const rows = state.olapCache[state.salesPeriod] || state.olapCache[state.period] || [];
+  const salesKey = cacheKeyFor(state.salesPeriod, state.salesCustomRange);
+  const mainKey = cacheKeyFor(state.period, state.customRange);
+  const weekKey = cacheKeyFor('week', null);
+  const rows = state.olapCache[salesKey] || state.olapCache[mainKey] || [];
   let csv = '', filename = type + '.csv';
 
   if (type === 'channels') {
@@ -2660,7 +2875,7 @@ function exportCSV(type) {
 
   } else if (type === 'revenue-7days') {
     const byDate = {};
-    const weekRows = state.olapCache['week'] || rows;
+    const weekRows = state.olapCache[weekKey] || rows;
     weekRows.forEach(r => {
       const d = (r['OpenDate.Typed'] || '').slice(0,10);
       if (!d) return;
@@ -2690,13 +2905,18 @@ function exportCSV(type) {
     return;
   }
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(blob);
-  link.download = filename;
-  link.click();
-  URL.revokeObjectURL(link.href);
-  showToast('Файл скачан');
+  showToast('Отправка в чат...');
+  try {
+    const res = await apiPost('/api/export-send', {
+      filename: filename,
+      content: csv,
+      caption: `iikoBoss · ${type} · ${new Date().toLocaleString('ru-RU')}`
+    });
+    if (res?.ok) showToast('Файл отправлен в чат с ботом');
+    else showToast(res?.detail || 'Не удалось отправить');
+  } catch (e) {
+    showToast(e?.message || 'Ошибка отправки');
+  }
 }
 
 // ============ EXPENSE MODAL ============
