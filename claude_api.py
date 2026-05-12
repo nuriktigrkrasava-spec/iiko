@@ -2,7 +2,7 @@ import os
 import hashlib
 import json
 import base64
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from anthropic import AsyncAnthropic
 from database import get_ai_cache, set_ai_cache
 
@@ -61,64 +61,63 @@ INVOICE_PROMPT = """Ты помощник по распознаванию нак
     {"name": "название товара", "quantity": 0.0, "unit": "кг/шт/л/уп", "price_per_unit": 0.0, "total": 0.0}
   ],
   "total_amount": 0.0,
+  "vat_amount": 0.0,
+  "vat_rate": 12.0,
+  "currency": "KZT",
   "notes": "любые важные заметки или null"
 }
-Если значение не найдено — null. Quantity и цены — числа, не строки."""
+Правила:
+- Если значение не найдено — null. Quantity и цены — числа, не строки.
+- total_amount — итоговая сумма С НДС (как пишут в накладной).
+- vat_amount — сумма НДС в тенге. Если в накладной не указана, но видно что цены С НДС, посчитай: total_amount - total_amount / (1 + vat_rate/100). vat_rate в РК = 12.0 по умолчанию.
+- Если фото содержит несколько страниц одной накладной — объедини все позиции в один items[], не дублируй заголовок/итог."""
 
 
-async def analyze_invoice_photo(image_bytes: bytes, mime_type: str = "image/jpeg") -> Dict[str, Any]:
-    """Распознаёт накладную из фото через Claude Vision."""
+def _parse_claude_json(raw_text: str) -> Dict[str, Any]:
+    """Снимает markdown-обёртку с ответа Claude и парсит JSON. Бросает исключение при ошибке."""
+    raw = raw_text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return json.loads(raw.strip())
+
+
+async def analyze_invoice_photos(images: List[Tuple[bytes, str]]) -> Dict[str, Any]:
+    """Распознаёт накладную из одного или нескольких фото через Claude Vision.
+    Все изображения обрабатываются в одном запросе — Claude собирает их в один документ.
+
+    Args:
+        images: список (image_bytes, mime_type), напр. [(b"...", "image/jpeg"), ...]
+    Returns:
+        dict с полями supplier/date/items/total_amount/vat_amount/... или {"error": "..."}.
+    """
     if not client:
         return {"error": "AI недоступен"}
-    try:
+    if not images:
+        return {"error": "Нет изображений для распознавания"}
+
+    content = []
+    for image_bytes, mime_type in images:
         image_b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
-        message = await client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": mime_type, "data": image_b64}
-                    },
-                    {"type": "text", "text": INVOICE_PROMPT}
-                ]
-            }]
-        )
-        raw = message.content[0].text.strip()
-        # Убираем markdown-обёртку если есть
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
-    except json.JSONDecodeError:
-        return {"error": "Не удалось распарсить ответ", "raw": message.content[0].text[:500]}
-    except Exception as e:
-        return {"error": str(e)}
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": mime_type, "data": image_b64}
+        })
+    content.append({"type": "text", "text": INVOICE_PROMPT})
 
-
-async def analyze_invoice_text(text: str) -> Dict[str, Any]:
-    """Распознаёт накладную из текстового сообщения."""
-    if not client:
-        return {"error": "AI недоступен"}
+    message = None
     try:
         message = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=2048,
-            messages=[{
-                "role": "user",
-                "content": f"{INVOICE_PROMPT}\n\nТекст накладной:\n{text}"
-            }]
+            max_tokens=4096,
+            messages=[{"role": "user", "content": content}]
         )
-        raw = message.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        return json.loads(raw.strip())
+        return _parse_claude_json(message.content[0].text)
     except json.JSONDecodeError:
-        return {"error": "Не удалось распарсить", "raw": message.content[0].text[:500]}
+        raw_preview = message.content[0].text[:500] if message else ""
+        return {"error": "Не удалось распарсить ответ", "raw": raw_preview}
     except Exception as e:
         return {"error": str(e)}
+
+
