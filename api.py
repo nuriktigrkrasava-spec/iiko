@@ -7,7 +7,8 @@ import hashlib
 import json
 from datetime import datetime, timedelta, date
 from enum import Enum
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,10 +24,11 @@ from database import (
     init_db, get_user, create_user, set_demo_mode,
     get_restaurants, add_restaurant, delete_restaurant,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
-    save_bot_invoice, get_bot_invoices
+    save_bot_invoice, get_bot_invoices, get_bot_invoice,
+    update_bot_invoice, find_invoice_by_dedup
 )
 from iiko import IikoClient, get_client
-from claude_api import analyze_with_claude, analyze_invoice_photo, analyze_invoice_text
+from claude_api import analyze_with_claude, analyze_invoice_photos
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,6 +76,7 @@ app.add_middleware(
 )
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
@@ -965,21 +968,35 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
                 "items": len(items),
                 "amount": float(inv.get("sum", 0) or 0)
             })
-        # Добавляем накладные из Telegram бота (подтверждённые)
+        # Добавляем накладные из Telegram бота
+        BOT_STATUS_MAP = {
+            "draft": "Черновик",
+            "draft_in_iiko": "Создан в iiko",
+            "posted": "Проведена",
+            "needs_mapping": "Нужно сопоставление",
+            "iiko_error": "Ошибка iiko",
+            "pending": "В обработке",
+        }
         bot_invs = get_bot_invoices(limit=200)
         for b in bot_invs:
-            if b.get("status") == "pending":
-                continue  # только подтверждённые
+            raw_status = b.get("status") or "draft"
+            if raw_status == "pending":
+                continue  # ещё в работе бота
             result_list.append({
                 "id": f"BOT-{b['id']}",
-                "status": "Проведена",
+                "bot_id": b["id"],
+                "status": BOT_STATUS_MAP.get(raw_status, raw_status),
+                "raw_status": raw_status,
                 "supplier": b.get("supplier") or "—",
-                "date": b.get("date", "")[:10] or b.get("created_at", "")[:10],
+                "date": (b.get("date") or "")[:10] or (b.get("created_at") or "")[:10],
                 "items": len(json.loads(b.get("items") or "[]")),
                 "amount": float(b.get("total_amount") or 0),
+                "vat_amount": float(b.get("vat_amount") or 0),
+                "iiko_doc_id": b.get("iiko_doc_id") or "",
+                "iiko_doc_number": b.get("iiko_doc_number") or "",
                 "source": "bot",
                 "branch": b.get("branch") or "",
-                "by": b.get("telegram_user") or ""
+                "by": b.get("telegram_user") or "",
             })
 
         result_list.sort(key=lambda x: x["date"], reverse=True)
@@ -1429,83 +1446,573 @@ async def export_send(request: Request, payload: ExportSendPayload,
         raise HTTPException(status_code=502, detail=f"Telegram request failed: {e}")
 
 
-# Временное хранилище ожидающих подтверждения накладных: {chat_id: {данные}}
-_pending_invoices: Dict[int, dict] = {}
+# ============ INVOICE EDITOR (Mini App) + POST/UNPOST ============
 
-CONFIRM_KB = {
-    "inline_keyboard": [[
-        {"text": "✅ Сохранить", "callback_data": "confirm"},
-        {"text": "❌ Отменить",  "callback_data": "cancel"}
-    ]]
+class InvoiceEditPayload(BaseModel):
+    items: List[Dict[str, Any]]
+    supplier: Optional[str] = None
+    date: Optional[str] = None
+    total_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
+
+
+@app.get("/api/invoice-edit/{pending_id}")
+async def invoice_edit_get(pending_id: str, user: Dict = Depends(get_current_user)):
+    """Возвращает данные pending-накладной для редактирования в Mini App.
+    Доступ только владельцу (по telegram_id из initData)."""
+    chat_id = _pending_by_id.get(pending_id)
+    pending = _pending_invoices.get(chat_id) if chat_id else None
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending invoice not found or expired")
+    if pending.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+    result = pending.get("result") or {}
+    rests = _get_user_orgs(pending["telegram_id"])
+    org_id_for_search = rests[0]["organization_id"] if rests else None
+    return {
+        "pending_id": pending_id,
+        "supplier": result.get("supplier"),
+        "date": result.get("date"),
+        "items": result.get("items", []),
+        "total_amount": result.get("total_amount", 0),
+        "vat_amount": result.get("vat_amount", 0),
+        "vat_rate": result.get("vat_rate", 12.0),
+        "currency": result.get("currency", "KZT"),
+        "search_org_id": org_id_for_search,
+    }
+
+
+@app.post("/api/invoice-edit/{pending_id}")
+async def invoice_edit_post(pending_id: str, payload: InvoiceEditPayload,
+                             user: Dict = Depends(get_current_user)):
+    """Принимает обновлённую накладную из Mini App (fallback к WebApp.sendData).
+    После обновления pending — бот сам перерисует превью при следующем callback'е,
+    но для лучшего UX делаем edit прямо здесь."""
+    chat_id = _pending_by_id.get(pending_id)
+    pending = _pending_invoices.get(chat_id) if chat_id else None
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending invoice not found")
+    if pending.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+    r = pending.setdefault("result", {})
+    r["items"] = payload.items
+    if payload.supplier is not None: r["supplier"] = payload.supplier
+    if payload.date is not None: r["date"] = payload.date
+    if payload.total_amount is not None: r["total_amount"] = payload.total_amount
+    if payload.vat_amount is not None: r["vat_amount"] = payload.vat_amount
+    pending["state"] = "preview"
+    # Перерисуем превью в боте
+    if pending.get("message_id"):
+        await _tg_edit(pending["chat_id"], pending["message_id"],
+                       _format_invoice_v2(pending, "preview"),
+                       _invoice_kb(pending["pending_id"]))
+    return {"ok": True}
+
+
+@app.get("/api/nomenclature/search/{org_id}")
+async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
+                               limit: int = Query(30, le=50),
+                               user: Dict = Depends(get_current_user)):
+    """Поиск товаров по имени в номенклатуре iiko (для редактора накладных)."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"products": []}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        products = await client.search_nomenclature(real_org, q, limit=limit)
+    except Exception as e:
+        logger.warning(f"[nomenclature_search] {e}")
+        products = []
+    return {"products": [
+        {"id": p.get("id"), "name": p.get("name"), "num": p.get("num"),
+         "code": p.get("code"), "unit": p.get("unit") or p.get("mainUnit")}
+        for p in products
+    ]}
+
+
+@app.get("/api/suppliers/{org_id}")
+async def suppliers_list(org_id: str, user: Dict = Depends(get_current_user)):
+    """Список поставщиков из iiko (для редактора)."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"suppliers": []}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        suppliers = await client.get_suppliers(real_org)
+    except Exception as e:
+        logger.warning(f"[suppliers_list] {e}")
+        suppliers = []
+    return {"suppliers": suppliers}
+
+
+@app.post("/api/invoices/{invoice_id}/post")
+async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_user)):
+    """Провести накладную в iiko."""
+    inv = get_bot_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+    if not inv.get("iiko_doc_id"):
+        raise HTTPException(status_code=400, detail="Накладная не создана в iiko (нет doc_id)")
+    real_org = _get_org_id(inv["organization_id"], user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        resp = await client.set_document_status(real_org, inv["iiko_doc_id"], "PROCESSED")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"iiko: {e}")
+    if not resp.get("ok"):
+        raise HTTPException(status_code=502, detail=resp.get("error") or "iiko error")
+    update_bot_invoice(invoice_id, status="posted")
+    return {"ok": True}
+
+
+@app.post("/api/invoices/{invoice_id}/unpost")
+async def invoice_unpost_doc(invoice_id: int, user: Dict = Depends(get_current_user)):
+    """Распровести накладную в iiko."""
+    inv = get_bot_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+    if not inv.get("iiko_doc_id"):
+        raise HTTPException(status_code=400, detail="Нет doc_id")
+    real_org = _get_org_id(inv["organization_id"], user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        resp = await client.set_document_status(real_org, inv["iiko_doc_id"], "NEW")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"iiko: {e}")
+    if not resp.get("ok"):
+        raise HTTPException(status_code=502, detail=resp.get("error") or "iiko error")
+    update_bot_invoice(invoice_id, status="draft_in_iiko")
+    return {"ok": True}
+
+
+# ============ INVOICE BOT v2: state + helpers ============
+# _pending_invoices: chat_id -> pending dict
+# _pending_by_id:    pending_id -> chat_id (reverse index для Mini App, этап 5)
+_pending_invoices: Dict[int, dict] = {}
+_pending_by_id: Dict[str, int] = {}
+
+def _invoice_kb(pending_id: str) -> dict:
+    """Динамическая клавиатура превью — WebApp-кнопка редактирования с pending_id в URL."""
+    return {
+        "inline_keyboard": [
+            [{"text": "📤 Отправить в iiko", "callback_data": "act:send"},
+             {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
+            [{"text": "✏️ Редактировать",   "web_app": {"url": f"{MINIAPP_URL}/?edit={pending_id}"}},
+             {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
+        ]
+    }
+
+
+# Backward-compat alias для мест где не нужна WebApp-кнопка
+INVOICE_KB_FALLBACK = {
+    "inline_keyboard": [
+        [{"text": "📤 Отправить в iiko", "callback_data": "act:send"},
+         {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
+        [{"text": "✏️ Редактировать",   "callback_data": "act:edit"},
+         {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
+    ]
+}
+
+ADD_PHOTOS_KB = {
+    "inline_keyboard": [
+        [{"text": "✅ Готово",  "callback_data": "add:done"}],
+        [{"text": "❌ Отмена", "callback_data": "act:cancel"}],
+    ]
 }
 
 
-async def _tg_send(chat_id: int, text: str, reply_markup: dict = None):
+async def _tg_send(chat_id: int, text: str, reply_markup: dict = None) -> Optional[int]:
+    """Шлёт сообщение, возвращает message_id (или None при ошибке)."""
     if not BOT_TOKEN:
-        return
+        return None
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload)
+        return r.json().get("result", {}).get("message_id")
+    except Exception as e:
+        logger.warning(f"[tg_send] {e}")
+        return None
 
 
 async def _tg_edit(chat_id: int, message_id: int, text: str, reply_markup: dict = None):
-    if not BOT_TOKEN:
+    if not BOT_TOKEN or not message_id:
         return
     payload = {"chat_id": chat_id, "message_id": message_id,
                "text": text, "parse_mode": "HTML"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json=payload)
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json=payload)
+    except Exception as e:
+        logger.warning(f"[tg_edit] {e}")
 
 
-def _format_invoice(result: dict, branch: str = "", status: str = "preview") -> str:
-    supplier = result.get("supplier") or "Неизвестно"
-    items    = result.get("items", []) or []
-    total    = float(result.get("total_amount") or 0)
-    date_str = result.get("date") or ""
-    icon = {"preview": "📋", "branch": "📋", "confirmed": "✅", "cancelled": "❌"}.get(status, "📋")
-    lines = [f"{icon} <b>Накладная распознана</b>",
-             f"🏭 Поставщик: {supplier}"]
-    if branch:
-        lines.append(f"🏢 Филиал: {branch}")
-    lines.append(f"📅 Дата: {date_str or '—'}")
+async def _tg_download_file(file_id: str) -> Optional[Tuple[bytes, str]]:
+    """Скачивает файл по file_id. Возвращает (bytes, mime_type) или None."""
+    if not BOT_TOKEN:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as c:
+            r = await c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                            params={"file_id": file_id})
+            result = r.json().get("result")
+            if not result:
+                return None
+            file_path = result.get("file_path", "")
+            img_r = await c.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
+            return img_r.content, "image/jpeg"
+    except Exception as e:
+        logger.warning(f"[tg_download] {e}")
+        return None
+
+
+def _pending_id() -> str:
+    """Короткий UUID для Mini App URL."""
+    return uuid4().hex[:16]
+
+
+def _fmt_kzt(n: float) -> str:
+    """12500.0 -> '12 500'."""
+    try:
+        return f"{int(round(float(n))):,}".replace(",", " ")
+    except Exception:
+        return str(n)
+
+
+def _photo_count_text(n: int) -> str:
+    return "1 фото" if n == 1 else f"{n} фото"
+
+
+def _format_invoice_v2(p: dict, status: str = "preview") -> str:
+    """Превью накладной: позиции + «Итого X ₸ (в т.ч. НДС Y ₸)»."""
+    result = p.get("result", {}) or {}
+    supplier = result.get("supplier") or "—"
+    date_str = result.get("date") or "—"
+    items = result.get("items", []) or []
+    total = float(result.get("total_amount") or 0)
+    vat = float(result.get("vat_amount") or 0)
+    n_photos = len(p.get("images") or [])
+
+    icon = {"preview": "📋", "adding": "📸", "recognizing": "🔍",
+            "sent": "✅", "cancelled": "❌"}.get(status, "📋")
+
+    lines = [f"{icon} <b>Накладная распознана</b>"]
+    if n_photos > 1:
+        lines.append(f"📎 {_photo_count_text(n_photos)} объединено")
+    lines.append(f"🏭 Поставщик: {supplier}")
+    lines.append(f"📅 Дата: {date_str}")
+
     if items:
         lines.append(f"\n<b>Позиции ({len(items)}):</b>")
-        for it in items[:10]:
-            lines.append(f"• {it.get('name','')}: {it.get('quantity','—')} {it.get('unit','')} "
-                         f"× {it.get('price_per_unit','—')} ₸ = {it.get('total','—')} ₸")
-        if len(items) > 10:
-            lines.append(f"  … ещё {len(items)-10} позиций")
-    lines.append(f"\n💰 <b>Итого: {total:,.0f} ₸</b>")
-    if status == "preview":   lines.append("\n<i>Выбери филиал для сохранения:</i>")
-    elif status == "branch":  lines.append("\n<i>Всё верно?</i>")
-    elif status == "confirmed": lines.append("\n<b>Сохранено ✅</b>")
-    elif status == "cancelled": lines.append("\n<i>Отменено.</i>")
+        for it in items[:15]:
+            nm = it.get("name", "—") or "—"
+            qty = it.get("quantity")
+            un = it.get("unit") or ""
+            ppu = it.get("price_per_unit")
+            tot = it.get("total")
+            qty_s = "—" if qty is None else str(qty)
+            ppu_s = "—" if ppu is None else _fmt_kzt(ppu)
+            tot_s = "—" if tot is None else _fmt_kzt(tot)
+            lines.append(f"• {nm}: {qty_s} {un} × {ppu_s} ₸ = {tot_s} ₸")
+        if len(items) > 15:
+            lines.append(f"  … ещё {len(items)-15} позиций")
+
+    total_line = f"\n💰 <b>Итого: {_fmt_kzt(total)} ₸</b>"
+    if vat and vat > 0:
+        total_line += f"  <i>(в т.ч. НДС {_fmt_kzt(vat)} ₸)</i>"
+    lines.append(total_line)
+
+    if status == "preview":
+        lines.append("\n<i>Выбери действие ниже:</i>")
+    elif status == "adding":
+        lines.append("\n<i>Пришли ещё .jpg файлом, потом нажми «✅ Готово»</i>")
+    elif status == "sent":
+        lines.append("\n<b>✅ Отправлено в iiko</b>")
+    elif status == "cancelled":
+        lines.append("\n<i>Отменено</i>")
+
     return "\n".join(lines)
 
 
-def _branch_keyboard(branches: List[str]) -> dict:
-    """Клавиатура выбора филиала."""
-    rows = [[{"text": name[:35], "callback_data": f"branch:{i}"}]
-            for i, name in enumerate(branches)]
-    rows.append([{"text": "❌ Отменить", "callback_data": "cancel"}])
+def _drop_pending(chat_id: int) -> None:
+    p = _pending_invoices.pop(chat_id, None)
+    if p:
+        _pending_by_id.pop(p.get("pending_id", ""), None)
+
+
+def _get_user_orgs(telegram_id: int) -> List[Dict[str, Any]]:
+    """Все рестораны пользователя (org_id + creds). Дедупликация по organization_id уже в get_restaurants."""
+    return get_restaurants(telegram_id) or []
+
+
+def _bot_iiko_client(rest: Dict[str, Any]):
+    """IikoClient/IikoWebClient для конкретной записи ресторана."""
+    return get_client(rest["api_login"], rest.get("iiko_server"), rest.get("api_password"))
+
+
+def _compute_dedup_hash(supplier: str, date_str: str, total: float,
+                        items: List[Dict[str, Any]]) -> str:
+    """Стабильный хеш накладной для защиты от дублей."""
+    sig_items = sorted([
+        (str(it.get("name", "")).strip().lower(),
+         round(float(it.get("quantity") or 0), 3),
+         round(float(it.get("price_per_unit") or 0), 2))
+        for it in (items or [])
+    ])
+    payload = json.dumps({
+        "s": (supplier or "").strip().lower(),
+        "d": (date_str or "").strip(),
+        "t": round(float(total or 0), 2),
+        "i": sig_items,
+    }, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+async def _auto_match_items(client, org_id: str,
+                             items: List[Dict[str, Any]]) -> Tuple[List[Dict], List[str]]:
+    """Сопоставляет позиции с номенклатурой iiko по имени.
+    Возвращает (sendable_items, unmatched_names).
+    sendable_items — формат для create_incoming_invoice (product, amount, price, sum).
+    """
+    sendable, unmatched = [], []
+    for it in (items or []):
+        # Если уже сопоставлено в редакторе — используем
+        prod_id = it.get("iiko_product_id")
+        if not prod_id:
+            try:
+                matches = await client.search_nomenclature(org_id, it.get("name", ""), limit=1)
+            except Exception:
+                matches = []
+            if matches:
+                prod_id = matches[0].get("id")
+        if not prod_id:
+            unmatched.append(it.get("name", "—"))
+            continue
+        qty = float(it.get("quantity") or 0)
+        price = float(it.get("price_per_unit") or 0)
+        total = float(it.get("total") or (qty * price))
+        sendable.append({
+            "productId": prod_id,
+            "amount": qty,
+            "price": price,
+            "sum": total,
+        })
+    return sendable, unmatched
+
+
+def _suppliers_kb(suppliers: List[Dict[str, Any]], page: int = 0) -> dict:
+    """Клавиатура выбора поставщика (по 20 на страницу)."""
+    PAGE = 20
+    start = page * PAGE
+    chunk = suppliers[start:start + PAGE]
+    rows = []
+    for s in chunk:
+        sid = s.get("id") or s.get("supplierId")
+        name = (s.get("name") or "—")[:35]
+        if sid:
+            rows.append([{"text": name, "callback_data": f"sup:{sid}"}])
+    nav = []
+    if page > 0:
+        nav.append({"text": "← Назад", "callback_data": f"sup:page:{page-1}"})
+    if start + PAGE < len(suppliers):
+        nav.append({"text": "Ещё →", "callback_data": f"sup:page:{page+1}"})
+    if nav:
+        rows.append(nav)
+    rows.append([{"text": "❌ Отмена", "callback_data": "act:cancel"}])
     return {"inline_keyboard": rows}
 
 
-def _get_user_branches(telegram_id: int) -> List[str]:
-    """Возвращает список названий филиалов пользователя."""
-    rests = get_restaurants(telegram_id)
-    # Убираем дубли по org_name
-    seen, result = set(), []
-    for r in rests:
-        name = r.get("organization_name", "")
-        if name and name not in seen:
-            seen.add(name)
-            result.append(name)
-    return result
+def _orgs_kb(orgs: List[Dict[str, Any]]) -> dict:
+    """Клавиатура выбора филиала."""
+    rows = []
+    for o in orgs:
+        oid = o.get("organization_id") or o.get("id")
+        name = (o.get("organization_name") or o.get("name") or "—")[:35]
+        if oid:
+            rows.append([{"text": name, "callback_data": f"org:{oid}"}])
+    rows.append([{"text": "❌ Отмена", "callback_data": "act:cancel"}])
+    return {"inline_keyboard": rows}
+
+
+def _dedup_kb() -> dict:
+    return {
+        "inline_keyboard": [[
+            {"text": "✅ Да, создать копию", "callback_data": "dedup:yes"},
+            {"text": "❌ Нет, отменить",     "callback_data": "dedup:no"},
+        ]]
+    }
+
+
+async def _show_supplier_picker(chat_id: int, msg_id: int, pending: dict) -> bool:
+    """Показывает список поставщиков. True если показано, False если ошибка."""
+    rests = _get_user_orgs(pending["telegram_id"])
+    if not rests:
+        await _tg_edit(chat_id, msg_id,
+            "⚠️ У тебя не настроен ни один ресторан в Mini App. Сначала добавь iiko-учётку.")
+        return False
+    first = rests[0]
+    if first["api_login"] == "demo":
+        await _tg_edit(chat_id, msg_id,
+            "⚠️ Ты в demo-режиме. Отправка в iiko недоступна — добавь реальную учётку.")
+        return False
+    client = _bot_iiko_client(first)
+    try:
+        suppliers = await client.get_suppliers(first["organization_id"])
+    except Exception as e:
+        logger.warning(f"[suppliers] {e}")
+        suppliers = []
+    if not suppliers:
+        await _tg_edit(chat_id, msg_id,
+            "⚠️ Не удалось получить список поставщиков из iiko. Попробуй позже.")
+        return False
+    # сохраним в pending для пагинации/выбора по id
+    pending["state"] = "choosing_supplier"
+    pending["suppliers_cache"] = suppliers
+    await _tg_edit(chat_id, msg_id,
+        f"🏭 <b>Выбери поставщика</b> ({len(suppliers)}):",
+        _suppliers_kb(suppliers, 0))
+    return True
+
+
+async def _show_org_picker(chat_id: int, msg_id: int, pending: dict) -> bool:
+    """Показывает список филиалов того же iiko-сервера."""
+    rests = _get_user_orgs(pending["telegram_id"])
+    if not rests:
+        await _tg_edit(chat_id, msg_id, "⚠️ Нет филиалов в твоей учётке.")
+        return False
+    pending["state"] = "choosing_org"
+    await _tg_edit(chat_id, msg_id,
+        f"🏢 <b>Выбери филиал</b> ({len(rests)}):",
+        _orgs_kb(rests))
+    return True
+
+
+async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
+                          force: bool = False) -> None:
+    """Финальный шаг: dedup-проверка + auto-match + create_incoming_invoice + сохранение в БД."""
+    result = pending.get("result") or {}
+    supplier_name = pending.get("supplier_name") or result.get("supplier") or "—"
+    supplier_id = pending.get("supplier_id") or ""
+    org_id = pending.get("organization_id") or ""
+    items = result.get("items", []) or []
+    total = float(result.get("total_amount") or 0)
+    vat = float(result.get("vat_amount") or 0)
+    date_str = result.get("date") or datetime.now().strftime("%Y-%m-%d")
+
+    # ---- Dedup ----
+    dedup_hash = _compute_dedup_hash(supplier_name, date_str, total, items)
+    pending["dedup_hash"] = dedup_hash
+    if not force:
+        existing = find_invoice_by_dedup(dedup_hash, pending["telegram_id"], days=30)
+        if existing:
+            await _tg_edit(chat_id, msg_id,
+                f"⚠️ Похоже эту накладную уже отправляли:\n"
+                f"📅 {existing.get('created_at','')[:10]}, "
+                f"🏭 {existing.get('supplier','')}, "
+                f"💰 {_fmt_kzt(existing.get('total_amount') or 0)} ₸\n\n"
+                f"<b>Создать копию?</b>",
+                _dedup_kb())
+            return
+
+    # ---- Resolve restaurant credentials for the picked org ----
+    rests = _get_user_orgs(pending["telegram_id"])
+    rest = next((r for r in rests if r["organization_id"] == org_id), None) or (rests[0] if rests else None)
+    if not rest:
+        await _tg_edit(chat_id, msg_id, "❌ Филиал не найден. Отмена.")
+        _drop_pending(chat_id)
+        return
+    client = _bot_iiko_client(rest)
+
+    # ---- Auto-match items to iiko nomenclature ----
+    await _tg_edit(chat_id, msg_id, "🔎 Сопоставляю позиции с номенклатурой iiko...")
+    sendable, unmatched = await _auto_match_items(client, org_id, items)
+
+    if unmatched:
+        # Сохраняем как локальный черновик, просим открыть редактор для маппинга
+        save_bot_invoice(
+            telegram_id=pending["telegram_id"],
+            telegram_user=pending.get("username") or "",
+            raw_text="[ФОТО]",
+            supplier=supplier_name, branch=rest.get("organization_name", ""),
+            items_json=json.dumps(items, ensure_ascii=False),
+            total_amount=total, date=date_str,
+            vat_amount=vat, supplier_id=supplier_id,
+            organization_id=org_id, dedup_hash=dedup_hash,
+            status="needs_mapping",
+        )
+        names_preview = ", ".join(unmatched[:5])
+        more = f" и ещё {len(unmatched)-5}" if len(unmatched) > 5 else ""
+        await _tg_edit(chat_id, msg_id,
+            f"⚠️ Не сопоставлено {len(unmatched)} позиций: {names_preview}{more}\n\n"
+            f"📋 Накладная сохранена как черновик. Открой Mini App → Расходы → Накладные, "
+            f"нажми ✏️ чтобы выбрать товары вручную и отправить.")
+        _drop_pending(chat_id)
+        return
+
+    # ---- Send to iiko ----
+    try:
+        resp = await client.create_incoming_invoice(
+            org_id=org_id, supplier_id=supplier_id,
+            items=sendable, date=date_str
+        )
+    except Exception as e:
+        logger.warning(f"[create_invoice] {e}")
+        resp = {"ok": False, "error": str(e)}
+
+    if not resp.get("ok"):
+        # Сохраняем локальный черновик чтобы пользователь не потерял работу
+        save_bot_invoice(
+            telegram_id=pending["telegram_id"],
+            telegram_user=pending.get("username") or "",
+            raw_text="[ФОТО]",
+            supplier=supplier_name, branch=rest.get("organization_name", ""),
+            items_json=json.dumps(items, ensure_ascii=False),
+            total_amount=total, date=date_str,
+            vat_amount=vat, supplier_id=supplier_id,
+            organization_id=org_id, dedup_hash=dedup_hash,
+            status="iiko_error",
+        )
+        await _tg_edit(chat_id, msg_id,
+            f"❌ iiko вернул ошибку: <code>{resp.get('error','unknown')}</code>\n\n"
+            f"📋 Накладная сохранена локально как черновик.")
+        _drop_pending(chat_id)
+        return
+
+    iiko_doc_id = resp.get("id") or ""
+    iiko_doc_number = resp.get("number") or ""
+    inv_id = save_bot_invoice(
+        telegram_id=pending["telegram_id"],
+        telegram_user=pending.get("username") or "",
+        raw_text="[ФОТО]",
+        supplier=supplier_name, branch=rest.get("organization_name", ""),
+        items_json=json.dumps(items, ensure_ascii=False),
+        total_amount=total, date=date_str,
+        vat_amount=vat, supplier_id=supplier_id,
+        organization_id=org_id,
+        iiko_doc_id=iiko_doc_id, iiko_doc_number=iiko_doc_number,
+        dedup_hash=dedup_hash,
+        status="draft_in_iiko",
+    )
+    num_str = f" #{iiko_doc_number}" if iiko_doc_number else ""
+    await _tg_edit(chat_id, msg_id,
+        f"✅ <b>Черновик создан в iiko{num_str}</b>\n\n"
+        f"🏭 Поставщик: {supplier_name}\n"
+        f"🏢 Филиал: {rest.get('organization_name','')}\n"
+        f"💰 Итого: {_fmt_kzt(total)} ₸\n\n"
+        f"Открой Mini App → Расходы → Накладные → нажми «▶️ Провести» когда проверишь.")
+    _drop_pending(chat_id)
 
 
 @app.post("/telegram/webhook")
@@ -1517,59 +2024,105 @@ async def telegram_webhook(request: Request):
     try:
         data = await request.json()
 
-        # === CALLBACK (нажатие кнопки) ===
+        # === CALLBACK_QUERY ===
         if "callback_query" in data:
             cb = data["callback_query"]
             cb_id = cb["id"]
             chat_id = cb["message"]["chat"]["id"]
-            msg_id  = cb["message"]["message_id"]
-            action  = cb.get("data", "")
-            user_tg = cb.get("from", {})
-            telegram_id = user_tg.get("id", 0)
-            username = user_tg.get("username") or user_tg.get("first_name", "user")
+            msg_id = cb["message"]["message_id"]
+            action = cb.get("data", "")
 
             async with httpx.AsyncClient(timeout=10.0) as c:
-                await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery",
-                             json={"callback_query_id": cb_id})
+                try:
+                    await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery",
+                                 json={"callback_query_id": cb_id})
+                except Exception:
+                    pass
 
             pending = _pending_invoices.get(chat_id)
-            if not pending:
-                await _tg_edit(chat_id, msg_id, "⚠️ Данные устарели. Отправь накладную заново.")
+
+            # Отмена — работает даже если pending нет
+            if action == "act:cancel":
+                _drop_pending(chat_id)
+                await _tg_edit(chat_id, msg_id, "❌ <i>Отменено</i>")
                 return {"ok": True}
 
-            # Выбор филиала
-            if action.startswith("branch:"):
-                idx = int(action.split(":")[1])
-                pending["branch"] = pending["branches"][idx]
-                txt = _format_invoice(pending["result"], pending["branch"], "branch")
-                await _tg_edit(chat_id, msg_id, txt, CONFIRM_KB)
-
-            # Подтверждение сохранения
-            elif action == "confirm":
-                import json as _j
-                result   = pending["result"]
-                branch   = pending.get("branch") or result.get("branch") or ""
-                items    = result.get("items", []) or []
-                total    = float(result.get("total_amount") or 0)
-                date_str = result.get("date") or datetime.now().strftime("%Y-%m-%d")
-                save_bot_invoice(
-                    telegram_id=telegram_id,
-                    telegram_user=username,
-                    raw_text=pending["raw_text"],
-                    supplier=result.get("supplier") or "Неизвестно",
-                    branch=branch,
-                    items_json=_j.dumps(items, ensure_ascii=False),
-                    total_amount=total,
-                    date=date_str
-                )
-                _pending_invoices.pop(chat_id, None)
-                await _tg_edit(chat_id, msg_id, _format_invoice(result, branch, "confirmed"))
-
-            elif action == "cancel":
-                _pending_invoices.pop(chat_id, None)
+            if not pending:
                 await _tg_edit(chat_id, msg_id,
-                               _format_invoice(pending["result"], pending.get("branch",""), "cancelled"))
+                               "⚠️ Данные устарели. Пришли накладную (.jpg файлом) заново.")
+                return {"ok": True}
 
+            if action == "act:add":
+                pending["state"] = "adding_photos"
+                await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "adding"), ADD_PHOTOS_KB)
+                return {"ok": True}
+
+            if action == "add:done":
+                images = pending.get("images") or []
+                if not images:
+                    _drop_pending(chat_id)
+                    await _tg_edit(chat_id, msg_id, "⚠️ Ни одного фото нет. Отменено.")
+                    return {"ok": True}
+                await _tg_edit(chat_id, msg_id, f"🔍 Распознаю {_photo_count_text(len(images))}...")
+                payload = [(img["bytes"], img["mime"]) for img in images]
+                result = await analyze_invoice_photos(payload)
+                if "error" in result:
+                    await _tg_edit(chat_id, msg_id, f"❌ Не удалось распознать: {result['error']}")
+                    _drop_pending(chat_id)
+                    return {"ok": True}
+                pending["result"] = result
+                pending["state"] = "preview"
+                await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
+                return {"ok": True}
+
+            if action == "act:send":
+                # state choosing_supplier → подгружаем поставщиков и показываем
+                await _show_supplier_picker(chat_id, msg_id, pending)
+                return {"ok": True}
+
+            if action == "act:edit":
+                # act:edit теперь WebApp-кнопка, callback не приходит. Но если старый клиент:
+                stub = (_format_invoice_v2(pending, "preview")
+                        + "\n\n⏳ <i>Обнови Telegram для встроенного редактора.</i>")
+                await _tg_edit(chat_id, msg_id, stub, _invoice_kb(pending["pending_id"]))
+                return {"ok": True}
+
+            # === Пагинация поставщиков ===
+            if action.startswith("sup:page:"):
+                page = int(action.rsplit(":", 1)[-1])
+                suppliers = pending.get("suppliers_cache") or []
+                await _tg_edit(chat_id, msg_id,
+                    f"🏭 <b>Выбери поставщика</b> ({len(suppliers)}):",
+                    _suppliers_kb(suppliers, page))
+                return {"ok": True}
+
+            # === Выбор поставщика ===
+            if action.startswith("sup:"):
+                supplier_id = action.split(":", 1)[1]
+                suppliers = pending.get("suppliers_cache") or []
+                supplier = next((s for s in suppliers if (s.get("id") or s.get("supplierId")) == supplier_id), None)
+                pending["supplier_id"] = supplier_id
+                pending["supplier_name"] = supplier.get("name") if supplier else "—"
+                await _show_org_picker(chat_id, msg_id, pending)
+                return {"ok": True}
+
+            # === Выбор филиала → финальная отправка ===
+            if action.startswith("org:"):
+                org_id = action.split(":", 1)[1]
+                pending["organization_id"] = org_id
+                await _finalize_send(chat_id, msg_id, pending, force=False)
+                return {"ok": True}
+
+            # === Подтверждение дубля ===
+            if action == "dedup:yes":
+                await _finalize_send(chat_id, msg_id, pending, force=True)
+                return {"ok": True}
+            if action == "dedup:no":
+                _drop_pending(chat_id)
+                await _tg_edit(chat_id, msg_id, "❌ <i>Отменено (дубль).</i>")
+                return {"ok": True}
+
+            # неизвестный callback — игнорируем
             return {"ok": True}
 
         # === MESSAGE ===
@@ -1577,68 +2130,124 @@ async def telegram_webhook(request: Request):
         if not message:
             return {"ok": True}
 
-        chat_id     = message.get("chat", {}).get("id")
-        user_tg     = message.get("from", {})
+        chat_id = message.get("chat", {}).get("id")
+        user_tg = message.get("from", {})
         telegram_id = user_tg.get("id", 0)
-        username    = user_tg.get("username") or user_tg.get("first_name", "user")
+        username = user_tg.get("username") or user_tg.get("first_name", "user")
 
-        async def process_result(result: dict, raw_text: str):
-            """После распознавания — определяем филиал и показываем клавиатуру."""
-            branches = _get_user_branches(telegram_id)
-            pending = {"result": result, "raw_text": raw_text, "branch": None, "branches": branches}
-            _pending_invoices[chat_id] = pending
-
-            if not branches:
-                # Пользователь не зарегистрирован — сохраняем без филиала
-                pending["branch"] = result.get("branch") or ""
-                await _tg_send(chat_id, _format_invoice(result, pending["branch"], "branch"), CONFIRM_KB)
-            elif len(branches) == 1:
-                # Один филиал — выбираем автоматически
-                pending["branch"] = branches[0]
-                await _tg_send(chat_id, _format_invoice(result, branches[0], "branch"), CONFIRM_KB)
+        # === WEB_APP_DATA (Mini App-редактор → бот) ===
+        if message.get("web_app_data"):
+            raw = message["web_app_data"].get("data", "")
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = {}
+            pid = payload.get("pending_id") or ""
+            target_chat = _pending_by_id.get(pid)
+            pending = _pending_invoices.get(target_chat) if target_chat else None
+            if not pending:
+                await _tg_send(chat_id, "⚠️ Сессия редактирования истекла. Пришли накладную заново.")
+                return {"ok": True}
+            # Обновляем поля result. WebApp шлёт обновлённые items/supplier/date/total/vat
+            r = pending.setdefault("result", {})
+            if "items" in payload:    r["items"] = payload["items"]
+            if "supplier" in payload: r["supplier"] = payload["supplier"]
+            if "date" in payload:     r["date"] = payload["date"]
+            if "total_amount" in payload: r["total_amount"] = payload["total_amount"]
+            if "vat_amount" in payload:   r["vat_amount"] = payload["vat_amount"]
+            pending["state"] = "preview"
+            # Перерисовываем превью (на том же сообщении если знаем message_id)
+            if pending.get("message_id"):
+                await _tg_edit(pending["chat_id"], pending["message_id"],
+                               _format_invoice_v2(pending, "preview"),
+                               _invoice_kb(pending["pending_id"]))
             else:
-                # Несколько — показываем превью и кнопки выбора
-                await _tg_send(chat_id, _format_invoice(result, "", "preview"),
-                               _branch_keyboard(branches))
+                new_id = await _tg_send(pending["chat_id"],
+                                        _format_invoice_v2(pending, "preview"),
+                                        _invoice_kb(pending["pending_id"]))
+                pending["message_id"] = new_id
+            return {"ok": True}
 
-        # === ФОТО ===
+        # === DOCUMENT (.jpg как файл — основной путь) ===
+        doc = message.get("document")
+        if doc and (doc.get("mime_type") or "").startswith("image/"):
+            file_id = doc["file_id"]
+            file_data = await _tg_download_file(file_id)
+            if not file_data:
+                await _tg_send(chat_id, "❌ Не удалось скачать файл.")
+                return {"ok": True}
+            image_bytes, mime = file_data
+
+            pending = _pending_invoices.get(chat_id)
+
+            # Режим «добавляю фото к уже распознанной накладной»
+            if pending and pending.get("state") == "adding_photos":
+                pending["images"].append({"file_id": file_id, "bytes": image_bytes, "mime": mime})
+                n = len(pending["images"])
+                await _tg_send(chat_id,
+                    f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
+                return {"ok": True}
+
+            # Новый pending — одиночное фото, сразу распознаём
+            status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
+            result = await analyze_invoice_photos([(image_bytes, mime)])
+            if "error" in result:
+                msg = f"❌ Не удалось распознать: {result['error']}\n\nПопробуй сфотографировать чётче и пришли .jpg файлом."
+                if status_msg_id:
+                    await _tg_edit(chat_id, status_msg_id, msg)
+                else:
+                    await _tg_send(chat_id, msg)
+                return {"ok": True}
+
+            pid = _pending_id()
+            pending = {
+                "pending_id": pid,
+                "telegram_id": telegram_id,
+                "username": username,
+                "chat_id": chat_id,
+                "message_id": status_msg_id,
+                "state": "preview",
+                "images": [{"file_id": file_id, "bytes": image_bytes, "mime": mime}],
+                "result": result,
+                "supplier_id": None,
+                "organization_id": None,
+                "created_at": datetime.now().isoformat(),
+            }
+            _pending_invoices[chat_id] = pending
+            _pending_by_id[pid] = chat_id
+
+            if status_msg_id:
+                await _tg_edit(chat_id, status_msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
+            else:
+                new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
+                pending["message_id"] = new_id
+            return {"ok": True}
+
+        # === PHOTO (сжатое) — отказ ===
         if message.get("photo"):
-            await _tg_send(chat_id, "📸 Распознаю накладную...")
-            photo = message["photo"][-1]
-            async with httpx.AsyncClient(timeout=20.0) as c:
-                r = await c.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-                                params={"file_id": photo["file_id"]})
-                file_path = r.json()["result"]["file_path"]
-                img_r = await c.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}")
-                image_bytes = img_r.content
+            await _tg_send(chat_id,
+                "⚠️ Пришли накладную <b>файлом</b> (📎 → Файл), а не как сжатое фото — иначе текст плохо распознаётся.")
+            return {"ok": True}
 
-            result = await analyze_invoice_photo(image_bytes)
-            if "error" in result:
-                await _tg_send(chat_id, "❌ Не удалось распознать. Сделай фото чётче и попробуй снова.")
-                return {"ok": True}
-            caption = message.get("caption", "")
-            await process_result(result, f"[ФОТО] {caption}" if caption else "[ФОТО]")
-
-        # === ТЕКСТ ===
-        elif message.get("text"):
-            text = message["text"]
-            if text.startswith("/"):
-                if text == "/start":
-                    branches = _get_user_branches(telegram_id)
-                    br_info = f"\n\n📍 Твои филиалы ({len(branches)}):\n" + "\n".join(f"• {b}" for b in branches) if branches else ""
-                    await _tg_send(chat_id,
-                        "👋 Привет! Я распознаю накладные.\n\n"
-                        "📸 Отправь <b>фото накладной</b>\n"
-                        "📝 Или <b>текст</b> с данными поставки\n\n"
-                        "Перед сохранением уточню филиал и попрошу подтверждение." + br_info)
-                return {"ok": True}
-
-            await _tg_send(chat_id, "📝 Обрабатываю...")
-            result = await analyze_invoice_text(text)
-            if "error" in result:
-                await _tg_send(chat_id, f"❌ Не удалось распознать: {result['error']}")
-                return {"ok": True}
-            await process_result(result, text)
+        # === TEXT ===
+        text = message.get("text") or ""
+        if text == "/start":
+            await _tg_send(chat_id,
+                "👋 Привет! Я распознаю накладные.\n\n"
+                "📎 <b>Отправь .jpg накладной как файл</b> (а не сжатое фото) — "
+                "я распознаю позиции, посчитаю НДС, ты подтвердишь и я отправлю в iiko.\n\n"
+                "В превью будет 4 кнопки:\n"
+                "📤 Отправить в iiko\n"
+                "➕ Добавить фото (если накладная на нескольких листах)\n"
+                "✏️ Редактировать (откроет Mini App)\n"
+                "❌ Отменить")
+            return {"ok": True}
+        if text.startswith("/"):
+            return {"ok": True}
+        if text:
+            await _tg_send(chat_id,
+                "📎 Пришли накладную <b>.jpg файлом</b>. Текст и сжатые фото больше не обрабатываются.")
+            return {"ok": True}
 
     except Exception as e:
         logger.warning(f"[webhook] {e}")
