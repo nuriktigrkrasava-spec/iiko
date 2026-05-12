@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from cryptography.fernet import Fernet
 
@@ -95,6 +95,27 @@ def init_db():
             conn.commit()
         except Exception:
             pass
+    # Миграция bot_invoices: новые поля для интеграции с iiko
+    for col, definition in [
+        ("vat_amount", "REAL DEFAULT 0"),
+        ("supplier_id", "TEXT"),
+        ("organization_id", "TEXT"),
+        ("iiko_doc_id", "TEXT"),
+        ("iiko_doc_number", "TEXT"),
+        ("dedup_hash", "TEXT"),
+        ("photo_paths", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE bot_invoices ADD COLUMN {col} {definition}")
+            conn.commit()
+        except Exception:
+            pass
+    try:
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_invoices_dedup ON bot_invoices(dedup_hash)")
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
 
 def get_user(telegram_id: int) -> Optional[Dict[str, Any]]:
@@ -215,14 +236,27 @@ def delete_manual_expense(expense_id: int, org_id: str):
 
 def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,
                      supplier: str, branch: str, items_json: str,
-                     total_amount: float, date: str) -> int:
+                     total_amount: float, date: str,
+                     *,
+                     vat_amount: float = 0.0,
+                     supplier_id: Optional[str] = None,
+                     organization_id: Optional[str] = None,
+                     iiko_doc_id: Optional[str] = None,
+                     iiko_doc_number: Optional[str] = None,
+                     dedup_hash: Optional[str] = None,
+                     photo_paths: Optional[str] = None,
+                     status: str = "pending") -> int:
+    now = datetime.now().isoformat()
     conn = get_db()
     cur = conn.execute(
         """INSERT INTO bot_invoices
-           (telegram_id, telegram_user, raw_text, supplier, branch, items, total_amount, date, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           (telegram_id, telegram_user, raw_text, supplier, branch, items, total_amount, date,
+            vat_amount, supplier_id, organization_id, iiko_doc_id, iiko_doc_number,
+            dedup_hash, photo_paths, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (telegram_id, telegram_user, raw_text, supplier, branch, items_json,
-         total_amount, date, datetime.now().isoformat())
+         total_amount, date, vat_amount, supplier_id, organization_id,
+         iiko_doc_id, iiko_doc_number, dedup_hash, photo_paths, status, now, now)
     )
     conn.commit()
     inv_id = cur.lastrowid
@@ -237,3 +271,50 @@ def get_bot_invoices(limit: int = 50) -> List[Dict[str, Any]]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_bot_invoice(invoice_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM bot_invoices WHERE id = ?", (invoice_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_bot_invoice(invoice_id: int, **fields) -> None:
+    """Обновляет произвольные поля накладной. updated_at выставляется автоматически."""
+    if not fields:
+        return
+    allowed = {
+        "supplier", "branch", "items", "total_amount", "date",
+        "vat_amount", "supplier_id", "organization_id",
+        "iiko_doc_id", "iiko_doc_number", "dedup_hash", "photo_paths", "status",
+    }
+    safe = {k: v for k, v in fields.items() if k in allowed}
+    if not safe:
+        return
+    safe["updated_at"] = datetime.now().isoformat()
+    set_clause = ", ".join(f"{k} = ?" for k in safe)
+    params = list(safe.values()) + [invoice_id]
+    conn = get_db()
+    conn.execute(f"UPDATE bot_invoices SET {set_clause} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+
+def find_invoice_by_dedup(dedup_hash: str, telegram_id: int,
+                          days: int = 30) -> Optional[Dict[str, Any]]:
+    """Ищет накладную с таким же хешем у того же пользователя за последние N дней."""
+    if not dedup_hash:
+        return None
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    conn = get_db()
+    row = conn.execute(
+        """SELECT * FROM bot_invoices
+           WHERE dedup_hash = ? AND telegram_id = ? AND created_at >= ?
+           ORDER BY created_at DESC LIMIT 1""",
+        (dedup_hash, telegram_id, cutoff)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
