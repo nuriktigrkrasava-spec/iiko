@@ -1,8 +1,9 @@
 import httpx
 import asyncio
 import hashlib
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 IIKO_CLOUD_BASE = "https://api-ru.iiko.services"
 
@@ -225,6 +226,109 @@ class IikoClient:
             )
             resp.raise_for_status()
             return resp.json()
+
+    # ============ SUPPLIERS / NOMENCLATURE / DOCUMENTS — invoice flow ============
+
+    async def get_suppliers(self, org_id: str) -> List[Dict[str, Any]]:
+        """Список поставщиков организации. Cloud API: POST /api/1/suppliers."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/suppliers",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationId": org_id}
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            # iiko возвращает либо {"employees": [...]}, либо {"suppliers": [...]} — поддерживаем оба
+            return data.get("suppliers") or data.get("employees") or []
+
+    async def search_nomenclature(self, org_id: str, query: str,
+                                  limit: int = 30) -> List[Dict[str, Any]]:
+        """Поиск товаров по имени. Загружает полную номенклатуру (кешируется на 30 мин),
+        потом фильтрует локально."""
+        cache = getattr(self, "_nomenclature_cache", None)
+        if cache is None:
+            self._nomenclature_cache: Dict[str, Tuple[datetime, List[Dict]]] = {}
+            cache = self._nomenclature_cache
+
+        cached = cache.get(org_id)
+        if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
+            products = cached[1]
+        else:
+            try:
+                full = await self.get_nomenclature(org_id)
+                products = full.get("products", []) or []
+                cache[org_id] = (datetime.now(), products)
+            except Exception:
+                return []
+
+        q = (query or "").strip().lower()
+        if not q:
+            return products[:limit]
+        out = []
+        for p in products:
+            name = (p.get("name") or "").lower()
+            num = (p.get("num") or "").lower()
+            code = (p.get("code") or "").lower()
+            if q in name or q in num or q in code:
+                out.append(p)
+                if len(out) >= limit:
+                    break
+        return out
+
+    async def create_incoming_invoice(
+        self, org_id: str, supplier_id: str, items: List[Dict[str, Any]],
+        date: str, document_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Создать ВХОДЯЩУЮ накладную в iiko (черновик, status=NEW).
+        Cloud API: POST /api/1/documents/create/incomingInvoice
+
+        items[] — список словарей с полями:
+            product (str, iiko product id), amount (float),
+            sum (float, общая сумма по позиции), price (float, цена за единицу)
+        """
+        token = await self._ensure_token()
+        body = {
+            "organizationId": org_id,
+            "supplierId": supplier_id,
+            "dateIncoming": _dt(date),
+            "useDefaultDocumentTime": True,
+            "status": "NEW",  # черновик; проводка — отдельным вызовом
+            "items": items,
+        }
+        if document_number:
+            body["documentNumber"] = document_number
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/documents/create/incomingInvoice",
+                headers={"Authorization": f"Bearer {token}"},
+                json=body
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+            data = resp.json()
+            return {"ok": True, "id": data.get("id") or data.get("documentId"),
+                    "number": data.get("documentNumber") or data.get("number"),
+                    "raw": data}
+
+    async def set_document_status(self, org_id: str, document_id: str,
+                                   status: str) -> Dict[str, Any]:
+        """Изменить статус документа (NEW / PROCESSED / DELETED).
+        Cloud API: POST /api/1/documents/setStatus
+        Для проведения передать status="PROCESSED", для распроведения — "NEW".
+        """
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/documents/setStatus",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationId": org_id, "documentId": document_id, "status": status}
+            )
+            if resp.status_code != 200:
+                return {"ok": False, "error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+            return {"ok": True, "raw": resp.json()}
 
 
 # ============ iikoWEB CLIENT (self-hosted) ============
@@ -519,3 +623,265 @@ class IikoWebClient:
                 if float(r.get("Sum.Incoming") or 0) > 0
             ]
             return {"invoiceIncomings": result}
+
+    # ============ SUPPLIERS / NOMENCLATURE / DOCUMENTS — self-hosted iikoServer 9.x ============
+    # iikoServer возвращает XML по умолчанию. Auth: ?key=<token> в query.
+    # Кеш номенклатуры/складов хранится на инстансе на 30 минут.
+
+    def _ensure_caches(self):
+        if not hasattr(self, "_nomenclature_cache"):
+            self._nomenclature_cache: Dict[str, Tuple[datetime, List[Dict]]] = {}
+        if not hasattr(self, "_stores_cache"):
+            self._stores_cache: Dict[str, Tuple[datetime, List[Dict]]] = {}
+        if not hasattr(self, "_suppliers_cache"):
+            self._suppliers_cache: Dict[str, Tuple[datetime, List[Dict]]] = {}
+
+    @staticmethod
+    def _xml_to_list_of_dicts(xml_text: str, item_tag: str) -> List[Dict[str, Any]]:
+        """Парсит XML вида <list><item>...</item><item>...</item></list> в список dict'ов
+        с строковыми значениями. item_tag — имя дочернего тега (e.g. 'employee', 'product')."""
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return []
+        # Корень может быть list-like; ищем все item_tag на любой глубине первого уровня
+        items = []
+        # Сначала ищем напрямую как дети корня
+        children = root.findall(item_tag) or root.findall(f".//{item_tag}")
+        for el in children:
+            d: Dict[str, Any] = {}
+            for child in el:
+                tag = child.tag
+                # учитываем namespace при наличии
+                if "}" in tag:
+                    tag = tag.split("}", 1)[1]
+                d[tag] = (child.text or "").strip() if (child.text is not None) else ""
+            items.append(d)
+        return items
+
+    async def get_suppliers(self, org_id: str) -> List[Dict[str, Any]]:
+        """Список поставщиков. iikoServer: GET /resto/api/suppliers — возвращает XML
+        с элементами <employee> (поставщик — это employee со специальной ролью)."""
+        self._ensure_caches()
+        cached = self._suppliers_cache.get(org_id)
+        if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
+            return cached[1]
+        token = await self._ensure_token()
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/suppliers",
+                    params={"key": token}
+                )
+                if resp.status_code != 200:
+                    return []
+                raw = resp.text
+                items = self._xml_to_list_of_dicts(raw, "employee")
+                if not items:
+                    # запасной вариант — попробовать <supplier>
+                    items = self._xml_to_list_of_dicts(raw, "supplier")
+                # Нормализуем под формат Cloud-варианта: {id, name}
+                out = []
+                for it in items:
+                    sid = it.get("id") or it.get("supplierId") or ""
+                    name_parts = [it.get(k, "") for k in ("name", "firstName", "lastName") if it.get(k)]
+                    name = " ".join(name_parts).strip() or sid
+                    if sid:
+                        out.append({"id": sid, "name": name, "_raw": it})
+                self._suppliers_cache[org_id] = (datetime.now(), out)
+                return out
+        except Exception:
+            return []
+
+    async def _get_default_store(self, org_id: str) -> Optional[str]:
+        """Берёт первый склад из corporation/stores (нужно для incomingInvoice)."""
+        self._ensure_caches()
+        cached = self._stores_cache.get(org_id)
+        if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
+            stores = cached[1]
+            return stores[0]["id"] if stores else None
+        token = await self._ensure_token()
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/corporation/stores",
+                    params={"key": token}
+                )
+                if resp.status_code != 200:
+                    return None
+                items = self._xml_to_list_of_dicts(resp.text, "corporateItemDto")
+                if not items:
+                    items = self._xml_to_list_of_dicts(resp.text, "store")
+                stores = [{"id": it.get("id", ""), "name": it.get("name", "")}
+                          for it in items if it.get("id")]
+                self._stores_cache[org_id] = (datetime.now(), stores)
+                return stores[0]["id"] if stores else None
+        except Exception:
+            return None
+
+    async def search_nomenclature(self, org_id: str, query: str,
+                                  limit: int = 30) -> List[Dict[str, Any]]:
+        """Поиск товаров. iikoServer: GET /resto/api/v2/entities/products/list — JSON,
+        либо /resto/api/products — XML. Кеш на 30 минут, фильтрация локальная."""
+        self._ensure_caches()
+        cached = self._nomenclature_cache.get(org_id)
+        if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
+            products = cached[1]
+        else:
+            token = await self._ensure_token()
+            products = []
+            try:
+                async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                    resp = await client.get(
+                        f"{self.base_url}/api/v2/entities/products/list",
+                        params={"key": token, "includeDeleted": "false"}
+                    )
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            if isinstance(data, list):
+                                products = [
+                                    {"id": p.get("id"),
+                                     "name": p.get("name"),
+                                     "num": p.get("num"),
+                                     "code": p.get("code"),
+                                     "unit": (p.get("mainUnit") or {}).get("name") if isinstance(p.get("mainUnit"), dict) else p.get("mainUnit")}
+                                    for p in data
+                                    if p.get("id") and p.get("name")
+                                ]
+                        except Exception:
+                            pass
+                    # Fallback: XML на /api/products
+                    if not products:
+                        resp = await client.get(
+                            f"{self.base_url}/api/products",
+                            params={"key": token}
+                        )
+                        if resp.status_code == 200:
+                            items = self._xml_to_list_of_dicts(resp.text, "productDto")
+                            if not items:
+                                items = self._xml_to_list_of_dicts(resp.text, "product")
+                            products = [
+                                {"id": it.get("id"), "name": it.get("name"),
+                                 "num": it.get("num"), "code": it.get("code"),
+                                 "unit": it.get("mainUnit")}
+                                for it in items
+                                if it.get("id") and it.get("name")
+                            ]
+            except Exception:
+                products = []
+            self._nomenclature_cache[org_id] = (datetime.now(), products)
+
+        q = (query or "").strip().lower()
+        if not q:
+            return products[:limit]
+        out = []
+        for p in products:
+            name = (p.get("name") or "").lower()
+            num = (p.get("num") or "").lower()
+            code = (p.get("code") or "").lower()
+            if q in name or q in num or q in code:
+                out.append(p)
+                if len(out) >= limit:
+                    break
+        return out
+
+    async def create_incoming_invoice(self, org_id: str, supplier_id: str,
+                                       items: List[Dict[str, Any]], date: str,
+                                       document_number: Optional[str] = None) -> Dict[str, Any]:
+        """Создаёт входящую накладную в iikoServer 9.x как ЧЕРНОВИК (status=NEW).
+        Endpoint: POST /resto/api/documents/import/incomingInvoice (тело — XML).
+
+        items[] — список словарей с productId, amount, price, sum (как в Cloud-варианте).
+        """
+        store_id = await self._get_default_store(org_id)
+        if not store_id:
+            return {"ok": False, "error": "Не найден склад (defaultStore) — настрой в iikoOffice"}
+
+        dt_iso = date if "T" in date else f"{date}T10:00:00"
+        doc_num = document_number or datetime.now().strftime("BOT-%y%m%d-%H%M%S")
+
+        # Строим XML
+        root = ET.Element("document")
+        ET.SubElement(root, "documentNumber").text = str(doc_num)
+        ET.SubElement(root, "dateIncoming").text = dt_iso
+        ET.SubElement(root, "supplier").text = str(supplier_id)
+        ET.SubElement(root, "defaultStore").text = str(store_id)
+        ET.SubElement(root, "status").text = "NEW"
+        items_el = ET.SubElement(root, "items")
+        for idx, it in enumerate(items or [], start=1):
+            ie = ET.SubElement(items_el, "item")
+            ET.SubElement(ie, "num").text = str(idx)
+            ET.SubElement(ie, "productId").text = str(it.get("productId") or "")
+            ET.SubElement(ie, "amount").text = str(it.get("amount") or 0)
+            ET.SubElement(ie, "price").text = str(it.get("price") or 0)
+            ET.SubElement(ie, "sum").text = str(it.get("sum") or 0)
+            ET.SubElement(ie, "storeId").text = str(store_id)
+
+        xml_body = b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
+
+        token = await self._ensure_token()
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/documents/import/incomingInvoice",
+                    params={"key": token},
+                    headers={"Content-Type": "application/xml"},
+                    content=xml_body
+                )
+                if resp.status_code != 200:
+                    return {"ok": False,
+                            "error": f"HTTP {resp.status_code}",
+                            "body": resp.text[:500]}
+                # Ответ обычно XML вида <documentValidationResult> с id созданного документа
+                try:
+                    rroot = ET.fromstring(resp.text)
+                    doc_id = ""
+                    num_out = doc_num
+                    for el in rroot.iter():
+                        tag = el.tag.split("}", 1)[-1]
+                        if tag in ("documentId", "id") and el.text:
+                            doc_id = el.text.strip()
+                        if tag == "documentNumber" and el.text:
+                            num_out = el.text.strip()
+                    return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
+                except Exception:
+                    return {"ok": True, "id": "", "number": doc_num, "raw": resp.text[:500]}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def set_document_status(self, org_id: str, document_id: str,
+                                   status: str) -> Dict[str, Any]:
+        """Проводка/распроведение документа в iikoServer.
+        Cloud-статусы: NEW (черновик), PROCESSED (проведена). Здесь маппим как есть.
+
+        Точный путь зависит от версии iikoServer. Пробуем два:
+          1) POST /api/documents/{id}/setStatus?status=...
+          2) PUT  /api/documents/{id}/status?status=...
+        """
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            # Попытка 1: POST setStatus
+            try:
+                resp = await client.post(
+                    f"{self.base_url}/api/documents/{document_id}/setStatus",
+                    params={"key": token, "status": status}
+                )
+                if resp.status_code == 200:
+                    return {"ok": True, "raw": resp.text[:300]}
+            except Exception:
+                pass
+            # Попытка 2: PUT /status
+            try:
+                resp = await client.put(
+                    f"{self.base_url}/api/documents/{document_id}/status",
+                    params={"key": token, "status": status}
+                )
+                if resp.status_code == 200:
+                    return {"ok": True, "raw": resp.text[:300]}
+            except Exception:
+                pass
+            return {"ok": False,
+                    "error": "iikoServer не принял setStatus ни на одном из путей "
+                             "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
+                             "другой эндпоинт — пришли точный URL из iiko-докуменации."}
