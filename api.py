@@ -1547,6 +1547,108 @@ async def suppliers_list(org_id: str, user: Dict = Depends(get_current_user)):
     return {"suppliers": suppliers}
 
 
+@app.get("/api/invoice-saved/{invoice_id}")
+async def invoice_saved_get(invoice_id: int, user: Dict = Depends(get_current_user)):
+    """Загрузить сохранённую накладную (из БД) для редактирования в Mini App.
+    Используется для накладных со статусом needs_mapping / iiko_error / draft."""
+    inv = get_bot_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+    try:
+        items = json.loads(inv.get("items") or "[]")
+    except Exception:
+        items = []
+    return {
+        "invoice_id": invoice_id,
+        "supplier": inv.get("supplier"),
+        "supplier_id": inv.get("supplier_id"),
+        "organization_id": inv.get("organization_id"),
+        "date": inv.get("date"),
+        "items": items,
+        "total_amount": inv.get("total_amount", 0),
+        "vat_amount": inv.get("vat_amount", 0),
+        "vat_rate": 12.0,
+        "currency": "KZT",
+        "search_org_id": inv.get("organization_id"),
+        "status": inv.get("status"),
+    }
+
+
+class SavedInvoicePayload(BaseModel):
+    items: List[Dict[str, Any]]
+    supplier: Optional[str] = None
+    date: Optional[str] = None
+    total_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
+
+
+@app.post("/api/invoice-saved/{invoice_id}/send")
+async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
+                              user: Dict = Depends(get_current_user)):
+    """После ручного маппинга в Mini App — обновить позиции и попробовать отправить в iiko."""
+    inv = get_bot_invoice(invoice_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if inv.get("telegram_id") != user.get("id"):
+        raise HTTPException(status_code=403, detail="Not your invoice")
+
+    # Сохраняем обновлённые поля
+    update_fields = {"items": json.dumps(payload.items, ensure_ascii=False)}
+    if payload.supplier is not None: update_fields["supplier"] = payload.supplier
+    if payload.date is not None: update_fields["date"] = payload.date
+    if payload.total_amount is not None: update_fields["total_amount"] = payload.total_amount
+    if payload.vat_amount is not None: update_fields["vat_amount"] = payload.vat_amount
+    update_bot_invoice(invoice_id, **update_fields)
+
+    # Готовим и шлём в iiko
+    org_id = inv.get("organization_id")
+    supplier_id = inv.get("supplier_id")
+    if not org_id or not supplier_id:
+        raise HTTPException(status_code=400, detail="Не указан филиал или поставщик")
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+
+    # Собираем sendable items — только те у кого есть iiko_product_id
+    sendable, unmatched = [], []
+    for it in payload.items:
+        prod_id = it.get("iiko_product_id")
+        if not prod_id:
+            unmatched.append(it.get("name", "—"))
+            continue
+        qty = float(it.get("quantity") or 0)
+        price = float(it.get("price_per_unit") or 0)
+        total = float(it.get("total") or (qty * price))
+        sendable.append({"productId": prod_id, "amount": qty, "price": price, "sum": total})
+
+    if unmatched:
+        update_bot_invoice(invoice_id, status="needs_mapping")
+        return {"ok": False, "unmatched": unmatched,
+                "error": f"Не сопоставлено {len(unmatched)} позиций — выбери товар iiko для каждой"}
+
+    date_str = payload.date or inv.get("date") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        resp = await client.create_incoming_invoice(
+            org_id=real_org, supplier_id=supplier_id,
+            items=sendable, date=date_str
+        )
+    except Exception as e:
+        update_bot_invoice(invoice_id, status="iiko_error")
+        raise HTTPException(status_code=502, detail=f"iiko: {e}")
+
+    if not resp.get("ok"):
+        update_bot_invoice(invoice_id, status="iiko_error")
+        return {"ok": False, "error": resp.get("error", "unknown")}
+
+    update_bot_invoice(invoice_id,
+        iiko_doc_id=resp.get("id") or "",
+        iiko_doc_number=resp.get("number") or "",
+        status="draft_in_iiko")
+    return {"ok": True, "iiko_doc_id": resp.get("id"), "iiko_doc_number": resp.get("number")}
+
+
 @app.post("/api/invoices/{invoice_id}/post")
 async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_user)):
     """Провести накладную в iiko."""
