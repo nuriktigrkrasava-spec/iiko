@@ -2511,7 +2511,7 @@ async function loadExpenses() {
         } else if (raw === 'posted' && inv.bot_id) {
           actions = `<button class="btn btn-orange" onclick="invoiceUnpost(${inv.bot_id})">⏸ Распровести</button>`;
         } else if (raw === 'needs_mapping' || raw === 'iiko_error') {
-          actions = `<button class="btn btn-outline" onclick="showToast('Открой бота, пришли накладную заново и нажми ✏️ Редактировать')">Доработать</button>`;
+          actions = `<button class="btn btn-outline" onclick="openSavedInvoiceEditor(${inv.bot_id})">✏️ Сопоставить и отправить</button>`;
         } else if (!raw) {
           // старый поток (накладные из iiko, не из бота)
           actions = inv.status === 'Проведена'
@@ -3217,7 +3217,8 @@ async function invoiceUnpost(botInvoiceId) {
 // Активируется когда Mini App открывается из бота с URL ?edit=<pending_id>
 
 const ieState = {
-  pendingId: null,
+  pendingId: null,        // pending_id если открыт через ?edit= из бота (live pending в памяти бота)
+  savedBotId: null,       // bot_invoices.id если открыт через "Сопоставить" из вкладки Накладные
   searchOrgId: null,
   items: [],
   supplier: '',
@@ -3392,36 +3393,111 @@ function ieSaveItem() {
 async function ieSave() {
   const btn = document.getElementById('ie-save-btn');
   btn.disabled = true;
-  btn.textContent = 'Сохраняю...';
   const total = ieState.items.reduce((s, it) => s + (Number(it.total) || 0), 0);
   const vatRate = ieState.vatRate / 100;
   const vat = total - total / (1 + vatRate);
   const payload = {
-    pending_id: ieState.pendingId,
     items: ieState.items,
     supplier: document.getElementById('ie-supplier').value.trim(),
     date: document.getElementById('ie-date').value,
     total_amount: total,
     vat_amount: vat,
   };
-  // Fallback POST (на случай если sendData не дойдёт)
-  try {
-    await apiPost(`/api/invoice-edit/${ieState.pendingId}`, payload);
-  } catch (e) {
-    // продолжаем — sendData может сработать
+
+  // === Режим сохранённой накладной (из вкладки Накладные) ===
+  if (ieState.savedBotId) {
+    btn.textContent = 'Отправляю в iiko...';
+    try {
+      const resp = await apiPost(`/api/invoice-saved/${ieState.savedBotId}/send`, payload);
+      if (resp.ok) {
+        const num = resp.iiko_doc_number ? ` #${resp.iiko_doc_number}` : '';
+        showToast(`✅ Создан черновик в iiko${num}`);
+        ieCloseSavedEditor();
+        loadExpenses();  // обновим список накладных
+      } else if (resp.unmatched && resp.unmatched.length) {
+        showToast(`⚠️ Не сопоставлено: ${resp.unmatched.slice(0,3).join(', ')}${resp.unmatched.length>3?'...':''}`);
+        btn.disabled = false;
+        btn.textContent = '💾 Сопоставить и отправить';
+      } else {
+        showToast('❌ ' + (resp.error || 'Ошибка iiko'));
+        btn.disabled = false;
+        btn.textContent = '💾 Сопоставить и отправить';
+      }
+    } catch (e) {
+      showToast('❌ ' + (e.message || 'Ошибка'));
+      btn.disabled = false;
+      btn.textContent = '💾 Сопоставить и отправить';
+    }
+    return;
   }
-  // Главный путь — WebApp.sendData. Закрывает Mini App и шлёт боту.
+
+  // === Режим pending (открыто из бота через ?edit=...) ===
+  btn.textContent = 'Сохраняю...';
+  payload.pending_id = ieState.pendingId;
+  try { await apiPost(`/api/invoice-edit/${ieState.pendingId}`, payload); } catch (e) {}
   const tg = window.Telegram?.WebApp;
   if (tg?.sendData) {
-    try { tg.sendData(JSON.stringify(payload)); }
-    catch (e) { /* sendData закроет — если упадёт, fallback всё равно сохранил */ }
+    try { tg.sendData(JSON.stringify(payload)); } catch (e) {}
   }
   setTimeout(() => { tg?.close?.(); }, 200);
 }
 
 function ieClose() {
+  if (ieState.savedBotId) {
+    ieCloseSavedEditor();
+    return;
+  }
   const tg = window.Telegram?.WebApp;
   tg?.close?.();
+}
+
+// ============ Saved-invoice editor (из вкладки Накладные) ============
+async function openSavedInvoiceEditor(botId) {
+  if (!botId) return;
+  haptic();
+  ieState.savedBotId = botId;
+  ieState.pendingId = null;
+  document.body.classList.add('ie-mode');
+  // Запомним текущий экран чтобы вернуться по закрытию
+  ieState._returnTab = state.currentTab || 'main';
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-invoice-edit').classList.add('active');
+  document.getElementById('ie-loading').style.display = 'block';
+  document.getElementById('ie-loading').textContent = 'Загрузка...';
+  document.getElementById('ie-content').style.display = 'none';
+  document.getElementById('ie-save-bar').style.display = 'none';
+  try {
+    const data = await apiGet(`/api/invoice-saved/${botId}`);
+    ieState.searchOrgId = data.search_org_id || data.organization_id;
+    ieState.items = data.items || [];
+    ieState.supplier = data.supplier || '';
+    ieState.date = data.date || '';
+    ieState.vatRate = data.vat_rate || 12;
+    document.getElementById('ie-supplier').value = ieState.supplier;
+    document.getElementById('ie-date').value = ieState.date;
+    document.getElementById('ie-save-btn').textContent = '💾 Сопоставить и отправить';
+    ieRenderItems();
+    ieRecalcTotals();
+    document.getElementById('ie-loading').style.display = 'none';
+    document.getElementById('ie-content').style.display = 'block';
+    document.getElementById('ie-save-bar').style.display = 'flex';
+  } catch (e) {
+    document.getElementById('ie-loading').textContent = '❌ Не удалось загрузить.';
+  }
+}
+
+function ieCloseSavedEditor() {
+  ieState.savedBotId = null;
+  document.body.classList.remove('ie-mode');
+  document.getElementById('screen-invoice-edit').classList.remove('active');
+  document.getElementById('ie-save-btn').textContent = '💾 Сохранить и вернуться в чат';
+  const back = ieState._returnTab || 'main';
+  ieState._returnTab = null;
+  if (typeof switchTab === 'function') {
+    switchTab(back);
+  } else {
+    document.getElementById('screen-' + back)?.classList.add('active');
+  }
 }
 
 // apiPost — добавим если её нет
