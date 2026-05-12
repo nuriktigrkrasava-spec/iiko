@@ -408,6 +408,63 @@ html, body {
   .metric-value { font-size: 26px; }
   .freq-row { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* ========== INVOICE EDIT SCREEN (Stage 5) ========== */
+.ie-header { display:flex; align-items:center; gap:12px; padding:14px 16px; border-bottom:1px solid var(--divider); background:var(--bg); position:sticky; top:0; z-index:10; }
+.ie-back { font-size:24px; cursor:pointer; line-height:1; padding:4px 8px; color:var(--text); }
+.ie-title { font-size:18px; font-weight:700; flex:1; color:var(--text); }
+.ie-meta { padding:12px 16px; display:grid; grid-template-columns:1fr 1fr; gap:8px 16px; background:var(--bg-secondary); margin:12px 16px; border-radius:12px; }
+.ie-meta-row { display:flex; flex-direction:column; }
+.ie-meta-label { font-size:11px; color:var(--text-secondary); margin-bottom:2px; text-transform:uppercase; letter-spacing:.5px; }
+.ie-meta-value { font-size:14px; font-weight:600; color:var(--text); }
+.ie-meta input { background:transparent; border:none; font-size:14px; font-weight:600; color:var(--text); width:100%; padding:0; }
+.ie-meta input:focus { outline:1px solid var(--accent); border-radius:4px; }
+.ie-totals { padding:12px 16px; background:var(--bg-secondary); margin:0 16px 12px; border-radius:12px; }
+.ie-total-line { display:flex; justify-content:space-between; font-size:14px; padding:4px 0; }
+.ie-total-line.big { font-size:18px; font-weight:700; padding-top:8px; border-top:1px solid var(--divider); margin-top:4px; }
+.ie-items { padding:0 16px 100px; }
+.ie-item { display:flex; align-items:center; gap:10px; background:var(--bg-secondary); padding:12px; border-radius:10px; margin-bottom:8px; }
+.ie-item-body { flex:1; min-width:0; }
+.ie-item-name { font-size:14px; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; }
+.ie-item-mapped { font-size:11px; color:var(--green, #2bb673); margin-top:2px; }
+.ie-item-unmapped { font-size:11px; color:var(--red, #e25c5c); margin-top:2px; }
+.ie-item-info { font-size:12px; color:var(--text-secondary); margin-top:2px; }
+.ie-item-total { font-weight:700; font-size:14px; white-space:nowrap; color:var(--text); }
+.ie-item-edit { background:transparent; border:none; font-size:18px; cursor:pointer; padding:6px; color:var(--text-secondary); }
+.ie-save-bar { position:fixed; bottom:0; left:0; right:0; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:var(--bg); border-top:1px solid var(--divider); display:flex; gap:8px; z-index:20; }
+.ie-save-btn { flex:1; padding:14px; background:var(--accent); color:#fff; border:none; border-radius:12px; font-weight:700; font-size:16px; cursor:pointer; }
+.ie-save-btn:disabled { opacity:.5; }
+
+.ie-modal-back { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; display:none; align-items:flex-end; justify-content:center; }
+.ie-modal-back.active { display:flex; }
+.ie-modal { background:var(--bg); border-radius:16px 16px 0 0; width:100%; max-width:600px; max-height:90vh; overflow-y:auto; padding:16px; }
+.ie-modal h3 { margin:0 0 12px; font-size:16px; color:var(--text); }
+.ie-modal-row { margin-bottom:10px; }
+.ie-modal-row label { display:block; font-size:11px; color:var(--text-secondary); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
+.ie-modal-row input { width:100%; padding:10px; border:1px solid var(--divider); border-radius:8px; background:var(--bg-secondary); color:var(--text); font-size:14px; box-sizing:border-box; }
+.ie-modal-row-2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.ie-search-results { max-height:200px; overflow-y:auto; border:1px solid var(--divider); border-radius:8px; margin-top:6px; }
+.ie-search-results:empty { display:none; }
+.ie-search-result { padding:8px 10px; cursor:pointer; border-bottom:1px solid var(--divider); }
+.ie-search-result:hover, .ie-search-result.active { background:var(--bg-secondary); }
+.ie-search-result:last-child { border-bottom:none; }
+.ie-search-name { font-size:13px; color:var(--text); }
+.ie-search-meta { font-size:11px; color:var(--text-secondary); margin-top:2px; }
+.ie-modal-actions { display:flex; gap:8px; margin-top:12px; }
+.ie-modal-actions button { flex:1; padding:12px; border-radius:10px; border:none; cursor:pointer; font-weight:600; font-size:14px; }
+.ie-modal-save { background:var(--accent); color:#fff; }
+.ie-modal-cancel { background:var(--bg-secondary); color:var(--text); }
+
+.ie-empty { padding:40px 16px; text-align:center; color:var(--text-secondary); }
+
+body.ie-mode .navbar { display:none !important; }
+body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important; }
+
+/* Status badges для Накладных вкладки (Stage 7) */
+.badge-blue { background:#2c7be5; color:#fff; }
+.badge-orange { background:#e89e2a; color:#fff; }
+.badge-red { background:#e25c5c; color:#fff; }
+.badge-gray { background:#8a8a8a; color:#fff; }
 </style>
 </head>
 <body>
@@ -1092,6 +1149,74 @@ html, body {
   </div>
 </div>
 
+<!-- Invoice Edit Screen (Stage 5) — opens via ?edit=<pending_id> from bot WebApp button -->
+<div class="screen" id="screen-invoice-edit">
+  <div class="ie-header">
+    <div class="ie-back" onclick="ieClose()">←</div>
+    <div class="ie-title">Редактирование накладной</div>
+  </div>
+  <div class="scroll-container" id="ie-scroll">
+    <div id="ie-loading" class="ie-empty">Загрузка...</div>
+    <div id="ie-content" style="display:none;">
+      <div class="ie-meta">
+        <div class="ie-meta-row">
+          <div class="ie-meta-label">Поставщик</div>
+          <input type="text" id="ie-supplier" placeholder="—">
+        </div>
+        <div class="ie-meta-row">
+          <div class="ie-meta-label">Дата</div>
+          <input type="date" id="ie-date">
+        </div>
+      </div>
+      <div class="ie-totals">
+        <div class="ie-total-line"><span>Без НДС</span><span id="ie-base-total">0 ₸</span></div>
+        <div class="ie-total-line"><span>НДС 12%</span><span id="ie-vat">0 ₸</span></div>
+        <div class="ie-total-line big"><span>Итого</span><span id="ie-total">0 ₸</span></div>
+      </div>
+      <div class="ie-items" id="ie-items"></div>
+    </div>
+  </div>
+  <div class="ie-save-bar" id="ie-save-bar" style="display:none;">
+    <button class="ie-save-btn" id="ie-save-btn" onclick="ieSave()">💾 Сохранить и вернуться в чат</button>
+  </div>
+</div>
+
+<!-- Invoice item edit modal -->
+<div class="ie-modal-back" id="ie-modal-back" onclick="if(event.target===this)ieCloseModal()">
+  <div class="ie-modal">
+    <h3 id="ie-modal-title">Редактирование позиции</h3>
+    <div class="ie-modal-row">
+      <label>Название</label>
+      <input type="text" id="ie-edit-name" oninput="ieSearchProducts()">
+      <div class="ie-search-results" id="ie-search-results"></div>
+    </div>
+    <div class="ie-modal-row-2">
+      <div class="ie-modal-row">
+        <label>Кол-во</label>
+        <input type="number" id="ie-edit-qty" step="0.001" oninput="ieRecalcModal()">
+      </div>
+      <div class="ie-modal-row">
+        <label>Ед.</label>
+        <input type="text" id="ie-edit-unit" placeholder="кг/шт/л">
+      </div>
+    </div>
+    <div class="ie-modal-row-2">
+      <div class="ie-modal-row">
+        <label>Цена за ед.</label>
+        <input type="number" id="ie-edit-price" step="0.01" oninput="ieRecalcModal()">
+      </div>
+      <div class="ie-modal-row">
+        <label>Сумма</label>
+        <input type="number" id="ie-edit-total" step="0.01">
+      </div>
+    </div>
+    <div class="ie-modal-actions">
+      <button class="ie-modal-cancel" onclick="ieCloseModal()">Отмена</button>
+      <button class="ie-modal-save" onclick="ieSaveItem()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
 <!-- Navbar -->
 <div class="navbar" id="navbar">
   <div class="nav-item active" onclick="switchTab('main')">
@@ -1237,6 +1362,13 @@ function escHtml(s) {
 
 // ============ INIT ============
 document.addEventListener('DOMContentLoaded', () => {
+  // Если открыто из бота для редактирования накладной — не запускаем основной поток
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.get('edit')) {
+    const splash = document.getElementById('splash');
+    if (splash) splash.style.display = 'none';
+    return;  // ieHookInit() уже зарегистрировал ieInit
+  }
   setTimeout(() => {
     document.getElementById('splash').style.opacity = '0';
     setTimeout(() => {
@@ -2358,23 +2490,47 @@ async function loadExpenses() {
   if (state.expenseTab === 'invoices') {
     try {
       const data = await apiGet(`/api/invoices/${orgId}?period=week`);
-      document.getElementById('invoices-list').innerHTML = data.invoices.map(inv => `
+      const badgeClass = (raw) => {
+        if (raw === 'posted') return 'badge-green';
+        if (raw === 'draft_in_iiko') return 'badge-blue';
+        if (raw === 'needs_mapping') return 'badge-orange';
+        if (raw === 'iiko_error') return 'badge-red';
+        if (raw === 'draft') return 'badge-gray';
+        // Старый поток (накладные из iiko напрямую)
+        return inv => inv === 'Проведена' ? 'badge-green' : 'badge-yellow';
+      };
+      document.getElementById('invoices-list').innerHTML = data.invoices.map(inv => {
+        const raw = inv.raw_status || '';
+        const cls = raw ? badgeClass(raw) : (inv.status === 'Проведена' ? 'badge-green' : 'badge-yellow');
+        const vatLine = inv.vat_amount > 0
+          ? ` <span style="color:var(--text-secondary);font-size:12px;">(НДС ${formatMoney(inv.vat_amount)})</span>`
+          : '';
+        let actions = '';
+        if (raw === 'draft_in_iiko' && inv.bot_id) {
+          actions = `<button class="btn btn-green" onclick="invoicePost(${inv.bot_id})">▶️ Провести</button>`;
+        } else if (raw === 'posted' && inv.bot_id) {
+          actions = `<button class="btn btn-orange" onclick="invoiceUnpost(${inv.bot_id})">⏸ Распровести</button>`;
+        } else if (raw === 'needs_mapping' || raw === 'iiko_error') {
+          actions = `<button class="btn btn-outline" onclick="showToast('Открой бота, пришли накладную заново и нажми ✏️ Редактировать')">Доработать</button>`;
+        } else if (!raw) {
+          // старый поток (накладные из iiko, не из бота)
+          actions = inv.status === 'Проведена'
+            ? `<button class="btn btn-orange" onclick="showToast('Распроведение iiko API — в разработке')">Распровести</button>`
+            : `<button class="btn btn-green" onclick="showToast('Проведение iiko API — в разработке')">Провести</button>`;
+        }
+        return `
         <div class="invoice-card">
           <div class="invoice-header">
             <div class="invoice-id">#${inv.id}</div>
-            <div class="badge ${inv.status === 'Проведена' ? 'badge-green' : 'badge-yellow'}">${inv.status}</div>
+            <div class="badge ${cls}">${inv.status}</div>
           </div>
           <div class="invoice-meta">${inv.supplier} · ${inv.date} · ${inv.items} позиций</div>
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}</div>
-            <div class="invoice-actions">
-              ${inv.status === 'Проведена'
-                ? `<button class="btn btn-orange" onclick="showToast('Распроведено')">Распровести</button>`
-                : `<button class="btn btn-green" onclick="showToast('Проведено')">Провести</button><button class="btn btn-outline">Ред.</button>`}
-            </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}${vatLine}</div>
+            <div class="invoice-actions">${actions}</div>
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
     } catch(e) { console.error(e); }
   }
 
@@ -3030,6 +3186,271 @@ document.querySelectorAll('.scroll-container').forEach(sc => {
     }
   });
 });
+
+// ============ INVOICE POST/UNPOST (Stage 7) ============
+async function invoicePost(botInvoiceId) {
+  haptic();
+  if (!confirm('Провести накладную в iiko?')) return;
+  try {
+    await apiPost(`/api/invoices/${botInvoiceId}/post`, {});
+    showToast('✅ Проведено');
+    loadExpenses();
+  } catch (e) {
+    showToast('❌ ' + (e.message || 'Ошибка'));
+  }
+}
+
+async function invoiceUnpost(botInvoiceId) {
+  haptic();
+  if (!confirm('Распровести накладную?')) return;
+  try {
+    await apiPost(`/api/invoices/${botInvoiceId}/unpost`, {});
+    showToast('✅ Распроведено');
+    loadExpenses();
+  } catch (e) {
+    showToast('❌ ' + (e.message || 'Ошибка'));
+  }
+}
+
+
+// ============ INVOICE EDIT (Stage 5) ============
+// Активируется когда Mini App открывается из бота с URL ?edit=<pending_id>
+
+const ieState = {
+  pendingId: null,
+  searchOrgId: null,
+  items: [],
+  supplier: '',
+  date: '',
+  vatRate: 12,
+  editingIndex: null,   // null = не в режиме редактирования; иначе индекс в items
+  searchTimer: null,
+};
+
+function ieIsActive() {
+  const params = new URLSearchParams(window.location.search);
+  return !!params.get('edit');
+}
+
+async function ieInit() {
+  const params = new URLSearchParams(window.location.search);
+  const pid = params.get('edit');
+  if (!pid) return;
+  ieState.pendingId = pid;
+  document.body.classList.add('ie-mode');
+  // Скрываем все экраны кроме edit
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-invoice-edit').classList.add('active');
+  const tg = window.Telegram?.WebApp;
+  if (tg) { tg.expand(); tg.ready(); tg.BackButton?.show?.(); tg.BackButton?.onClick?.(ieClose); }
+
+  try {
+    const data = await apiGet(`/api/invoice-edit/${pid}`);
+    ieState.searchOrgId = data.search_org_id;
+    ieState.items = data.items || [];
+    ieState.supplier = data.supplier || '';
+    ieState.date = data.date || '';
+    ieState.vatRate = data.vat_rate || 12;
+    document.getElementById('ie-supplier').value = ieState.supplier;
+    document.getElementById('ie-date').value = ieState.date;
+    ieRenderItems();
+    ieRecalcTotals();
+    document.getElementById('ie-loading').style.display = 'none';
+    document.getElementById('ie-content').style.display = 'block';
+    document.getElementById('ie-save-bar').style.display = 'flex';
+  } catch (e) {
+    document.getElementById('ie-loading').textContent = '❌ Не удалось загрузить накладную. Сессия могла истечь.';
+  }
+}
+
+function ieRenderItems() {
+  const wrap = document.getElementById('ie-items');
+  if (!ieState.items.length) {
+    wrap.innerHTML = '<div class="ie-empty">Позиций нет</div>';
+    return;
+  }
+  wrap.innerHTML = ieState.items.map((it, i) => {
+    const qty = it.quantity ?? '—';
+    const unit = it.unit || '';
+    const price = it.price_per_unit != null ? ieFormatMoney(it.price_per_unit) : '—';
+    const total = it.total != null ? ieFormatMoney(it.total) : '—';
+    const mapped = it.iiko_product_id
+      ? `<div class="ie-item-mapped">✓ ${ieEscape(it.iiko_product_name || 'сопоставлено')}</div>`
+      : `<div class="ie-item-unmapped">⚠ не сопоставлено</div>`;
+    return `
+      <div class="ie-item">
+        <div class="ie-item-body">
+          <div class="ie-item-name">${ieEscape(it.name || '—')}</div>
+          ${mapped}
+          <div class="ie-item-info">${qty} ${ieEscape(unit)} × ${price} ₸</div>
+        </div>
+        <div class="ie-item-total">${total} ₸</div>
+        <button class="ie-item-edit" onclick="ieOpenItem(${i})">✏️</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function ieRecalcTotals() {
+  const total = ieState.items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const vatRate = ieState.vatRate / 100;
+  const base = total / (1 + vatRate);
+  const vat = total - base;
+  document.getElementById('ie-base-total').textContent = ieFormatMoney(base) + ' ₸';
+  document.getElementById('ie-vat').textContent = ieFormatMoney(vat) + ' ₸';
+  document.getElementById('ie-total').textContent = ieFormatMoney(total) + ' ₸';
+}
+
+function ieFormatMoney(n) {
+  return Math.round(Number(n) || 0).toLocaleString('ru-RU').replace(/,/g, ' ');
+}
+
+function ieEscape(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function ieOpenItem(idx) {
+  ieState.editingIndex = idx;
+  const it = ieState.items[idx] || {};
+  document.getElementById('ie-edit-name').value = it.name || '';
+  document.getElementById('ie-edit-qty').value = it.quantity ?? '';
+  document.getElementById('ie-edit-unit').value = it.unit || '';
+  document.getElementById('ie-edit-price').value = it.price_per_unit ?? '';
+  document.getElementById('ie-edit-total').value = it.total ?? '';
+  document.getElementById('ie-search-results').innerHTML = '';
+  document.getElementById('ie-modal-back').classList.add('active');
+}
+
+function ieCloseModal() {
+  ieState.editingIndex = null;
+  document.getElementById('ie-modal-back').classList.remove('active');
+}
+
+function ieRecalcModal() {
+  const qty = Number(document.getElementById('ie-edit-qty').value) || 0;
+  const price = Number(document.getElementById('ie-edit-price').value) || 0;
+  if (qty && price) {
+    document.getElementById('ie-edit-total').value = (qty * price).toFixed(2);
+  }
+}
+
+function ieSearchProducts() {
+  clearTimeout(ieState.searchTimer);
+  ieState.searchTimer = setTimeout(async () => {
+    const q = document.getElementById('ie-edit-name').value.trim();
+    const results = document.getElementById('ie-search-results');
+    if (q.length < 2 || !ieState.searchOrgId) {
+      results.innerHTML = '';
+      return;
+    }
+    try {
+      const data = await apiGet(`/api/nomenclature/search/${ieState.searchOrgId}?q=${encodeURIComponent(q)}&limit=15`);
+      if (!data.products?.length) {
+        results.innerHTML = '<div class="ie-search-result" style="color:var(--text-secondary)">Ничего не найдено</div>';
+        return;
+      }
+      results.innerHTML = data.products.map(p => `
+        <div class="ie-search-result" onclick='iePickProduct(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
+          <div class="ie-search-name">${ieEscape(p.name || '—')}</div>
+          <div class="ie-search-meta">${ieEscape(p.unit || '')} ${p.num ? '· #' + ieEscape(p.num) : ''}</div>
+        </div>
+      `).join('');
+    } catch (e) {
+      results.innerHTML = '';
+    }
+  }, 300);
+}
+
+function iePickProduct(p) {
+  document.getElementById('ie-edit-name').value = p.name || '';
+  if (p.unit) document.getElementById('ie-edit-unit').value = p.unit;
+  document.getElementById('ie-search-results').innerHTML = '';
+  // Сохраняем сопоставление в state для последующего ieSaveItem
+  ieState._pickedProduct = p;
+}
+
+function ieSaveItem() {
+  const idx = ieState.editingIndex;
+  if (idx == null) return;
+  const it = ieState.items[idx] || {};
+  it.name = document.getElementById('ie-edit-name').value.trim();
+  it.quantity = Number(document.getElementById('ie-edit-qty').value) || 0;
+  it.unit = document.getElementById('ie-edit-unit').value.trim();
+  it.price_per_unit = Number(document.getElementById('ie-edit-price').value) || 0;
+  it.total = Number(document.getElementById('ie-edit-total').value) || (it.quantity * it.price_per_unit);
+  if (ieState._pickedProduct) {
+    it.iiko_product_id = ieState._pickedProduct.id;
+    it.iiko_product_name = ieState._pickedProduct.name;
+    ieState._pickedProduct = null;
+  }
+  ieState.items[idx] = it;
+  ieRenderItems();
+  ieRecalcTotals();
+  ieCloseModal();
+}
+
+async function ieSave() {
+  const btn = document.getElementById('ie-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Сохраняю...';
+  const total = ieState.items.reduce((s, it) => s + (Number(it.total) || 0), 0);
+  const vatRate = ieState.vatRate / 100;
+  const vat = total - total / (1 + vatRate);
+  const payload = {
+    pending_id: ieState.pendingId,
+    items: ieState.items,
+    supplier: document.getElementById('ie-supplier').value.trim(),
+    date: document.getElementById('ie-date').value,
+    total_amount: total,
+    vat_amount: vat,
+  };
+  // Fallback POST (на случай если sendData не дойдёт)
+  try {
+    await apiPost(`/api/invoice-edit/${ieState.pendingId}`, payload);
+  } catch (e) {
+    // продолжаем — sendData может сработать
+  }
+  // Главный путь — WebApp.sendData. Закрывает Mini App и шлёт боту.
+  const tg = window.Telegram?.WebApp;
+  if (tg?.sendData) {
+    try { tg.sendData(JSON.stringify(payload)); }
+    catch (e) { /* sendData закроет — если упадёт, fallback всё равно сохранил */ }
+  }
+  setTimeout(() => { tg?.close?.(); }, 200);
+}
+
+function ieClose() {
+  const tg = window.Telegram?.WebApp;
+  tg?.close?.();
+}
+
+// apiPost — добавим если её нет
+if (typeof apiPost === 'undefined') {
+  window.apiPost = async function(path, body) {
+    const initData = window.Telegram?.WebApp?.initData || '';
+    const r = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  };
+}
+
+// Hook into init — если URL содержит ?edit=, переходим в режим редактирования
+(function ieHookInit() {
+  if (!ieIsActive()) return;
+  // Splash прячем сразу
+  const splash = document.getElementById('splash');
+  if (splash) { splash.style.display = 'none'; }
+  // Дождёмся DOMContentLoaded чтобы все элементы были готовы
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', ieInit);
+  } else {
+    ieInit();
+  }
+})();
 </script>
 <!-- Add Expense Modal -->
 <div class="modal-overlay" id="add-expense-modal" onclick="closeExpenseModal(event)">
