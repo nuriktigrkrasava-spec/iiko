@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from cryptography.fernet import Fernet
@@ -318,3 +319,45 @@ def find_invoice_by_dedup(dedup_hash: str, telegram_id: int,
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_price_history(telegram_id: int, days: int = 90) -> List[Dict[str, Any]]:
+    """Все позиции из сохранённых накладных пользователя за N дней.
+
+    Возвращает плоский список: [{key, name, price_per_unit, supplier, date, unit}, ...]
+    где key = iiko_product_id (если есть) или name.strip().lower().
+    Используется для построения сравнения цен в боте (кнопка 📊 Сравнить цены).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.execute(
+        """SELECT items, supplier, date, created_at FROM bot_invoices
+           WHERE telegram_id = ?
+             AND date(COALESCE(date, substr(created_at, 1, 10))) >= date('now', ?)
+             AND items IS NOT NULL AND items != ''""",
+        (telegram_id, f"-{int(days)} days")
+    )
+    out: List[Dict[str, Any]] = []
+    for row in cursor.fetchall():
+        try:
+            items = json.loads(row["items"]) or []
+        except Exception:
+            continue
+        for it in items:
+            name = (it.get("name") or "").strip()
+            if not name:
+                continue
+            price = it.get("price_per_unit")
+            if price is None or float(price) <= 0:
+                continue
+            key = it.get("iiko_product_id") or name.lower()
+            out.append({
+                "key": str(key),
+                "name": name,
+                "price_per_unit": float(price),
+                "supplier": row["supplier"] or "—",
+                "date": row["date"] or (row["created_at"] or "")[:10],
+                "unit": it.get("unit") or "",
+            })
+    conn.close()
+    return out
