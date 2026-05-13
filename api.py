@@ -4,6 +4,7 @@ import httpx
 import os
 import hmac
 import hashlib
+import html
 import json
 from datetime import datetime, timedelta, date
 from enum import Enum
@@ -25,7 +26,7 @@ from database import (
     get_restaurants, add_restaurant, delete_restaurant,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
-    update_bot_invoice, find_invoice_by_dedup
+    update_bot_invoice, find_invoice_by_dedup, get_price_history
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos
@@ -1713,6 +1714,7 @@ def _invoice_kb(pending_id: str) -> dict:
              {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
             [{"text": "✏️ Редактировать",   "web_app": {"url": f"{MINIAPP_URL}/?edit={pending_id}"}},
              {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
+            [{"text": "📊 Сравнить цены",   "callback_data": "act:compare"}],
         ]
     }
 
@@ -1724,6 +1726,7 @@ INVOICE_KB_FALLBACK = {
          {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
         [{"text": "✏️ Редактировать",   "callback_data": "act:edit"},
          {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
+        [{"text": "📊 Сравнить цены",   "callback_data": "act:compare"}],
     ]
 }
 
@@ -2005,6 +2008,104 @@ async def _show_org_picker(chat_id: int, msg_id: int, pending: dict) -> bool:
     return True
 
 
+def _compare_prices(telegram_id: int, current_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Для каждой позиции текущей накладной возвращает сравнение с историческим минимумом.
+
+    Возвращает список dict'ов в том же порядке что current_items, каждый:
+      {name, current_price, quantity, unit,
+       min_price, min_supplier, min_date,  # None если нет истории
+       status: 'new_min' | 'overpay' | 'normal' | 'no_history',
+       delta_pct: float}
+    """
+    history = get_price_history(telegram_id, days=90)
+    by_key: Dict[str, List[Dict[str, Any]]] = {}
+    for h in history:
+        by_key.setdefault(h["key"], []).append(h)
+
+    rows: List[Dict[str, Any]] = []
+    for it in current_items or []:
+        name = (it.get("name") or "").strip()
+        current_price = float(it.get("price_per_unit") or 0)
+        quantity = float(it.get("quantity") or 0)
+        unit = it.get("unit") or ""
+        key = str(it.get("iiko_product_id") or name.lower())
+
+        past = by_key.get(key, [])
+        # Берём минимум среди прошлых закупок (НЕ включая текущую — она ещё не сохранена).
+        if past:
+            best = min(past, key=lambda r: r["price_per_unit"])
+            min_price = best["price_per_unit"]
+            min_supplier = best["supplier"]
+            min_date = best["date"]
+            if current_price <= min_price * 0.99:
+                status = "new_min"
+            elif current_price >= min_price * 1.1:
+                status = "overpay"
+            else:
+                status = "normal"
+            delta_pct = ((current_price - min_price) / min_price * 100) if min_price > 0 else 0.0
+        else:
+            min_price = None
+            min_supplier = None
+            min_date = None
+            status = "no_history"
+            delta_pct = 0.0
+
+        rows.append({
+            "name": name,
+            "current_price": current_price,
+            "quantity": quantity,
+            "unit": unit,
+            "min_price": min_price,
+            "min_supplier": min_supplier,
+            "min_date": min_date,
+            "status": status,
+            "delta_pct": delta_pct,
+        })
+    return rows
+
+
+def _format_price_comparison(rows: List[Dict[str, Any]]) -> str:
+    """HTML-сообщение для бота с построчным сравнением цен."""
+    if not rows:
+        return "📊 <b>Сравнение цен</b>\n\nВ накладной нет позиций с ценами для сравнения."
+
+    if all(r["status"] == "no_history" for r in rows):
+        return ("📊 <b>Сравнение цен</b>\n\n"
+                "📭 Это первая накладная — истории закупок для сравнения пока нет. "
+                "После нескольких отправленных накладных я смогу показывать где переплачиваешь, "
+                "а где удалось купить дешевле обычного.")
+
+    icons = {"new_min": "🟢", "overpay": "🔴", "normal": "⚪", "no_history": "🟡"}
+    lines = ["📊 <b>Сравнение цен с историей (90 дней)</b>", ""]
+
+    overpay_savings = 0.0
+    for r in rows:
+        icon = icons.get(r["status"], "⚪")
+        name = html.escape(r["name"] or "—")
+        cur = r["current_price"]
+        unit = html.escape(r["unit"] or "ед")
+        if r["status"] == "new_min":
+            tail = f"новый минимум, было {r['min_price']:.0f} ₸"
+        elif r["status"] == "overpay":
+            supplier = html.escape(r["min_supplier"] or "—")
+            tail = (f"+{r['delta_pct']:.0f}% к минимуму {r['min_price']:.0f} ₸ "
+                    f"у \"{supplier}\", {r['min_date']}")
+            overpay_savings += (cur - r["min_price"]) * (r["quantity"] or 0)
+        elif r["status"] == "normal":
+            sign = "+" if r["delta_pct"] >= 0 else ""
+            tail = f"как обычно ({sign}{r['delta_pct']:.0f}%)"
+        else:  # no_history
+            tail = "нет истории"
+        lines.append(f"{icon} <b>{name}</b> — {cur:.0f} ₸/{unit} <i>({tail})</i>")
+
+    if overpay_savings > 0:
+        lines.append("")
+        lines.append(f"💡 <i>Потенциальная экономия если брать у дешёвых: "
+                     f"{overpay_savings:,.0f} ₸</i>".replace(",", " "))
+    return "\n".join(lines)
+
+
 async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
                           force: bool = False) -> None:
     """Финальный шаг: dedup-проверка + auto-match + create_incoming_invoice + сохранение в БД."""
@@ -2168,6 +2269,14 @@ async def telegram_webhook(request: Request):
             if action == "act:add":
                 pending["state"] = "adding_photos"
                 await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "adding"), ADD_PHOTOS_KB)
+                return {"ok": True}
+
+            if action == "act:compare":
+                items = (pending.get("result") or {}).get("items") or []
+                rows = _compare_prices(pending["telegram_id"], items)
+                text = _format_price_comparison(rows)
+                # Шлём НОВЫМ сообщением — превью с кнопками остаётся доступным
+                await _tg_send(chat_id, text)
                 return {"ok": True}
 
             if action == "add:done":
