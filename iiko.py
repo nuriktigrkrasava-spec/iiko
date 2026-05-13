@@ -1,6 +1,7 @@
 import httpx
 import asyncio
 import hashlib
+import secrets
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Any, Optional, Tuple
@@ -292,10 +293,9 @@ class IikoClient:
         token = await self._ensure_token()
         body = {
             "organizationId": org_id,
-            "supplierId": supplier_id,
+            "supplier": supplier_id,
             "dateIncoming": _dt(date),
             "useDefaultDocumentTime": True,
-            "status": "NEW",  # черновик; проводка — отдельным вызовом
             "items": items,
         }
         if document_number:
@@ -307,6 +307,11 @@ class IikoClient:
                 json=body
             )
             if resp.status_code != 200:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"iiko create/incomingInvoice {resp.status_code}: "
+                    f"body={resp.text[:1000]} | request={body}"
+                )
                 return {"ok": False, "error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
             data = resp.json()
             return {"ok": True, "id": data.get("id") or data.get("documentId"),
@@ -799,7 +804,9 @@ class IikoWebClient:
             return {"ok": False, "error": "Не найден склад (defaultStore) — настрой в iikoOffice"}
 
         dt_iso = date if "T" in date else f"{date}T10:00:00"
-        doc_num = document_number or datetime.now().strftime("BOT-%y%m%d-%H%M%S")
+        doc_num = document_number or (
+            datetime.now().strftime("BOT-%y%m%d-%H%M%S-") + secrets.token_hex(2)
+        )
 
         # Строим XML
         root = ET.Element("document")
@@ -830,6 +837,11 @@ class IikoWebClient:
                     content=xml_body
                 )
                 if resp.status_code != 200:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"iikoWeb import/incomingInvoice {resp.status_code}: "
+                        f"body={resp.text[:1000]} | xml={xml_body[:1000]!r}"
+                    )
                     return {"ok": False,
                             "error": f"HTTP {resp.status_code}",
                             "body": resp.text[:500]}
