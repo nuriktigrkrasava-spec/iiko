@@ -1640,7 +1640,11 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
 
     if not resp.get("ok"):
         update_bot_invoice(invoice_id, status="iiko_error")
-        return {"ok": False, "error": resp.get("error", "unknown")}
+        err = resp.get("error", "unknown")
+        body_txt = resp.get("body") or ""
+        if body_txt:
+            err = f"{err}: {body_txt[:300]}"
+        return {"ok": False, "error": err}
 
     update_bot_invoice(invoice_id,
         iiko_doc_id=resp.get("id") or "",
@@ -2086,8 +2090,15 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
             organization_id=org_id, dedup_hash=dedup_hash,
             status="iiko_error",
         )
+        err = resp.get("error", "unknown")
+        body_txt = (resp.get("body") or "")[:400]
+        body_line = f"\n<code>{body_txt}</code>" if body_txt else ""
+        if "409" in err:
+            headline = "⚠️ Похоже эта накладная уже есть в iiko (конфликт по номеру или содержимому)."
+        else:
+            headline = f"❌ iiko вернул ошибку: <code>{err}</code>"
         await _tg_edit(chat_id, msg_id,
-            f"❌ iiko вернул ошибку: <code>{resp.get('error','unknown')}</code>\n\n"
+            f"{headline}{body_line}\n\n"
             f"📋 Накладная сохранена локально как черновик.")
         _drop_pending(chat_id)
         return
