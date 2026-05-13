@@ -1009,6 +1009,121 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
         return {"invoices": DEMO_INVOICES}
 
 
+# ============ PRICE STATS (Mini App «📊 Цены») ============
+# Cache of iiko invoice exports per (org_id, days) → (timestamp, raw_payload).
+# TTL 1 hour. Avoids hitting iiko on every nomenclature pick.
+_price_stats_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_PRICE_STATS_TTL_SECONDS = 3600
+
+
+@app.get("/api/price-stats/{org_id}")
+async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
+                       days: int = Query(180, ge=1, le=365),
+                       user: Dict = Depends(get_current_user)):
+    """Агрегат цен товара по поставщикам за `days` дней.
+    Источник: iiko export invoice_incoming + локальные bot_invoices.
+    """
+    import time
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"product": {"id": product_id, "name": "—", "unit": ""},
+                "best": None, "suppliers": [], "stats": {"purchases": 0, "days": days}}
+
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+
+    date_to = datetime.now().strftime("%Y-%m-%d")
+    date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    cache_key = f"{real_org}|{days}"
+    now_ts = time.time()
+    cached = _price_stats_cache.get(cache_key)
+    iiko_ok = True
+    if cached and (now_ts - cached[0]) < _PRICE_STATS_TTL_SECONDS:
+        raw = cached[1]
+    else:
+        try:
+            raw = await client.get_invoices([_olap_dept(real_org, info)], date_from, date_to)
+            _price_stats_cache[cache_key] = (now_ts, raw)
+        except Exception as e:
+            logger.warning(f"[price_stats] iiko fetch failed: {e}")
+            raw = {"invoiceIncomings": []}
+            iiko_ok = False
+
+    invoices_list = raw.get("invoiceIncomings", []) if isinstance(raw, dict) else []
+
+    product_name = "—"
+    product_unit = ""
+
+    by_supplier: Dict[str, Dict[str, Any]] = {}
+    purchases_count = 0
+    for inv in invoices_list:
+        supplier_name = inv.get("supplier") or inv.get("supplierName") or "—"
+        supplier_id = inv.get("supplierId") or supplier_name
+        inv_date = (inv.get("dateIncoming") or inv.get("documentDate") or "")[:10]
+        for it in (inv.get("items") or []):
+            if (it.get("productId") or it.get("product")) != product_id:
+                continue
+            amount = float(it.get("amount") or 0)
+            if amount <= 0:
+                continue
+            price = it.get("price")
+            if price is None:
+                total_sum = float(it.get("sum") or 0)
+                price = total_sum / amount if amount else 0
+            price = float(price)
+            if price <= 0:
+                continue
+            unit = it.get("amountUnit") or it.get("unit") or ""
+            purchases_count += 1
+            if not product_name or product_name == "—":
+                product_name = it.get("productName") or it.get("name") or product_name
+                product_unit = unit
+            cur = by_supplier.get(supplier_id)
+            if cur is None or price < cur["price_per_unit"]:
+                by_supplier[supplier_id] = {
+                    "supplier_id": supplier_id,
+                    "supplier_name": supplier_name,
+                    "price_per_unit": price,
+                    "date": inv_date,
+                    "unit": unit,
+                }
+
+    try:
+        local = get_price_history(user.get("id") or 0, days=days)
+    except Exception:
+        local = []
+    for h in local:
+        if h["key"] != product_id:
+            continue
+        sid = f"local:{h['supplier']}"
+        purchases_count += 1
+        cur = by_supplier.get(sid)
+        if cur is None or h["price_per_unit"] < cur["price_per_unit"]:
+            by_supplier[sid] = {
+                "supplier_id": sid,
+                "supplier_name": h["supplier"],
+                "price_per_unit": h["price_per_unit"],
+                "date": h["date"],
+                "unit": h["unit"] or product_unit,
+            }
+
+    suppliers = sorted(by_supplier.values(), key=lambda r: r["price_per_unit"])
+    best = suppliers[0] if suppliers else None
+    if best:
+        for s in suppliers:
+            s["delta_pct"] = ((s["price_per_unit"] - best["price_per_unit"]) /
+                              best["price_per_unit"] * 100) if best["price_per_unit"] > 0 else 0.0
+
+    return {
+        "product": {"id": product_id, "name": product_name, "unit": product_unit},
+        "best": best,
+        "suppliers": suppliers,
+        "stats": {"purchases": purchases_count, "days": days},
+        "iiko_ok": iiko_ok,
+    }
+
+
 @app.get("/api/writeoffs/{org_id}")
 async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
