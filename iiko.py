@@ -739,7 +739,7 @@ class IikoWebClient:
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
             "groupByRowFields": ["Counteragent.Id", "Product.Id"],
-            "aggregateFields": ["Sum.Incoming", "Quantity.Incoming"],
+            "aggregateFields": ["Sum.Incoming", "Amount.In"],
             "filters": filters,
         }
         token = await self._ensure_token()
@@ -763,7 +763,7 @@ class IikoWebClient:
                     elif isinstance(c, str):
                         names.append(c)
                 fields_preview = ", ".join(names[:120]) if names else "<columns endpoint empty/404>"
-                raise Exception(f"OLAP {resp.status_code} [diag-v6]: {body} | fields: {fields_preview}")
+                raise Exception(f"OLAP {resp.status_code} [diag-v7]: {body} | fields: {fields_preview}")
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
@@ -794,7 +794,7 @@ class IikoWebClient:
             pid = r.get("Product.Id") or r.get("Product") or ""
             if not pid:
                 continue
-            amount = float(r.get("Quantity.Incoming") or r.get("Amount.Incoming") or 0)
+            amount = float(r.get("Amount.In") or 0)
             total = float(r.get("Sum.Incoming") or 0)
             if amount <= 0 or total <= 0:
                 continue
