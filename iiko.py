@@ -709,7 +709,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["Counteragent", "Product"],
+            "groupByRowFields": ["Counterparty", "Product"],
             "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
             "filters": filters,
         }
@@ -758,7 +758,7 @@ class IikoWebClient:
             if amount <= 0 or total <= 0:
                 continue
             price = total / amount
-            cid = r.get("Counteragent") or ""
+            cid = r.get("Counterparty") or ""
             out.append({
                 "product_id": pid,
                 "product_name": names_by_id.get(pid) or "—",
