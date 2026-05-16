@@ -709,7 +709,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["DateTime.OperDay", "Counteragent", "Product"],
+            "groupByRowFields": ["Counteragent", "Product"],
             "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
             "filters": filters,
         }
@@ -765,7 +765,7 @@ class IikoWebClient:
                 "unit": units_by_id.get(pid, ""),
                 "supplier_id": cid or suppliers_by_id.get(cid, "") or "—",
                 "supplier_name": suppliers_by_id.get(cid) or cid or "—",
-                "date": (r.get("DateTime.OperDay") or "")[:10],
+                "date": "",
                 "price_per_unit": price,
                 "amount": amount,
                 "sum": total,
