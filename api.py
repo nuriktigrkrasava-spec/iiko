@@ -1639,9 +1639,8 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
 
 @app.get("/api/debug/iiko-fields/{org_id}")
 async def debug_iiko_fields(org_id: str, report_type: str = "TRANSACTIONS"):
-    """Диагностика OLAP-полей. Открыто без auth: отдаёт только имена полей,
-    без данных. `org_id=auto` — берёт первый сконфигурированный ресторан.
-    Открывается в любом браузере без Telegram-контекста."""
+    """Диагностика OLAP-полей: пробует несколько URL-схем columns-эндпоинта
+    и возвращает статус+тело каждой попытки. Без auth, без данных юзера."""
     conn = get_db()
     if org_id == "auto":
         row = conn.execute(
@@ -1659,22 +1658,35 @@ async def debug_iiko_fields(org_id: str, report_type: str = "TRANSACTIONS"):
     real_org = row["organization_id"]
     api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
     client = get_client(row["api_login"], row["iiko_server"], api_password)
+    base = getattr(client, "base_url", None)
+    if not base:
+        # Cloud-клиент — другая схема, не наш случай
+        return {"error": "cloud client — debug not implemented", "org_id": real_org}
     try:
-        if isinstance(client, IikoClient):
-            cols = await client.get_olap_columns(real_org, report_type)
-        else:
-            cols = await client.get_olap_columns(report_type)
+        token = await client._ensure_token()
     except Exception as e:
-        return {"error": str(e), "report_type": report_type, "org_id": real_org}
-    names: List[str] = []
-    for c in cols:
-        if isinstance(c, dict):
-            n = c.get("name") or c.get("field") or c.get("id")
-            if n:
-                names.append(str(n))
-        elif isinstance(c, str):
-            names.append(c)
-    return {"report_type": report_type, "org_id": real_org, "count": len(names), "columns": names}
+        return {"error": f"auth failed: {e}", "org_id": real_org}
+    candidates = [
+        f"{base}/api/v2/reports/olap/columns/{report_type}",
+        f"{base}/api/v2/reports/olap/columns?reportType={report_type}",
+        f"{base}/api/v2/reports/olap/columnsConfig",
+        f"{base}/api/v2/reports/olap/columnsConfig?reportType={report_type}",
+        f"{base}/api/reports/olap/columns/{report_type}",
+    ]
+    attempts: List[Dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=30.0, verify=False) as cli:
+        for url in candidates:
+            try:
+                sep = "&" if "?" in url else "?"
+                resp = await cli.get(f"{url}{sep}key={token}")
+                attempts.append({
+                    "url": url,
+                    "status": resp.status_code,
+                    "body": resp.text[:1500],
+                })
+            except Exception as e:
+                attempts.append({"url": url, "error": str(e)})
+    return {"org_id": real_org, "report_type": report_type, "attempts": attempts}
 
 
 @app.get("/api/suppliers/{org_id}")
