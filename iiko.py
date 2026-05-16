@@ -279,6 +279,50 @@ class IikoClient:
                     break
         return out
 
+    async def get_invoice_items_olap(
+        self, org_ids: List[str], date_from: str, date_to: str
+    ) -> List[Dict[str, Any]]:
+        """Flat per-line-item rows from incoming invoices, used by /api/price-stats.
+        Cloud-path: reuses invoice_incoming export and flattens (supplier, date, item) → row."""
+        raw = await self.get_invoices(org_ids, date_from, date_to)
+        invoices = raw if isinstance(raw, list) else raw.get("invoiceIncomings", []) if isinstance(raw, dict) else []
+        out: List[Dict[str, Any]] = []
+        for inv in invoices:
+            sup = inv.get("supplier")
+            if isinstance(sup, dict):
+                supplier_name = sup.get("name") or "—"
+                supplier_id = sup.get("id") or supplier_name
+            else:
+                supplier_name = sup or inv.get("supplierName") or "—"
+                supplier_id = inv.get("supplierId") or supplier_name
+            inv_date = (inv.get("dateIncoming") or inv.get("documentDate") or "")[:10]
+            for it in (inv.get("items") or []):
+                pid = it.get("productId") or it.get("product")
+                if not pid:
+                    continue
+                amount = float(it.get("amount") or 0)
+                if amount <= 0:
+                    continue
+                price = it.get("price")
+                total = float(it.get("sum") or 0)
+                if price is None:
+                    price = total / amount if amount else 0
+                price = float(price)
+                if price <= 0:
+                    continue
+                out.append({
+                    "product_id": pid,
+                    "product_name": it.get("productName") or it.get("name") or "—",
+                    "unit": it.get("amountUnit") or it.get("unit") or "",
+                    "supplier_id": supplier_id,
+                    "supplier_name": supplier_name,
+                    "date": inv_date,
+                    "price_per_unit": price,
+                    "amount": amount,
+                    "sum": total,
+                })
+        return out
+
     async def create_incoming_invoice(
         self, org_id: str, supplier_id: str, items: List[Dict[str, Any]],
         date: str, document_number: Optional[str] = None
@@ -628,6 +672,79 @@ class IikoWebClient:
                 if float(r.get("Sum.Incoming") or 0) > 0
             ]
             return {"invoiceIncomings": result}
+
+    async def get_invoice_items_olap(
+        self, org_ids: List[str], date_from: str, date_to: str
+    ) -> List[Dict[str, Any]]:
+        """Per-line-item invoice rows via OLAP TRANSACTIONS, grouped by product/supplier/day.
+        Self-hosted iikoServer не отдаёт /documents/export/invoice_incoming, поэтому строим
+        построчную картину через OLAP (это единственный способ для price-stats)."""
+        filters: Dict[str, Any] = {
+            "DateTime.OperDayFilter": self._tx_date_filter(date_from, date_to),
+            "TransactionType": {"filterType": "IncludeValues", "values": ["INVOICE", "SESSION_ACCEPTANCE"]},
+        }
+        if org_ids and org_ids[0] and org_ids[0] != "demo":
+            filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
+
+        payload = {
+            "reportType": "TRANSACTIONS",
+            "buildSummary": "false",
+            "groupByRowFields": [
+                "DateTime.OperDay",
+                "Counteragent",
+                "Counteragent.Name",
+                "Product",
+                "Product.Name",
+            ],
+            "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
+            "filters": filters,
+        }
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v2/reports/olap",
+                params={"key": token},
+                json=payload
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            rows = raw if isinstance(raw, list) else raw.get("data", [])
+
+        # Unit lookup из закешированной номенклатуры (search с пустым query наполнит кеш).
+        units_by_id: Dict[str, str] = {}
+        if rows and org_ids and org_ids[0] and org_ids[0] != "demo":
+            try:
+                products = await self.search_nomenclature(org_ids[0], "", limit=10000)
+                for p in products:
+                    pid = p.get("id")
+                    if pid:
+                        units_by_id[pid] = p.get("unit") or ""
+            except Exception:
+                pass
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            pid = r.get("Product") or ""
+            if not pid:
+                continue
+            amount = float(r.get("Amount.Incoming") or 0)
+            total = float(r.get("Sum.Incoming") or 0)
+            if amount <= 0 or total <= 0:
+                continue
+            price = total / amount
+            supplier_name = r.get("Counteragent.Name") or r.get("Counteragent") or "—"
+            out.append({
+                "product_id": pid,
+                "product_name": r.get("Product.Name") or "—",
+                "unit": units_by_id.get(pid, ""),
+                "supplier_id": r.get("Counteragent") or supplier_name,
+                "supplier_name": supplier_name,
+                "date": (r.get("DateTime.OperDay") or "")[:10],
+                "price_per_unit": price,
+                "amount": amount,
+                "sum": total,
+            })
+        return out
 
     # ============ SUPPLIERS / NOMENCLATURE / DOCUMENTS — self-hosted iikoServer 9.x ============
     # iikoServer возвращает XML по умолчанию. Auth: ?key=<token> в query.
