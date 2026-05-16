@@ -695,16 +695,22 @@ class IikoWebClient:
         token = await self._ensure_token()
         try:
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                # iikoServer 9.x использует query-style: ?reportType=…
                 resp = await client.get(
-                    f"{self.base_url}/api/v2/reports/olap/columns/{report_type}",
-                    params={"key": token}
+                    f"{self.base_url}/api/v2/reports/olap/columns",
+                    params={"key": token, "reportType": report_type}
                 )
                 if resp.status_code == 200:
                     data = resp.json()
+                    # Формат: dict с ключами-именами полей или list
                     if isinstance(data, list):
                         return data
                     if isinstance(data, dict):
-                        return data.get("columnList") or data.get("columns") or []
+                        # На iikoServer 9.x — dict {fieldName: meta}; превращаем
+                        # в list of dicts с полем "name"
+                        if "columnList" in data or "columns" in data:
+                            return data.get("columnList") or data.get("columns") or []
+                        return [{"name": k, **(v if isinstance(v, dict) else {})} for k, v in data.items()]
         except Exception:
             pass
         return []
@@ -729,7 +735,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["Product"],
+            "groupByRowFields": ["Counteragent.Id", "Product.Id"],
             "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
             "filters": filters,
         }
@@ -754,7 +760,7 @@ class IikoWebClient:
                     elif isinstance(c, str):
                         names.append(c)
                 fields_preview = ", ".join(names[:120]) if names else "<columns endpoint empty/404>"
-                raise Exception(f"OLAP {resp.status_code} [diag-v3]: {body} | fields: {fields_preview}")
+                raise Exception(f"OLAP {resp.status_code} [diag-v5]: {body} | fields: {fields_preview}")
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
@@ -782,7 +788,7 @@ class IikoWebClient:
 
         out: List[Dict[str, Any]] = []
         for r in rows:
-            pid = r.get("Product") or ""
+            pid = r.get("Product.Id") or r.get("Product") or ""
             if not pid:
                 continue
             amount = float(r.get("Amount.Incoming") or 0)
@@ -790,14 +796,13 @@ class IikoWebClient:
             if amount <= 0 or total <= 0:
                 continue
             price = total / amount
-            # Per-supplier breakdown недоступен в TRANSACTIONS на этом iikoServer
-            # (поля Counteragent/Counterparty unknown). Показываем агрегат по товару.
+            cid = r.get("Counteragent.Id") or ""
             out.append({
                 "product_id": pid,
                 "product_name": names_by_id.get(pid) or "—",
                 "unit": units_by_id.get(pid, ""),
-                "supplier_id": f"avg:{pid}",
-                "supplier_name": "Все поставщики (среднее)",
+                "supplier_id": cid or "—",
+                "supplier_name": suppliers_by_id.get(cid) or cid or "—",
                 "date": "",
                 "price_per_unit": price,
                 "amount": amount,
