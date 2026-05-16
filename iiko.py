@@ -11,8 +11,24 @@ IIKO_CLOUD_BASE = "https://api-ru.iiko.services"
 _client_cache: Dict[str, Any] = {}
 
 
+def _normalize_iiko_url(url: str) -> str:
+    """Allow user-entered URLs like 'saya-sushi-aktobe.iiko.it' or
+    'saya-sushi-aktobe.iiko.it/resto' → coerce to canonical https://host/resto."""
+    u = (url or "").strip()
+    if not u:
+        return u
+    if not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    u = u.rstrip("/")
+    # iikoServer endpoints always live under /resto
+    if not u.endswith("/resto"):
+        u = u + "/resto"
+    return u
+
+
 def get_client(api_login: str, iiko_server: str = None, api_password: str = None):
     if iiko_server:
+        iiko_server = _normalize_iiko_url(iiko_server)
         key = f"web:{api_login}@{iiko_server}"
         if key not in _client_cache:
             _client_cache[key] = IikoWebClient(iiko_server, api_login, api_password or api_login)
@@ -678,7 +694,11 @@ class IikoWebClient:
     ) -> List[Dict[str, Any]]:
         """Per-line-item invoice rows via OLAP TRANSACTIONS, grouped by product/supplier/day.
         Self-hosted iikoServer не отдаёт /documents/export/invoice_incoming, поэтому строим
-        построчную картину через OLAP (это единственный способ для price-stats)."""
+        построчную картину через OLAP (это единственный способ для price-stats).
+
+        Имена товаров/поставщиков НЕ запрашиваем в OLAP — поднимаем из локальных
+        кешей (search_nomenclature, get_suppliers), чтобы не зависеть от
+        непроверенных `.Name`-полей."""
         filters: Dict[str, Any] = {
             "DateTime.OperDayFilter": self._tx_date_filter(date_from, date_to),
             "TransactionType": {"filterType": "IncludeValues", "values": ["INVOICE", "SESSION_ACCEPTANCE"]},
@@ -689,13 +709,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": [
-                "DateTime.OperDay",
-                "Counteragent",
-                "Counteragent.Name",
-                "Product",
-                "Product.Name",
-            ],
+            "groupByRowFields": ["DateTime.OperDay", "Counteragent", "Product"],
             "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
             "filters": filters,
         }
@@ -706,19 +720,31 @@ class IikoWebClient:
                 params={"key": token},
                 json=payload
             )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # iiko обычно возвращает JSON с описанием — отдаём в except-каскад
+                raise Exception(f"OLAP {resp.status_code}: {resp.text[:500]}")
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
-        # Unit lookup из закешированной номенклатуры (search с пустым query наполнит кеш).
+        names_by_id: Dict[str, str] = {}
         units_by_id: Dict[str, str] = {}
+        suppliers_by_id: Dict[str, str] = {}
         if rows and org_ids and org_ids[0] and org_ids[0] != "demo":
             try:
                 products = await self.search_nomenclature(org_ids[0], "", limit=10000)
                 for p in products:
                     pid = p.get("id")
                     if pid:
+                        names_by_id[pid] = p.get("name") or ""
                         units_by_id[pid] = p.get("unit") or ""
+            except Exception:
+                pass
+            try:
+                suppliers = await self.get_suppliers(org_ids[0])
+                for s in suppliers:
+                    sid = s.get("id")
+                    if sid:
+                        suppliers_by_id[sid] = s.get("name") or sid
             except Exception:
                 pass
 
@@ -732,13 +758,13 @@ class IikoWebClient:
             if amount <= 0 or total <= 0:
                 continue
             price = total / amount
-            supplier_name = r.get("Counteragent.Name") or r.get("Counteragent") or "—"
+            cid = r.get("Counteragent") or ""
             out.append({
                 "product_id": pid,
-                "product_name": r.get("Product.Name") or "—",
+                "product_name": names_by_id.get(pid) or "—",
                 "unit": units_by_id.get(pid, ""),
-                "supplier_id": r.get("Counteragent") or supplier_name,
-                "supplier_name": supplier_name,
+                "supplier_id": cid or suppliers_by_id.get(cid, "") or "—",
+                "supplier_name": suppliers_by_id.get(cid) or cid or "—",
                 "date": (r.get("DateTime.OperDay") or "")[:10],
                 "price_per_unit": price,
                 "amount": amount,
