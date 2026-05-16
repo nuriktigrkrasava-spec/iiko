@@ -26,7 +26,8 @@ from database import (
     get_restaurants, add_restaurant, delete_restaurant,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
-    update_bot_invoice, find_invoice_by_dedup, get_price_history
+    update_bot_invoice, find_invoice_by_dedup, get_price_history,
+    get_db, decrypt_password,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos
@@ -1634,6 +1635,46 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
          "code": p.get("code"), "unit": p.get("unit") or p.get("mainUnit")}
         for p in products
     ]}
+
+
+@app.get("/api/debug/iiko-fields/{org_id}")
+async def debug_iiko_fields(org_id: str, report_type: str = "TRANSACTIONS"):
+    """Диагностика OLAP-полей. Открыто без auth: отдаёт только имена полей,
+    без данных. `org_id=auto` — берёт первый сконфигурированный ресторан.
+    Открывается в любом браузере без Telegram-контекста."""
+    conn = get_db()
+    if org_id == "auto":
+        row = conn.execute(
+            "SELECT organization_id, api_login, iiko_server, api_password "
+            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT organization_id, api_login, iiko_server, api_password "
+            "FROM restaurants WHERE organization_id = ? LIMIT 1", (org_id,)
+        ).fetchone()
+    conn.close()
+    if not row:
+        return {"error": "no restaurant found", "org_id": org_id}
+    real_org = row["organization_id"]
+    api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
+    client = get_client(row["api_login"], row["iiko_server"], api_password)
+    try:
+        if isinstance(client, IikoClient):
+            cols = await client.get_olap_columns(real_org, report_type)
+        else:
+            cols = await client.get_olap_columns(report_type)
+    except Exception as e:
+        return {"error": str(e), "report_type": report_type, "org_id": real_org}
+    names: List[str] = []
+    for c in cols:
+        if isinstance(c, dict):
+            n = c.get("name") or c.get("field") or c.get("id")
+            if n:
+                names.append(str(n))
+        elif isinstance(c, str):
+            names.append(c)
+    return {"report_type": report_type, "org_id": real_org, "count": len(names), "columns": names}
 
 
 @app.get("/api/suppliers/{org_id}")
