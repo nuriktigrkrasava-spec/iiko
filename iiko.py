@@ -689,6 +689,26 @@ class IikoWebClient:
             ]
             return {"invoiceIncomings": result}
 
+    async def get_olap_columns(self, report_type: str = "TRANSACTIONS") -> List[Dict[str, Any]]:
+        """Список доступных OLAP-полей для report_type на этом iikoServer.
+        Используется в диагностике при ошибках 'Unknown OLAP field'."""
+        token = await self._ensure_token()
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/v2/reports/olap/columns/{report_type}",
+                    params={"key": token}
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if isinstance(data, list):
+                        return data
+                    if isinstance(data, dict):
+                        return data.get("columnList") or data.get("columns") or []
+        except Exception:
+            pass
+        return []
+
     async def get_invoice_items_olap(
         self, org_ids: List[str], date_from: str, date_to: str
     ) -> List[Dict[str, Any]]:
@@ -721,8 +741,20 @@ class IikoWebClient:
                 json=payload
             )
             if resp.status_code >= 400:
-                # iiko обычно возвращает JSON с описанием — отдаём в except-каскад
-                raise Exception(f"OLAP {resp.status_code}: {resp.text[:500]}")
+                # iiko обычно возвращает JSON с описанием — отдаём в except-каскад.
+                # Дополнительно тянем список валидных OLAP-полей для точечной диагностики.
+                body = resp.text[:300]
+                cols = await self.get_olap_columns("TRANSACTIONS")
+                names = []
+                for c in cols:
+                    if isinstance(c, dict):
+                        n = c.get("name") or c.get("field") or c.get("id")
+                        if n:
+                            names.append(str(n))
+                    elif isinstance(c, str):
+                        names.append(c)
+                fields_preview = ", ".join(names[:120]) if names else "<columns endpoint empty/404>"
+                raise Exception(f"OLAP {resp.status_code}: {body} | fields: {fields_preview}")
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
