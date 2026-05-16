@@ -729,7 +729,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["Counterparty", "Product"],
+            "groupByRowFields": ["Product"],
             "aggregateFields": ["Sum.Incoming", "Amount.Incoming"],
             "filters": filters,
         }
@@ -754,7 +754,7 @@ class IikoWebClient:
                     elif isinstance(c, str):
                         names.append(c)
                 fields_preview = ", ".join(names[:120]) if names else "<columns endpoint empty/404>"
-                raise Exception(f"OLAP {resp.status_code}: {body} | fields: {fields_preview}")
+                raise Exception(f"OLAP {resp.status_code} [diag-v3]: {body} | fields: {fields_preview}")
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
@@ -790,13 +790,14 @@ class IikoWebClient:
             if amount <= 0 or total <= 0:
                 continue
             price = total / amount
-            cid = r.get("Counterparty") or ""
+            # Per-supplier breakdown недоступен в TRANSACTIONS на этом iikoServer
+            # (поля Counteragent/Counterparty unknown). Показываем агрегат по товару.
             out.append({
                 "product_id": pid,
                 "product_name": names_by_id.get(pid) or "—",
                 "unit": units_by_id.get(pid, ""),
-                "supplier_id": cid or suppliers_by_id.get(cid, "") or "—",
-                "supplier_name": suppliers_by_id.get(cid) or cid or "—",
+                "supplier_id": f"avg:{pid}",
+                "supplier_name": "Все поставщики (среднее)",
                 "date": "",
                 "price_per_unit": price,
                 "amount": amount,
