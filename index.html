@@ -2673,7 +2673,7 @@ async function psSelectProduct(productId, productName, unit) {
   const orgId = state.restaurant?.organization_id;
   if (!orgId || !productId) return;
   try {
-    const data = await apiGet(`/api/price-stats/${orgId}?product_id=${encodeURIComponent(productId)}&days=180`);
+    const data = await apiGet(`/api/price-stats/${orgId}?product_id=${encodeURIComponent(productId)}&days=60`);
     host.innerHTML = psRenderCard(data, productName, unit);
   } catch (e) {
     host.innerHTML = `<div class="ps-card"><div class="ps-empty">❌ Не удалось загрузить: ${ieEscape(e?.message || 'ошибка')}</div></div>`;
@@ -2686,7 +2686,7 @@ function psRenderCard(data, fallbackName, fallbackUnit) {
   const suppliers = data?.suppliers || [];
   const best = data?.best;
   const purchases = data?.stats?.purchases || 0;
-  const days = data?.stats?.days || 180;
+  const days = data?.stats?.days || 60;
   const iikoWarning = (data?.iiko_ok === false)
     ? '<div class="ps-empty" style="color:var(--red,#e25c5c);text-align:left;padding:8px 0 12px;">⚠️ iiko недоступен — показаны только данные из бота.</div>'
     : '';
