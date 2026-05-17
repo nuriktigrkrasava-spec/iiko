@@ -139,3 +139,31 @@ async def analyze_invoice_photos(images: List[Tuple[bytes, str]]) -> Dict[str, A
         return {"error": str(e)}
 
 
+async def analyze_invoice_text(text: str) -> Dict[str, Any]:
+    """Распознаёт накладную из текстового сообщения через Claude.
+    Возвращает тот же dict-формат что analyze_invoice_photos, или {"error": "..."}.
+    """
+    if not client:
+        return {"error": "AI недоступен"}
+    if not text or not text.strip():
+        return {"error": "Пустой текст"}
+
+    user_content = (
+        f"Распознай накладную из текста:\n\n{text.strip()}\n\n"
+        + INVOICE_PROMPT
+    )
+
+    message = None
+    try:
+        message = await client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": user_content}]
+        )
+        return _parse_claude_json(message.content[0].text)
+    except json.JSONDecodeError:
+        raw_preview = message.content[0].text[:500] if message else ""
+        return {"error": "Не удалось распарсить ответ", "raw": raw_preview}
+    except Exception as e:
+        return {"error": str(e)}
+
