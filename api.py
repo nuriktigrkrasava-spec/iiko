@@ -23,14 +23,14 @@ import uvicorn
 
 from database import (
     init_db, get_user, create_user, set_demo_mode,
-    get_restaurants, add_restaurant, delete_restaurant,
+    get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     get_db, decrypt_password,
 )
 from iiko import IikoClient, get_client
-from claude_api import analyze_with_claude, analyze_invoice_photos
+from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -479,6 +479,16 @@ async def enable_demo(user: Dict = Depends(get_current_user)):
     create_user(tid, user.get("username"), user.get("first_name"))
     set_demo_mode(tid, 1)
     return {"success": True}
+
+
+@app.post("/api/logout")
+async def logout(user: Dict = Depends(get_current_user)):
+    """Полный логаут: удаляем все рестораны юзера + сбрасываем демо-флаг."""
+    tid = user.get("id", 0)
+    create_user(tid, user.get("username"), user.get("first_name"))
+    n = delete_all_restaurants(tid)
+    set_demo_mode(tid, 0)
+    return {"success": True, "deleted": n}
 
 
 def _is_demo_user(user: Dict) -> bool:
@@ -1999,9 +2009,10 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
     lines.append(total_line)
 
     if status == "preview":
-        lines.append("\n<i>Выбери действие ниже:</i>")
+        lines.append("\n⚠️ <i>Распознано ИИ — могут быть ошибки. Проверь перед отправкой.</i>")
+        lines.append("<i>Выбери действие ниже:</i>")
     elif status == "adding":
-        lines.append("\n<i>Пришли ещё .jpg файлом, потом нажми «✅ Готово»</i>")
+        lines.append("\n<i>Пришли ещё фото или файлом, потом нажми «✅ Готово»</i>")
     elif status == "sent":
         lines.append("\n<b>✅ Отправлено в iiko</b>")
     elif status == "cancelled":
@@ -2142,6 +2153,35 @@ async def _show_supplier_picker(chat_id: int, msg_id: int, pending: dict) -> boo
             "⚠️ Не удалось получить список поставщиков из iiko. Попробуй позже.")
         return False
     # сохраним в pending для пагинации/выбора по id
+    pending["state"] = "choosing_supplier"
+    pending["suppliers_cache"] = suppliers
+    await _tg_edit(chat_id, msg_id,
+        f"🏭 <b>Выбери поставщика</b> ({len(suppliers)}):",
+        _suppliers_kb(suppliers, 0))
+    return True
+
+
+async def _show_supplier_picker_for_org(chat_id: int, msg_id: int, pending: dict, org_id: str) -> bool:
+    """Показывает список поставщиков КОНКРЕТНОГО филиала. True если показано."""
+    rests = _get_user_orgs(pending["telegram_id"])
+    rest = next((r for r in rests if r.get("organization_id") == org_id), None)
+    if not rest:
+        await _tg_edit(chat_id, msg_id, "⚠️ Филиал не найден среди подключённых.")
+        return False
+    if rest["api_login"] == "demo":
+        await _tg_edit(chat_id, msg_id,
+            "⚠️ Ты в demo-режиме. Отправка в iiko недоступна — добавь реальную учётку.")
+        return False
+    client = _bot_iiko_client(rest)
+    try:
+        suppliers = await client.get_suppliers(org_id)
+    except Exception as e:
+        logger.warning(f"[suppliers for {org_id}] {e}")
+        suppliers = []
+    if not suppliers:
+        await _tg_edit(chat_id, msg_id,
+            "⚠️ Не удалось получить список поставщиков из iiko. Попробуй позже.")
+        return False
     pending["state"] = "choosing_supplier"
     pending["suppliers_cache"] = suppliers
     await _tg_edit(chat_id, msg_id,
@@ -2384,6 +2424,53 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     _drop_pending(chat_id)
 
 
+async def _recognize_invoice_and_create_pending(
+    chat_id: int, telegram_id: int, username: str,
+    file_id: str, image_bytes: bytes, mime: str
+) -> None:
+    """Распознаёт одно фото и создаёт pending invoice. Универсально для photo и document."""
+    pending = _pending_invoices.get(chat_id)
+    if pending and pending.get("state") == "adding_photos":
+        pending["images"].append({"file_id": file_id, "bytes": image_bytes, "mime": mime})
+        n = len(pending["images"])
+        await _tg_send(chat_id,
+            f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
+        return
+
+    status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
+    result = await analyze_invoice_photos([(image_bytes, mime)])
+    if "error" in result:
+        msg = f"❌ Не удалось распознать: {result['error']}\n\nПопробуй сфотографировать чётче."
+        if status_msg_id:
+            await _tg_edit(chat_id, status_msg_id, msg)
+        else:
+            await _tg_send(chat_id, msg)
+        return
+
+    pid = _pending_id()
+    pending = {
+        "pending_id": pid,
+        "telegram_id": telegram_id,
+        "username": username,
+        "chat_id": chat_id,
+        "message_id": status_msg_id,
+        "state": "preview",
+        "images": [{"file_id": file_id, "bytes": image_bytes, "mime": mime}],
+        "result": result,
+        "supplier_id": None,
+        "organization_id": None,
+        "created_at": datetime.now().isoformat(),
+    }
+    _pending_invoices[chat_id] = pending
+    _pending_by_id[pid] = chat_id
+
+    if status_msg_id:
+        await _tg_edit(chat_id, status_msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
+    else:
+        new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
+        pending["message_id"] = new_id
+
+
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     """Обработчик сообщений и callback_query Telegram бота."""
@@ -2418,7 +2505,7 @@ async def telegram_webhook(request: Request):
 
             if not pending:
                 await _tg_edit(chat_id, msg_id,
-                               "⚠️ Данные устарели. Пришли накладную (.jpg файлом) заново.")
+                               "⚠️ Данные устарели. Пришли накладную (фото, файлом или текстом) заново.")
                 return {"ok": True}
 
             if action == "act:add":
@@ -2453,8 +2540,18 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             if action == "act:send":
-                # state choosing_supplier → подгружаем поставщиков и показываем
-                await _show_supplier_picker(chat_id, msg_id, pending)
+                rests = _get_user_orgs(pending["telegram_id"])
+                if not rests:
+                    await _tg_edit(chat_id, msg_id, "⚠️ У тебя не настроен ни один ресторан. Открой Mini App и подключи iiko-учётку.")
+                    return {"ok": True}
+                if rests[0]["api_login"] == "demo":
+                    await _tg_edit(chat_id, msg_id, "⚠️ Ты в demo-режиме. Отправка в iiko недоступна — добавь реальную учётку.")
+                    return {"ok": True}
+                if len(rests) == 1:
+                    pending["organization_id"] = rests[0]["organization_id"]
+                    await _show_supplier_picker_for_org(chat_id, msg_id, pending, rests[0]["organization_id"])
+                else:
+                    await _show_org_picker(chat_id, msg_id, pending)
                 return {"ok": True}
 
             if action == "act:edit":
@@ -2480,14 +2577,15 @@ async def telegram_webhook(request: Request):
                 supplier = next((s for s in suppliers if (s.get("id") or s.get("supplierId")) == supplier_id), None)
                 pending["supplier_id"] = supplier_id
                 pending["supplier_name"] = supplier.get("name") if supplier else "—"
-                await _show_org_picker(chat_id, msg_id, pending)
+                # Филиал уже выбран на предыдущем шаге (или это был единственный) — финализируем
+                await _finalize_send(chat_id, msg_id, pending, force=False)
                 return {"ok": True}
 
-            # === Выбор филиала → финальная отправка ===
+            # === Выбор филиала → показываем поставщиков этого филиала ===
             if action.startswith("org:"):
                 org_id = action.split(":", 1)[1]
                 pending["organization_id"] = org_id
-                await _finalize_send(chat_id, msg_id, pending, force=False)
+                await _show_supplier_picker_for_org(chat_id, msg_id, pending, org_id)
                 return {"ok": True}
 
             # === Подтверждение дубля ===
@@ -2545,7 +2643,7 @@ async def telegram_webhook(request: Request):
                 pending["message_id"] = new_id
             return {"ok": True}
 
-        # === DOCUMENT (.jpg как файл — основной путь) ===
+        # === DOCUMENT (image как файл) ===
         doc = message.get("document")
         if doc and (doc.get("mime_type") or "").startswith("image/"):
             file_id = doc["file_id"]
@@ -2554,28 +2652,58 @@ async def telegram_webhook(request: Request):
                 await _tg_send(chat_id, "❌ Не удалось скачать файл.")
                 return {"ok": True}
             image_bytes, mime = file_data
+            await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
+            return {"ok": True}
 
-            pending = _pending_invoices.get(chat_id)
+        # === DOCUMENT (не-image — PDF и пр.) ===
+        if doc:
+            await _tg_send(chat_id, "📎 Я принимаю только фото/картинки накладных (jpg/png/heic). PDF и другие форматы пока не поддерживаются.")
+            return {"ok": True}
 
-            # Режим «добавляю фото к уже распознанной накладной»
-            if pending and pending.get("state") == "adding_photos":
-                pending["images"].append({"file_id": file_id, "bytes": image_bytes, "mime": mime})
-                n = len(pending["images"])
+        # === PHOTO (сжатое) — принимаем самый большой размер ===
+        if message.get("photo"):
+            photo_sizes = message["photo"]
+            biggest = photo_sizes[-1]
+            file_id = biggest["file_id"]
+            file_data = await _tg_download_file(file_id)
+            if not file_data:
+                await _tg_send(chat_id, "❌ Не удалось скачать фото.")
+                return {"ok": True}
+            image_bytes, mime = file_data
+            if not mime:
+                mime = "image/jpeg"
+            await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
+            return {"ok": True}
+
+        # === TEXT ===
+        text = message.get("text") or ""
+        if text == "/start":
+            await _tg_send(chat_id,
+                "👋 <b>Привет! Я бот ресторанной аналитики + распознавание накладных.</b>\n\n"
+                "📊 Открой Mini App (кнопка меню слева внизу) — увидишь выручку, средний чек, расходы и лояльность гостей по своим филиалам.\n\n"
+                "📎 Пришли мне накладную — фото, файлом или просто текстом — я её распознаю, ты подтвердишь, я отправлю в iiko.\n\n"
+                "🔑 <b>Первый раз?</b> Открой Mini App → введи API-логин iiko (или URL сервера + пароль для самохостед iikoWeb).\n\n"
+                "⚠️ <i>Распознавание делает ИИ — он может ошибаться, всегда проверяй перед отправкой.</i>")
+            return {"ok": True}
+        if text.startswith("/"):
+            return {"ok": True}
+        if text:
+            # Короткие сообщения (приветствия и т.п.) — не пытаемся распознать
+            if len(text.strip()) < 20:
                 await _tg_send(chat_id,
-                    f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
+                    "📎 Пришли накладную — фото, файлом или текстом (минимум 20 символов с позициями и ценами).")
                 return {"ok": True}
 
-            # Новый pending — одиночное фото, сразу распознаём
-            status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
-            result = await analyze_invoice_photos([(image_bytes, mime)])
-            if "error" in result:
-                msg = f"❌ Не удалось распознать: {result['error']}\n\nПопробуй сфотографировать чётче и пришли .jpg файлом."
-                if status_msg_id:
-                    await _tg_edit(chat_id, status_msg_id, msg)
-                else:
-                    await _tg_send(chat_id, msg)
+            status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную из текста...")
+            result = await analyze_invoice_text(text)
+            if "error" in result or not (result.get("items") or []):
+                err = result.get("error") if "error" in result else "не нашёл позиций в тексте"
+                await _tg_edit(chat_id, status_msg_id,
+                    f"⚠️ Не получилось распознать накладную из текста: {err}.\n\n"
+                    f"Попробуй прислать фото или файл — это надёжнее.")
                 return {"ok": True}
 
+            # Создаём pending как для фото
             pid = _pending_id()
             pending = {
                 "pending_id": pid,
@@ -2584,7 +2712,7 @@ async def telegram_webhook(request: Request):
                 "chat_id": chat_id,
                 "message_id": status_msg_id,
                 "state": "preview",
-                "images": [{"file_id": file_id, "bytes": image_bytes, "mime": mime}],
+                "images": [],
                 "result": result,
                 "supplier_id": None,
                 "organization_id": None,
@@ -2592,38 +2720,9 @@ async def telegram_webhook(request: Request):
             }
             _pending_invoices[chat_id] = pending
             _pending_by_id[pid] = chat_id
-
-            if status_msg_id:
-                await _tg_edit(chat_id, status_msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
-            else:
-                new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
-                pending["message_id"] = new_id
-            return {"ok": True}
-
-        # === PHOTO (сжатое) — отказ ===
-        if message.get("photo"):
-            await _tg_send(chat_id,
-                "⚠️ Пришли накладную <b>файлом</b> (📎 → Файл), а не как сжатое фото — иначе текст плохо распознаётся.")
-            return {"ok": True}
-
-        # === TEXT ===
-        text = message.get("text") or ""
-        if text == "/start":
-            await _tg_send(chat_id,
-                "👋 Привет! Я распознаю накладные.\n\n"
-                "📎 <b>Отправь .jpg накладной как файл</b> (а не сжатое фото) — "
-                "я распознаю позиции, посчитаю НДС, ты подтвердишь и я отправлю в iiko.\n\n"
-                "В превью будет 4 кнопки:\n"
-                "📤 Отправить в iiko\n"
-                "➕ Добавить фото (если накладная на нескольких листах)\n"
-                "✏️ Редактировать (откроет Mini App)\n"
-                "❌ Отменить")
-            return {"ok": True}
-        if text.startswith("/"):
-            return {"ok": True}
-        if text:
-            await _tg_send(chat_id,
-                "📎 Пришли накладную <b>.jpg файлом</b>. Текст и сжатые фото больше не обрабатываются.")
+            await _tg_edit(chat_id, status_msg_id,
+                           _format_invoice_v2(pending, "preview"),
+                           _invoice_kb(pending["pending_id"]))
             return {"ok": True}
 
     except Exception as e:
