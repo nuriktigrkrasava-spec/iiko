@@ -528,7 +528,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div style="margin-top:8px">
       <button class="btn-full btn-white" style="font-size:13px;padding:10px" onclick="toggleIikoWebFields()">⚙️ Свой сервер iikoWeb</button>
       <div id="iikweb-fields" style="display:none;flex-direction:column;gap:8px;margin-top:8px">
-        <input type="text" class="input-field" id="iiko-server-input" placeholder="URL сервера (напр. https://my.iiko.it/resto)">
+        <input type="text" class="input-field" id="iiko-server-input" placeholder="URL сервера (напр. saya.iiko.it)">
         <input type="password" class="input-field" id="api-password-input" placeholder="Пароль (для iikoWeb)">
       </div>
     </div>
@@ -3084,7 +3084,14 @@ function addRestaurant() {
 async function logout() {
   closeSettingsDirect();
   showToast('Выход...');
-  setTimeout(() => location.reload(), 500);
+  try {
+    await apiPost('/api/logout', {});
+  } catch (e) {
+    console.warn('logout api error:', e);
+  }
+  localStorage.removeItem('selected_branches');
+  localStorage.removeItem('last_restaurant_id');
+  setTimeout(() => location.reload(), 400);
 }
 
 // ============ UTILS ============
