@@ -5,6 +5,7 @@ import secrets
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
 from typing import List, Dict, Any, Optional, Tuple
+from urllib.parse import urlparse
 
 IIKO_CLOUD_BASE = "https://api-ru.iiko.services"
 
@@ -30,7 +31,11 @@ def get_client(api_login: str, iiko_server: str = None, api_password: str = None
     if iiko_server:
         iiko_server = _normalize_iiko_url(iiko_server)
         key = f"web:{api_login}@{iiko_server}"
-        if key not in _client_cache:
+        cached = _client_cache.get(key)
+        # Если пароль изменился — пересоздать клиент
+        if cached and api_password and getattr(cached, "password", None) != api_password:
+            cached = None
+        if cached is None:
             _client_cache[key] = IikoWebClient(iiko_server, api_login, api_password or api_login)
         return _client_cache[key]
     key = f"cloud:{api_login}"
@@ -417,18 +422,31 @@ class IikoWebClient:
         async with self._lock:
             if self.token and self.token_expires and datetime.now() < self.token_expires:
                 return self.token
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-                resp = await client.get(
-                    f"{self.base_url}/api/auth",
-                    params={"login": self.login, "pass": self._sha1(self.password)}
-                )
-                resp.raise_for_status()
-                token = resp.text.strip().strip('"')
-                if not token or len(token) < 10:
-                    raise Exception(f"iikoWeb auth failed: {resp.text[:200]}")
-                self.token = token
-                self.token_expires = datetime.now() + timedelta(minutes=25)
-                return self.token
+            host = urlparse(self.base_url).hostname or self.base_url
+            try:
+                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                    resp = await client.get(
+                        f"{self.base_url}/api/auth",
+                        params={"login": self.login, "pass": self._sha1(self.password)}
+                    )
+            except (httpx.ConnectError, httpx.TimeoutException):
+                raise Exception(f"Не удалось подключиться к {host}. Проверь адрес сервера.")
+            except httpx.RemoteProtocolError:
+                raise Exception(f"Сервер {host} отвечает некорректно. Проверь URL.")
+
+            if resp.status_code == 401:
+                raise Exception(f"Неверный логин/пароль для {host}. Проверь данные iiko-сервера.")
+            if resp.status_code == 404:
+                raise Exception(f"На {host} нет /resto/api/auth. Это точно iikoServer? Проверь URL.")
+            if resp.status_code >= 400:
+                raise Exception(f"iiko {host}: HTTP {resp.status_code}")
+
+            token = resp.text.strip().strip('"')
+            if not token or len(token) < 10:
+                raise Exception(f"iiko {host}: пустой ответ авторизации")
+            self.token = token
+            self.token_expires = datetime.now() + timedelta(minutes=25)
+            return self.token
 
     async def _invalidate_token(self):
         async with self._lock:
