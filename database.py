@@ -187,6 +187,18 @@ def delete_restaurant(restaurant_id: int, telegram_id: int):
     conn.commit()
     conn.close()
 
+def delete_all_restaurants(telegram_id: int) -> int:
+    """Удалить все рестораны пользователя. Возвращает кол-во удалённых строк."""
+    conn = get_db()
+    cur = conn.execute(
+        "DELETE FROM restaurants WHERE telegram_id = ?",
+        (telegram_id,)
+    )
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
+
 def get_ai_cache(query_hash: str, org_id: str, date_str: str) -> Optional[str]:
     conn = get_db()
     row = conn.execute(
