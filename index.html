@@ -2571,7 +2571,7 @@ async function loadExpenses() {
             <div class="invoice-id">#${inv.id}</div>
             <div class="badge ${cls}">${inv.status}</div>
           </div>
-          <div class="invoice-meta">${inv.supplier} · ${inv.date} · ${inv.items} позиций</div>
+          <div class="invoice-meta">${inv.supplier} · ${inv.date} · ${inv.items} позиций${inv.branch ? ' · 🏢 ' + inv.branch : ''}</div>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
             <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}${vatLine}</div>
             <div class="invoice-actions">${actions}</div>
