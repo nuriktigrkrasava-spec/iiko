@@ -277,11 +277,17 @@ def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,
     return inv_id
 
 
-def get_bot_invoices(limit: int = 50) -> List[Dict[str, Any]]:
+def get_bot_invoices(limit: int = 50, organization_id: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM bot_invoices ORDER BY created_at DESC LIMIT ?", (limit,)
-    ).fetchall()
+    if organization_id:
+        rows = conn.execute(
+            "SELECT * FROM bot_invoices WHERE organization_id = ? ORDER BY created_at DESC LIMIT ?",
+            (organization_id, limit)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM bot_invoices ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
