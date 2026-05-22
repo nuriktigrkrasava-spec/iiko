@@ -649,7 +649,8 @@ async def sales(org_id: str, period: str = "today",
         async def safe_olap(*args, **kwargs):
             try:
                 return await client.olap_report(*args, **kwargs)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[sales] iiko olap failed for org={real_org}: {e} | group_by={args[3] if len(args) > 3 else kwargs.get('group_by')}")
                 return {"data": []}
         dept = _olap_dept(real_org, info)
         return await asyncio.gather(
@@ -2068,7 +2069,8 @@ async def _auto_match_items(client, org_id: str,
         if not prod_id:
             try:
                 matches = await client.search_nomenclature(org_id, it.get("name", ""), limit=1)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[invoice-match] iiko search_nomenclature failed for org={org_id}, name='{it.get('name', '')}': {e}")
                 matches = []
             if matches:
                 prod_id = matches[0].get("id")
@@ -2733,3 +2735,4 @@ async def telegram_webhook(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
