@@ -6,7 +6,7 @@ import hmac
 import hashlib
 import html
 import json
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
@@ -82,6 +82,15 @@ MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 
+# Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
+# Сервер на Render работает в UTC, поэтому «сегодня» считаем по локальному времени.
+LOCAL_TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET_HOURS", "5"))))
+
+
+def local_now() -> datetime:
+    """Текущее время в часовом поясе ресторана (UTC+5), не зависит от tz сервера."""
+    return datetime.now(LOCAL_TZ)
+
 
 class PeriodEnum(str, Enum):
     today = "today"
@@ -150,7 +159,7 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, al
 
 def get_period_dates(period: str, custom_from: Optional[str] = None,
                      custom_to: Optional[str] = None) -> tuple:
-    today = datetime.now().date()
+    today = local_now().date()
     if period == "custom":
         if not custom_from or not custom_to:
             raise HTTPException(status_code=400, detail="custom period requires from/to")
@@ -730,7 +739,7 @@ async def shifts(org_id: str, user: Dict = Depends(get_current_user)):
         ]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
-    today = datetime.now().date()
+    today = local_now().date()
     tomorrow = (today + timedelta(days=1)).isoformat()
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
     try:
@@ -832,7 +841,7 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
     date_from, date_to = get_period_dates(period)
     client = get_client(login, info.get("iiko_server"), info.get("api_password"))
     try:
-        today = datetime.now().date()
+        today = local_now().date()
         trend_periods = []
         for i in range(3, -1, -1):
             m, y = today.month - i, today.year
@@ -1044,8 +1053,8 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
 
-    date_to = datetime.now().strftime("%Y-%m-%d")
-    date_from = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    date_to = local_now().strftime("%Y-%m-%d")
+    date_from = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
     cache_key = f"{real_org}|{days}"
     now_ts = time.time()
@@ -1294,7 +1303,7 @@ async def comparison(org_id: str,
             logger.warning(f"[comparison] {real_org}/{year}: {e}")
             return []
 
-    cur_year = datetime.now().year
+    cur_year = local_now().year
     cur_batches, prev_batches = await asyncio.gather(
         asyncio.gather(*(fetch_year_for_org(o, cur_year) for o in orgs)),
         asyncio.gather(*(fetch_year_for_org(o, cur_year - 1) for o in orgs)),
@@ -1402,7 +1411,7 @@ async def olap_raw(org_id: str, period: str = "today",
 async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
         demo = dict(DEMO_STOPLIST)
-        demo["updated_at"] = datetime.now().strftime("%H:%M")
+        demo["updated_at"] = local_now().strftime("%H:%M")
         return demo
 
     real_org = _get_org_id(org_id, user)
@@ -1433,7 +1442,7 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
                     "status": "stop" if balance == 0 else "low"
                 })
 
-        return {"items": stopped, "total": len(stopped), "updated_at": datetime.now().strftime("%H:%M")}
+        return {"items": stopped, "total": len(stopped), "updated_at": local_now().strftime("%H:%M")}
     except Exception:
         return DEMO_STOPLIST
 
@@ -1475,7 +1484,7 @@ async def export_report(report_type: str, org_id: str = "demo-org-1", period: st
     import io
 
     rows = []
-    filename = f"{report_type}-{datetime.now().strftime('%Y-%m-%d')}.csv"
+    filename = f"{report_type}-{local_now().strftime('%Y-%m-%d')}.csv"
 
     if report_type == "channels":
         rows = [["Канал", "Выручка", "Гостей", "Ср. чек"]]
@@ -1797,7 +1806,7 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         return {"ok": False, "unmatched": unmatched,
                 "error": f"Не сопоставлено {len(unmatched)} позиций — выбери товар iiko для каждой"}
 
-    date_str = payload.date or inv.get("date") or datetime.now().strftime("%Y-%m-%d")
+    date_str = payload.date or inv.get("date") or local_now().strftime("%Y-%m-%d")
     try:
         resp = await client.create_incoming_invoice(
             org_id=real_org, supplier_id=supplier_id,
@@ -2313,7 +2322,7 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     items = result.get("items", []) or []
     total = float(result.get("total_amount") or 0)
     vat = float(result.get("vat_amount") or 0)
-    date_str = result.get("date") or datetime.now().strftime("%Y-%m-%d")
+    date_str = result.get("date") or local_now().strftime("%Y-%m-%d")
 
     # ---- Dedup ----
     dedup_hash = _compute_dedup_hash(supplier_name, date_str, total, items)
@@ -2735,4 +2744,3 @@ async def telegram_webhook(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    
