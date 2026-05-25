@@ -257,9 +257,11 @@ html, body {
 
 /* Onboarding - FULL SCREEN LOCK */
 .onboarding {
-  background: var(--bg); padding: 40px 24px; text-align: center; height: 100%;
-  display: flex; flex-direction: column; justify-content: center;
-  position: fixed; inset: 0; z-index: 100;
+  background: var(--bg); padding: 40px 24px; text-align: center;
+  height: var(--vvh, 100%);
+  display: flex; flex-direction: column; justify-content: safe center;
+  position: fixed; top: 0; left: 0; right: 0; bottom: auto; z-index: 100;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
 }
 .onboarding .emoji { font-size: 56px; margin-bottom: 20px; }
 .onboarding h2 { font-size: 24px; font-weight: 700; margin-bottom: 12px; color: var(--text); }
@@ -1428,9 +1430,33 @@ document.addEventListener('DOMContentLoaded', () => {
 function initApp() {
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.expand(); tg.ready(); }
+  setupViewportHeight();
   updateDate();
   document.getElementById('navbar').classList.remove('visible');
   checkExistingUser();
+}
+
+// Подгоняем высоту экранов входа под видимую область (visualViewport),
+// чтобы кнопка «Подключить» не пряталась за клавиатурой на телефоне.
+function setupViewportHeight() {
+  const vv = window.visualViewport;
+  const apply = () => {
+    const h = vv ? vv.height : window.innerHeight;
+    document.documentElement.style.setProperty('--vvh', h + 'px');
+  };
+  if (vv) {
+    vv.addEventListener('resize', apply);
+    vv.addEventListener('scroll', apply);
+  }
+  window.addEventListener('resize', apply);
+  apply();
+
+  // При фокусе на поле онбординга докручиваем его в видимую зону над клавиатурой.
+  document.addEventListener('focusin', (e) => {
+    if (e.target.closest && e.target.closest('.onboarding')) {
+      setTimeout(() => e.target.scrollIntoView({ block: 'center', behavior: 'smooth' }), 300);
+    }
+  });
 }
 
 async function checkExistingUser() {
