@@ -582,9 +582,9 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
     </div>
     <div class="demo-banner" id="iiko-error-banner" style="display:none">
-      <div class="icon" id="iiko-error-icon">🔴</div>
+      <div class="icon">🔴</div>
       <div class="content">
-        <h3 id="iiko-error-title">Ошибка iiko</h3>
+        <h3>Ошибка iiko</h3>
         <p id="iiko-error-text">Не удалось получить данные из iiko.</p>
       </div>
     </div>
@@ -1791,29 +1791,13 @@ function renderRestSelector() {
   el.innerHTML = chips.join('');
 }
 
-function showIikoError(msg, opts) {
-  opts = opts || {};
+function showIikoError(msg) {
   const banner = document.getElementById('iiko-error-banner');
   const text = document.getElementById('iiko-error-text');
-  const icon = document.getElementById('iiko-error-icon');
-  const title = document.getElementById('iiko-error-title');
   if (banner && text) {
     text.textContent = msg || 'Не удалось получить данные из iiko.';
-    if (icon) icon.textContent = opts.icon || '🔴';
-    if (title) title.textContent = opts.title || 'Ошибка iiko';
     banner.style.display = 'flex';
   }
-}
-
-// Прочерки вместо устаревших нулей, когда данных нет (чтобы сбой источника
-// не выглядел как «продаж 0»)
-function dashMetricsUnavailable() {
-  ['m-revenue','m-check','m-guests','m-open','m-yesterday','m-forecast'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.textContent = '—';
-  });
-  ['m-revenue-change','m-check-change','m-guests-change'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.innerHTML = '';
-  });
 }
 
 function hideIikoError() {
@@ -1893,44 +1877,25 @@ async function loadDashboard() {
     return;
   }
 
-  // Нет данных OLAP. Различаем: iiko недоступен (null) vs ответил, но пусто ([]).
-  if (rows === null) {
-    // OLAP не применим/не удался → старый endpoint (демо или iikoWeb без OLAP)
-    try {
-      const data = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
-      hideIikoError();
-      animateValue('m-revenue', data.revenue_today, ' ₸');
-      animateValue('m-check', data.avg_check, ' ₸');
-      animateValue('m-guests', data.guests, '');
-      document.getElementById('m-open').textContent = data.open_orders;
-      document.getElementById('m-yesterday').textContent = formatMoney(data.revenue_yesterday);
-      document.getElementById('m-forecast').textContent = formatMoney(data.forecast);
-      const revChange = document.getElementById('m-revenue-change');
-      const chChange = document.getElementById('m-check-change');
-      const gChange = document.getElementById('m-guests-change');
-      revChange.innerHTML = `↑ +${data.revenue_change}% к вчера`;
-      revChange.className = 'metric-change ' + (data.revenue_change >= 0 ? 'up' : 'down');
-      chChange.innerHTML = `↑ +${data.avg_check_change}% к вчера`;
-      gChange.innerHTML = `↑ +${data.guests_change}% к вчера`;
-      renderRevenueChart(data.chart_7days);
-    } catch(e) {
-      console.error(e);
-      dashMetricsUnavailable();
-      showIikoError('Данные iiko временно недоступны — показатели могут отставать. Попробуйте обновить позже.');
-    }
-    return;
-  }
-
-  // rows === [] : iiko на связи, но продаж за период не вернулось.
-  // Обычно данные с касс ещё подгружаются и в течение дня могут отставать.
-  dashMetricsUnavailable();
-  if (state.period === 'today') {
-    showIikoError('За сегодня данных пока нет. Если продажи были — они подгружаются с касс в течение дня и могут отставать; итог дня обычно сходится после закрытия смены.',
-      { icon: '⏳', title: 'Данные обновляются' });
-  } else {
-    showIikoError('За выбранный период продаж не найдено. Если данные должны быть — iiko мог ещё не подгрузить их.',
-      { icon: '⏳', title: 'Данные обновляются' });
-  }
+  // Фолбек на старый endpoint (демо или iikoWeb без OLAP)
+  try {
+    const data = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+    hideIikoError();
+    animateValue('m-revenue', data.revenue_today, ' ₸');
+    animateValue('m-check', data.avg_check, ' ₸');
+    animateValue('m-guests', data.guests, '');
+    document.getElementById('m-open').textContent = data.open_orders;
+    document.getElementById('m-yesterday').textContent = formatMoney(data.revenue_yesterday);
+    document.getElementById('m-forecast').textContent = formatMoney(data.forecast);
+    const revChange = document.getElementById('m-revenue-change');
+    const chChange = document.getElementById('m-check-change');
+    const gChange = document.getElementById('m-guests-change');
+    revChange.innerHTML = `↑ +${data.revenue_change}% к вчера`;
+    revChange.className = 'metric-change ' + (data.revenue_change >= 0 ? 'up' : 'down');
+    chChange.innerHTML = `↑ +${data.avg_check_change}% к вчера`;
+    gChange.innerHTML = `↑ +${data.guests_change}% к вчера`;
+    renderRevenueChart(data.chart_7days);
+  } catch(e) { console.error(e); }
 }
 
 function setPeriod(p, el) {
