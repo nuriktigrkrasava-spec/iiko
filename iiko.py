@@ -1041,9 +1041,16 @@ class IikoWebClient:
                 )
                 if resp.status_code != 200:
                     import logging
+                    # Диагностика 409 «Product is not found ... id=null»:
+                    # явно показываем КАЖДЫЙ productId и сколько из них пустых.
+                    # empty=0 => iiko не читает наш <productId> (вопрос формата/имени тега),
+                    # empty>0 => в items просочилась позиция без товара (искать в вызывающем коде).
+                    pids = [str(it.get("productId") or "") for it in (items or [])]
+                    empty = sum(1 for p in pids if not p)
                     logging.getLogger(__name__).warning(
                         f"iikoWeb import/incomingInvoice {resp.status_code}: "
-                        f"body={resp.text[:1000]} | xml={xml_body[:1000]!r}"
+                        f"body={resp.text[:500]} | items={len(items or [])} empty_productId={empty} "
+                        f"productIds={pids} | xml={xml_body[:3000]!r}"
                     )
                     return {"ok": False,
                             "error": f"HTTP {resp.status_code}",
@@ -1100,3 +1107,4 @@ class IikoWebClient:
                     "error": "iikoServer не принял setStatus ни на одном из путей "
                              "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
                              "другой эндпоинт — пришли точный URL из iiko-докуменации."}
+
