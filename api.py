@@ -1001,7 +1001,8 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
             "iiko_error": "Ошибка iiko",
             "pending": "В обработке",
         }
-        bot_invs = get_bot_invoices(limit=200, organization_id=real_org)
+        # Показываем только последние 10 накладных бота, чтобы список не копился
+        bot_invs = get_bot_invoices(limit=10, organization_id=real_org)
         for b in bot_invs:
             raw_status = b.get("status") or "draft"
             if raw_status == "pending":
