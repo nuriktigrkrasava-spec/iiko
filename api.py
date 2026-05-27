@@ -2031,6 +2031,53 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
     return "\n".join(lines)
 
 
+def _format_dup_invoice(existing: Dict[str, Any]) -> str:
+    """Карточка ранее сохранённой накладной — показываем при срабатывании дедупа,
+    чтобы пользователь видел ЧТО именно уже есть и решил, создавать ли копию."""
+    status_map = {
+        "draft_in_iiko": "📥 Черновик в iiko",
+        "needs_mapping": "✏️ Требует сопоставления",
+        "iiko_error":    "⚠️ Ошибка при отправке в iiko",
+        "pending":       "⏳ В обработке",
+        "draft":         "📝 Локальный черновик",
+    }
+    status = existing.get("status") or "draft"
+    status_txt = status_map.get(status, status)
+    doc_num = existing.get("iiko_doc_number") or ""
+    if status == "draft_in_iiko" and doc_num:
+        status_txt += f" #{doc_num}"
+
+    lines = ["⚠️ <b>Похоже, эту накладную уже отправляли</b>", ""]
+    lines.append(f"📅 Добавлена: {(existing.get('created_at') or '')[:10]}")
+    lines.append(f"🏭 Поставщик: {existing.get('supplier') or '—'}")
+    if existing.get("branch"):
+        lines.append(f"🏢 Филиал: {existing['branch']}")
+    lines.append(f"📊 Статус: {status_txt}")
+    lines.append(f"💰 Итого: {_fmt_kzt(existing.get('total_amount') or 0)} ₸")
+
+    try:
+        items = json.loads(existing.get("items") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        items = []
+    if items:
+        lines.append(f"\n<b>Позиции ({len(items)}):</b>")
+        for it in items[:15]:
+            nm = it.get("name", "—") or "—"
+            qty = it.get("quantity")
+            un = it.get("unit") or ""
+            ppu = it.get("price_per_unit")
+            tot = it.get("total")
+            qty_s = "—" if qty is None else str(qty)
+            ppu_s = "—" if ppu is None else _fmt_kzt(ppu)
+            tot_s = "—" if tot is None else _fmt_kzt(tot)
+            lines.append(f"• {nm}: {qty_s} {un} × {ppu_s} ₸ = {tot_s} ₸")
+        if len(items) > 15:
+            lines.append(f"  … ещё {len(items)-15} позиций")
+
+    lines.append("\n<b>Создать копию?</b>")
+    return "\n".join(lines)
+
+
 def _drop_pending(chat_id: int) -> None:
     p = _pending_invoices.pop(chat_id, None)
     if p:
@@ -2330,13 +2377,7 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     if not force:
         existing = find_invoice_by_dedup(dedup_hash, pending["telegram_id"], days=30)
         if existing:
-            await _tg_edit(chat_id, msg_id,
-                f"⚠️ Похоже эту накладную уже отправляли:\n"
-                f"📅 {existing.get('created_at','')[:10]}, "
-                f"🏭 {existing.get('supplier','')}, "
-                f"💰 {_fmt_kzt(existing.get('total_amount') or 0)} ₸\n\n"
-                f"<b>Создать копию?</b>",
-                _dedup_kb())
+            await _tg_edit(chat_id, msg_id, _format_dup_invoice(existing), _dedup_kb())
             return
 
     # ---- Resolve restaurant credentials for the picked org ----
