@@ -1022,11 +1022,14 @@ class IikoWebClient:
         for idx, it in enumerate(items or [], start=1):
             ie = ET.SubElement(items_el, "item")
             ET.SubElement(ie, "num").text = str(idx)
-            ET.SubElement(ie, "productId").text = str(it.get("productId") or "")
+            # iikoServer import ждёт <product> и <store> (НЕ <productId>/<storeId>),
+            # иначе 409 "Product is not found id=null" / 500 "склад позиции отличается".
+            # Подтверждено verify-curl к saya-co.iiko.it (2026-05-27): valid=true.
+            ET.SubElement(ie, "product").text = str(it.get("productId") or "")
             ET.SubElement(ie, "amount").text = str(it.get("amount") or 0)
             ET.SubElement(ie, "price").text = str(it.get("price") or 0)
             ET.SubElement(ie, "sum").text = str(it.get("sum") or 0)
-            ET.SubElement(ie, "storeId").text = str(store_id)
+            ET.SubElement(ie, "store").text = str(store_id)
 
         xml_body = b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
 
@@ -1041,10 +1044,8 @@ class IikoWebClient:
                 )
                 if resp.status_code != 200:
                     import logging
-                    # Диагностика 409 «Product is not found ... id=null»:
-                    # явно показываем КАЖДЫЙ productId и сколько из них пустых.
-                    # empty=0 => iiko не читает наш <productId> (вопрос формата/имени тега),
-                    # empty>0 => в items просочилась позиция без товара (искать в вызывающем коде).
+                    # Диагностика: показываем productId каждой позиции и сколько пустых
+                    # (empty>0 => в items просочилась позиция без товара).
                     pids = [str(it.get("productId") or "") for it in (items or [])]
                     empty = sum(1 for p in pids if not p)
                     logging.getLogger(__name__).warning(
@@ -1107,4 +1108,3 @@ class IikoWebClient:
                     "error": "iikoServer не принял setStatus ни на одном из путей "
                              "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
                              "другой эндпоинт — пришли точный URL из iiko-докуменации."}
-
