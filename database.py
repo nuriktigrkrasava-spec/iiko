@@ -87,6 +87,14 @@ def init_db():
         date TEXT,
         created_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS pending_invoices (
+        pending_id TEXT PRIMARY KEY,
+        chat_id INTEGER,
+        telegram_id INTEGER,
+        data TEXT,
+        updated_at TEXT
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -337,6 +345,48 @@ def find_invoice_by_dedup(dedup_hash: str, telegram_id: int,
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+# ---- Pending invoices (живут в RAM бота, дублируются в БД чтобы пережить рестарт) ----
+
+def save_pending_invoice(pending_id: str, chat_id: int, telegram_id: int,
+                         data_json: str) -> None:
+    """Сохраняет/обновляет pending-накладную (JSON без сырых байт фото)."""
+    conn = get_db()
+    conn.execute(
+        """INSERT OR REPLACE INTO pending_invoices
+           (pending_id, chat_id, telegram_id, data, updated_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (pending_id, chat_id, telegram_id, data_json, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pending_invoice(pending_id: str) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM pending_invoices WHERE pending_id = ?", (pending_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_pending_invoice_by_chat(chat_id: int) -> Optional[Dict[str, Any]]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM pending_invoices WHERE chat_id = ? ORDER BY updated_at DESC LIMIT 1",
+        (chat_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def delete_pending_invoice_by_chat(chat_id: int) -> None:
+    conn = get_db()
+    conn.execute("DELETE FROM pending_invoices WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_price_history(telegram_id: int, days: int = 90) -> List[Dict[str, Any]]:
