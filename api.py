@@ -28,6 +28,8 @@ from database import (
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     get_db, decrypt_password,
+    save_pending_invoice, get_pending_invoice, get_pending_invoice_by_chat,
+    delete_pending_invoice_by_chat,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -1586,8 +1588,7 @@ class InvoiceEditPayload(BaseModel):
 async def invoice_edit_get(pending_id: str, user: Dict = Depends(get_current_user)):
     """Возвращает данные pending-накладной для редактирования в Mini App.
     Доступ только владельцу (по telegram_id из initData)."""
-    chat_id = _pending_by_id.get(pending_id)
-    pending = _pending_invoices.get(chat_id) if chat_id else None
+    pending = _get_pending_by_id(pending_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending invoice not found or expired")
     if pending.get("telegram_id") != user.get("id"):
@@ -1614,8 +1615,7 @@ async def invoice_edit_post(pending_id: str, payload: InvoiceEditPayload,
     """Принимает обновлённую накладную из Mini App (fallback к WebApp.sendData).
     После обновления pending — бот сам перерисует превью при следующем callback'е,
     но для лучшего UX делаем edit прямо здесь."""
-    chat_id = _pending_by_id.get(pending_id)
-    pending = _pending_invoices.get(chat_id) if chat_id else None
+    pending = _get_pending_by_id(pending_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending invoice not found")
     if pending.get("telegram_id") != user.get("id"):
@@ -1627,6 +1627,7 @@ async def invoice_edit_post(pending_id: str, payload: InvoiceEditPayload,
     if payload.total_amount is not None: r["total_amount"] = payload.total_amount
     if payload.vat_amount is not None: r["vat_amount"] = payload.vat_amount
     pending["state"] = "preview"
+    _persist_pending(pending)
     # Перерисуем превью в боте
     if pending.get("message_id"):
         await _tg_edit(pending["chat_id"], pending["message_id"],
@@ -2082,6 +2083,60 @@ def _drop_pending(chat_id: int) -> None:
     p = _pending_invoices.pop(chat_id, None)
     if p:
         _pending_by_id.pop(p.get("pending_id", ""), None)
+    try:
+        delete_pending_invoice_by_chat(chat_id)
+    except Exception as e:
+        logger.warning(f"[pending-drop] {e}")
+
+
+# ---- Персист pending в БД, чтобы он пережил рестарт сервера (см. issue с 404) ----
+# В БД НЕ кладём сырые байты фото и suppliers_cache — только то, что нужно
+# для редактирования и отправки (result + метаданные). После рестарта мультифото
+# доснять нельзя, но открыть редактор и отправить накладную — можно.
+def _persist_pending(pending: dict) -> None:
+    try:
+        slim = {k: v for k, v in pending.items()
+                if k not in ("images", "suppliers_cache")}
+        imgs = pending.get("images") or []
+        slim["images_meta"] = [{"file_id": i.get("file_id"), "mime": i.get("mime")}
+                               for i in imgs]
+        save_pending_invoice(
+            pending["pending_id"], pending["chat_id"], pending["telegram_id"],
+            json.dumps(slim, ensure_ascii=False, default=str),
+        )
+    except Exception as e:
+        logger.warning(f"[pending-persist] {e}")
+
+
+def _rehydrate_pending(row: Optional[Dict[str, Any]]) -> Optional[dict]:
+    """Восстанавливает pending из БД-строки в память."""
+    if not row:
+        return None
+    try:
+        p = json.loads(row.get("data") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    p.setdefault("images", [])  # байты потеряны при рестарте — мультифото недоступно
+    cid = p.get("chat_id")
+    if cid is not None:
+        _pending_invoices[cid] = p
+        _pending_by_id[p.get("pending_id", "")] = cid
+    return p
+
+
+def _get_pending_by_chat(chat_id: int) -> Optional[dict]:
+    p = _pending_invoices.get(chat_id)
+    if p:
+        return p
+    return _rehydrate_pending(get_pending_invoice_by_chat(chat_id))
+
+
+def _get_pending_by_id(pending_id: str) -> Optional[dict]:
+    cid = _pending_by_id.get(pending_id)
+    p = _pending_invoices.get(cid) if cid is not None else None
+    if p:
+        return p
+    return _rehydrate_pending(get_pending_invoice(pending_id))
 
 
 def _get_user_orgs(telegram_id: int) -> List[Dict[str, Any]]:
@@ -2515,6 +2570,7 @@ async def _recognize_invoice_and_create_pending(
     }
     _pending_invoices[chat_id] = pending
     _pending_by_id[pid] = chat_id
+    _persist_pending(pending)
 
     if status_msg_id:
         await _tg_edit(chat_id, status_msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
@@ -2547,7 +2603,7 @@ async def telegram_webhook(request: Request):
                 except Exception:
                     pass
 
-            pending = _pending_invoices.get(chat_id)
+            pending = _get_pending_by_chat(chat_id)
 
             # Отмена — работает даже если pending нет
             if action == "act:cancel":
@@ -2588,6 +2644,7 @@ async def telegram_webhook(request: Request):
                     return {"ok": True}
                 pending["result"] = result
                 pending["state"] = "preview"
+                _persist_pending(pending)
                 await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
                 return {"ok": True}
 
@@ -2601,6 +2658,7 @@ async def telegram_webhook(request: Request):
                     return {"ok": True}
                 if len(rests) == 1:
                     pending["organization_id"] = rests[0]["organization_id"]
+                    _persist_pending(pending)
                     await _show_supplier_picker_for_org(chat_id, msg_id, pending, rests[0]["organization_id"])
                 else:
                     await _show_org_picker(chat_id, msg_id, pending)
@@ -2629,6 +2687,7 @@ async def telegram_webhook(request: Request):
                 supplier = next((s for s in suppliers if (s.get("id") or s.get("supplierId")) == supplier_id), None)
                 pending["supplier_id"] = supplier_id
                 pending["supplier_name"] = supplier.get("name") if supplier else "—"
+                _persist_pending(pending)
                 # Филиал уже выбран на предыдущем шаге (или это был единственный) — финализируем
                 await _finalize_send(chat_id, msg_id, pending, force=False)
                 return {"ok": True}
@@ -2637,6 +2696,7 @@ async def telegram_webhook(request: Request):
             if action.startswith("org:"):
                 org_id = action.split(":", 1)[1]
                 pending["organization_id"] = org_id
+                _persist_pending(pending)
                 await _show_supplier_picker_for_org(chat_id, msg_id, pending, org_id)
                 return {"ok": True}
 
@@ -2670,8 +2730,7 @@ async def telegram_webhook(request: Request):
             except Exception:
                 payload = {}
             pid = payload.get("pending_id") or ""
-            target_chat = _pending_by_id.get(pid)
-            pending = _pending_invoices.get(target_chat) if target_chat else None
+            pending = _get_pending_by_id(pid)
             if not pending:
                 await _tg_send(chat_id, "⚠️ Сессия редактирования истекла. Пришли накладную заново.")
                 return {"ok": True}
@@ -2683,6 +2742,7 @@ async def telegram_webhook(request: Request):
             if "total_amount" in payload: r["total_amount"] = payload["total_amount"]
             if "vat_amount" in payload:   r["vat_amount"] = payload["vat_amount"]
             pending["state"] = "preview"
+            _persist_pending(pending)
             # Перерисовываем превью (на том же сообщении если знаем message_id)
             if pending.get("message_id"):
                 await _tg_edit(pending["chat_id"], pending["message_id"],
@@ -2772,6 +2832,7 @@ async def telegram_webhook(request: Request):
             }
             _pending_invoices[chat_id] = pending
             _pending_by_id[pid] = chat_id
+            _persist_pending(pending)
             await _tg_edit(chat_id, status_msg_id,
                            _format_invoice_v2(pending, "preview"),
                            _invoice_kb(pending["pending_id"]))
