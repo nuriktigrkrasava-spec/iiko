@@ -275,6 +275,26 @@ html, body {
 .org-item.selected { border-color: var(--blue); }
 .org-icon { font-size: 24px; }
 
+/* Help button (?) — кнопка-подсказка для онбординга и вкладок */
+.help-btn {
+  position: absolute; top: 16px; right: 16px;
+  width: 36px; height: 36px; border-radius: 50%;
+  background: var(--bg-card); border: 1px solid var(--card-border);
+  color: var(--text); font-size: 18px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; z-index: 10;
+}
+.help-btn:active { background: var(--bg-secondary); }
+.help-content { text-align: left; font-size: 14px; line-height: 1.55; color: var(--text); }
+.help-content h4 { font-size: 15px; font-weight: 700; margin: 16px 0 8px; color: var(--text); }
+.help-content h4:first-child { margin-top: 0; }
+.help-content p { margin: 0 0 10px; color: var(--text-secondary); }
+.help-content code { background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 12px; color: var(--text); }
+.help-content .warn { background: rgba(255,149,0,0.1); border: 1px solid rgba(255,149,0,0.3); padding: 10px 12px; border-radius: 10px; margin: 8px 0; color: var(--text); }
+.help-content ul { margin: 4px 0 10px; padding-left: 20px; color: var(--text-secondary); }
+.help-content li { margin-bottom: 4px; }
+.help-content a { color: var(--blue); text-decoration: none; }
+
 /* Settings modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 100; display: none; align-items: flex-end; }
 .modal-overlay.active { display: flex; }
@@ -523,6 +543,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <button class="btn-full btn-white" onclick="startDemo()">Попробовать демо</button>
   </div>
   <div class="onboarding" id="onboarding-step2" style="display:none">
+    <button class="help-btn" onclick="openHelp('register')" aria-label="Помощь">?</button>
     <div class="emoji">🔑</div>
     <h2>API ключ iiko</h2>
     <p>Введите API Login из личного кабинета iiko</p>
@@ -1297,6 +1318,15 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="modal-item" onclick="addRestaurant()">+ Добавить ресторан</div>
     <div class="modal-item danger" onclick="logout()">Выйти</div>
     <div class="modal-item" onclick="closeSettingsDirect()">Закрыть</div>
+  </div>
+</div>
+
+<!-- Help modal — открывается по '?' кнопке, контент зависит от topic -->
+<div class="modal-overlay" id="help-modal" onclick="if(event.target===this)closeHelp()">
+  <div class="modal-sheet">
+    <div class="modal-title" id="help-title">Помощь</div>
+    <div class="help-content" id="help-body"></div>
+    <button class="btn-full btn-black" style="margin-top:16px" onclick="closeHelp()">Понятно</button>
   </div>
 </div>
 
@@ -3081,6 +3111,68 @@ function renderComparison() {
 function setCompChannel(ch) {
   _compChannel = ch;
   if (_compData) renderComparison();
+}
+
+// ============ HELP (?) ============
+// Контент подсказок по topic. Сейчас активен только 'register'.
+// Чтобы добавить '?' на другие вкладки — добавь новый topic сюда и кнопку <button class="help-btn" onclick="openHelp('X')">?</button> в шапку нужного экрана.
+const HELP_CONTENT = {
+  register: {
+    title: 'Как подключить iiko',
+    body: `
+      <h4>1. Какой у вас iiko?</h4>
+      <p>Сервис работает с <b>iikoServer / iikoWeb</b> по REST API (<code>/resto/api/v2/…</code>) — это формат любых «коробочных» установок iiko, включая хостинг на <code>*.iiko.it</code>.</p>
+      <div class="warn">❌ <b>iiko Cloud API</b> (<code>api-ru.iiko.services</code> — Bearer-токен из ЛК iiko.biz) пока НЕ поддерживается. Если у вас интеграция через него — этот сервис не подойдёт.</div>
+
+      <h4>2. Что вводить в поле «API Login»</h4>
+      <p>Это логин API-пользователя из вашего iikoOffice. Не путать с логином самого iikoOffice — заведите отдельного юзера специально для бота.</p>
+
+      <h4>3. Кнопка «⚙️ Свой сервер iikoWeb»</h4>
+      <p>Откройте эту секцию, если у вас:</p>
+      <ul>
+        <li>iikoServer на своём VDS / железе</li>
+        <li>Хостинг iiko на <code>*.iiko.it</code> (например <code>saya-co.iiko.it</code>)</li>
+      </ul>
+      <p>Появятся два дополнительных поля: URL сервера и пароль.</p>
+
+      <h4>4. URL сервера</h4>
+      <p>Адрес вашего iikoOffice / iikoWeb. Примеры:</p>
+      <ul>
+        <li><code>https://saya-co.iiko.it:443/resto</code></li>
+        <li><code>https://192.168.1.10:443/resto</code> (локалка)</li>
+        <li><code>https://your-domain.com:443/resto</code></li>
+      </ul>
+      <p>Не знаете — спросите вашего iiko-администратора или интегратора.</p>
+
+      <h4>5. Создать API-пользователя в iikoOffice</h4>
+      <p>Администрирование → Сотрудники → создать. Дайте права:</p>
+      <ul>
+        <li>Просмотр отчётов (для аналитики)</li>
+        <li>Просмотр номенклатуры (для накладных)</li>
+        <li>Создание накладных (если хотите отправлять накладные через бота)</li>
+        <li>Просмотр сотрудников (для вкладки Персонал)</li>
+      </ul>
+
+      <h4>6. Безопасность</h4>
+      <p>Пароль шифруется (Fernet/AES) перед записью в нашу БД, в открытом виде не хранится. Доступ можно отозвать в iikoOffice одной кнопкой.</p>
+
+      <h4>📚 Дальше</h4>
+      <p>Не разобрались — напишите в Telegram-бот команду <code>/start</code> и нажмите «🔧 Как настроить iiko Server». Или техподдержке iiko: <code>api@iiko.ru</code>.</p>
+    `
+  }
+};
+
+function openHelp(topic) {
+  const content = HELP_CONTENT[topic];
+  if (!content) return;
+  haptic();
+  document.getElementById('help-title').textContent = content.title;
+  document.getElementById('help-body').innerHTML = content.body;
+  document.getElementById('help-modal').classList.add('active');
+}
+
+function closeHelp() {
+  document.getElementById('help-modal').classList.remove('active');
 }
 
 // ============ SETTINGS ============
