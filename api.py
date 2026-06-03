@@ -12,6 +12,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
@@ -64,6 +65,13 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Статика для скринов FAQ: docs/screenshots → /static/screenshots/*
+# Telegram дёргает фото по публичному URL, поэтому путь должен быть доступен снаружи.
+if os.path.isdir("docs/screenshots"):
+    app.mount("/static/screenshots",
+              StaticFiles(directory="docs/screenshots"),
+              name="screenshots")
 
 # CORS — только Telegram origins
 app.add_middleware(
@@ -1944,96 +1952,94 @@ def _start_kb() -> dict:
     }
 
 
-# Каждый раздел: (заголовок, тело). Тело уйдёт в одно сообщение с кнопкой «Назад».
-FAQ_SECTIONS: Dict[str, Tuple[str, str]] = {
-    "start": (
-        "🚀 С чего начать",
-        "🚀 <b>С чего начать</b>\n\n"
-        "1. Нажмите «🚀 Открыть Mini App» внизу этого чата.\n\n"
-        "2. На первом экране два варианта:\n"
-        "• «<b>Попробовать демо</b>» — без подключения, на тестовых данных. Просто посмотреть как всё работает.\n"
-        "• «<b>Начать →</b>» — подключить ваш ресторан. Нужны URL iikoServer + API-логин + API-пароль.\n\n"
-        "3. Не знаете что вводить — вернитесь в меню бота и нажмите «🔧 Как настроить iiko Server».\n\n"
-        "4. После подключения попадёте на главный экран: выручка, средний чек, гости, чарт за 7 дней. "
-        "Дальше — вкладки внизу: Продажи, Персонал, Расходы, Год/год.\n\n"
-        "📌 Подключить можно любое число ресторанов — переключатель в шапке. "
-        "Режим «Все филиалы» суммирует метрики по всем точкам."
-    ),
-    "invoices": (
-        "📎 Накладные через бота",
-        "📎 <b>Накладные через бота</b>\n\n"
-        "<b>Что я принимаю:</b>\n"
-        "• Фото (из галереи или сжатое прямо в чат)\n"
-        "• Файл-картинку (jpg/png/heic). PDF пока не поддерживается.\n"
-        "• Просто текст накладной (если позиции с ценами уже в тексте)\n\n"
-        "<b>Как это работает:</b>\n"
-        "1. Присылаете накладную → ИИ распознаёт поставщика, дату, позиции (название/кол-во/цена), итоги.\n"
-        "2. Показываю превью. Кнопка «<b>✏️ Редактировать</b>» открывает Mini App-редактор: поправить позицию, добавить, удалить, изменить сумму.\n"
-        "3. По «<b>📤 Отправить в iiko</b>» → выбираете филиал и поставщика → накладная попадает в iiko как черновик.\n"
-        "4. Дальше: Mini App → Расходы → Накладные → кнопка «▶️ Провести» / «⏸ Распровести» — без iikoOffice.\n\n"
-        "⚠️ ИИ может ошибаться — всегда проверяйте перед отправкой, особенно при кривом почерке или плохом свете.\n\n"
-        "💸 Каждая отправленная накладная пополняет вашу историю цен — см. раздел «Анализ цен»."
-    ),
-    "prices": (
-        "💰 Анализ цен поставщиков",
-        "💰 <b>Анализ цен поставщиков</b>\n\n"
-        "В iikoOffice такого нет «из коробки». В Mini App: <b>Расходы → Накладные → 📊 Цены</b>.\n\n"
-        "По любому товару из вашей номенклатуры:\n"
-        "• 🟢 <b>Лучшая цена за 60 дней</b> — какой поставщик, когда\n"
-        "• Все поставщики, у которых вы этот товар покупали\n"
-        "• Дельта в % — насколько каждый дороже/дешевле лучшей цены. От +10% подсвечивается красным.\n\n"
-        "<b>Пример:</b> ищете «помидор грунтовый» — видите что ТОО АгроПром продаёт по 720 ₸/кг, а Овощебаза №3 за 850 (+18%). "
-        "Звоните на Овощебазу с готовым аргументом.\n\n"
-        "<b>Источник данных:</b>\n"
-        "• Накладные из iiko (incomingInvoice через OLAP)\n"
-        "• Накладные, проведённые через нашего бота\n\n"
-        "Чем больше истории — тем точнее картина. После 10-20 накладных уже отчётливо видно «своих» дорогих."
-    ),
-    "zeros": (
-        "🤔 Показывает 0 за сегодня",
-        "🤔 <b>Показывает 0 за сегодня, хотя касса работает</b>\n\n"
-        "Это особенность iiko, не баг бота. Три типичные причины:\n\n"
-        "<b>1. Сетевая структура с iikoChain.</b>\n"
-        "Если вы смотрите через креды от центрального сервера, продажи приезжают туда с филиалов "
-        "не онлайн, а пачкой — обычно при закрытии кассовой смены (после 24:00). "
-        "Если у вас есть креды от локального iikoServer филиала — через них видно в реальном времени.\n\n"
-        "<b>2. Роль API-пользователя ограничена.</b>\n"
-        "В iikoOffice у роли может стоять «Видеть только закрытые периоды». Уберите галку — и сегодня появится мгновенно.\n\n"
-        "<b>3. iikoFront временно потерял связь с сервером.</b>\n"
-        "Чеки копятся локально на кассе и зальются при восстановлении сети.\n\n"
-        "<b>Как проверить:</b> если данные за вчера и старше нормальные, а 0 только за сегодня — "
-        "это всегда один из этих трёх случаев."
-    ),
-    "security": (
-        "🛡 Безопасность данных",
-        "🛡 <b>Безопасность данных</b>\n\n"
-        "<b>Что мы делаем:</b>\n"
-        "• Пароль iiko шифруется (Fernet/AES) перед записью в БД. В открытом виде нигде не лежит.\n"
-        "• Каждый запрос от Mini App к серверу проверяется по подписи Telegram <code>initData</code> "
-        "от вашего бота — подменить чужой telegram_id нельзя.\n"
-        "• Изоляция данных: каждый Telegram-пользователь видит только свои подключённые рестораны.\n"
-        "• Мы — прокси к ВАШЕМУ iiko-серверу. Своих копий ваших OLAP-отчётов не храним.\n\n"
-        "<b>Рекомендуем вам:</b>\n"
-        "• Создать в iikoOffice <b>отдельную учётку</b> для бота, не использовать админский логин.\n"
-        "• Дать минимальные права: Просмотр отчётов + Просмотр номенклатуры (+ Создание накладных если отправляете через бота).\n"
-        "• API-доступ всегда можно отозвать в iikoOffice одной кнопкой."
-    ),
-    "multi": (
-        "🏢 Несколько ресторанов",
-        "🏢 <b>Несколько ресторанов / филиалов</b>\n\n"
-        "В Mini App: <b>⚙️ → «+ Добавить ресторан»</b>.\n\n"
-        "• Подключить можно любое количество ресторанов\n"
-        "• Каждый — со своими URL/логином/паролем (могут совпадать, если на одном iikoServer'е)\n"
-        "• В шапке главного экрана — переключатель: один филиал или «Все филиалы»\n\n"
-        "<b>Режим «Все филиалы»:</b>\n"
-        "• Метрики (выручка, гости, чек) суммируются по всем точкам\n"
-        "• Запрос идёт параллельно к каждому iikoServer'у\n"
-        "• Если у филиала свой локальный сервер — данные real-time. Если прописан центральный iikoChain — "
-        "будет задержка (см. вопрос «0 за сегодня»).\n\n"
-        "📌 <b>Совет для сети с iikoChain:</b> чтобы видеть продажи каждого филиала в реальном времени, "
-        "добавляйте каждый филиал отдельно с его <b>локальным</b> URL, а не один общий чейн."
-    ),
+# Каждый раздел: label, опциональный photo (имя файла в docs/screenshots),
+# и caption — короткий текст-подпись (Telegram лимит — 1024 символа на caption).
+# Если photo=None, шлём как обычное текстовое сообщение.
+FAQ_SECTIONS: Dict[str, Dict[str, Any]] = {
+    "start": {
+        "label": "🚀 С чего начать",
+        "photo": "01_onboarding_welcome.png",
+        "caption": (
+            "🚀 <b>С чего начать</b>\n\n"
+            "1. Нажми «🚀 Открыть Mini App» внизу чата.\n"
+            "2. На первом экране — «<b>Попробовать демо</b>» (на тестовых данных) или «<b>Начать →</b>» "
+            "(нужны URL iikoServer + API-логин + пароль).\n"
+            "3. Не знаешь что вводить — в меню бота жми «🔧 Как настроить iiko Server».\n\n"
+            "После подключения попадёшь на главный экран. Снизу — вкладки Продажи, Персонал, Расходы, Год/год."
+        ),
+    },
+    "invoices": {
+        "label": "📎 Накладные через бота",
+        "photo": "08_invoices_list.png",
+        "caption": (
+            "📎 <b>Накладные через бота</b>\n\n"
+            "Пришли фото (jpg/png/heic), картинку файлом или текст с позициями — ИИ распознает "
+            "поставщика, дату, позиции и сумму.\n\n"
+            "Дальше: «<b>✏️ Редактировать</b>» — поправить в Mini App. «<b>📤 Отправить в iiko</b>» — "
+            "выбираешь филиал и поставщика → накладная летит в iiko как черновик.\n\n"
+            "В Mini App → Расходы → Накладные провести/распровести в один клик, без iikoOffice."
+        ),
+    },
+    "prices": {
+        "label": "💰 Анализ цен поставщиков",
+        "photo": "11_price_card.png",
+        "caption": (
+            "💰 <b>Анализ цен поставщиков</b>\n\n"
+            "Mini App → Расходы → Накладные → <b>📊 Цены</b>. Ищешь товар — видишь:\n"
+            "• 🟢 Лучшая цена за 60 дней и у кого\n"
+            "• Все поставщики с дельтой в %\n"
+            "• Переплата от +10% подсвечивается красным\n\n"
+            "Пример: помидор по 720 у одного и 850 у другого (+18%) — звонок и торг.\n\n"
+            "В iikoOffice такого «из коробки» нет."
+        ),
+    },
+    "zeros": {
+        "label": "🤔 Показывает 0 за сегодня",
+        "photo": None,
+        "caption": (
+            "🤔 <b>Показывает 0 за сегодня, хотя касса работает</b>\n\n"
+            "Это особенность iiko, не баг бота. Три типичные причины:\n\n"
+            "<b>1. Сеть с iikoChain.</b> Креды от центрального сервера → продажи приезжают с филиалов "
+            "не онлайн, а пачкой при закрытии смены (после 24:00). Локальный сервер филиала покажет real-time.\n\n"
+            "<b>2. Роль API-юзера ограничена.</b> В iikoOffice может стоять «Видеть только закрытые периоды» — сними галку.\n\n"
+            "<b>3. iikoFront потерял связь.</b> Чеки копятся локально и зальются при восстановлении.\n\n"
+            "Если за вчера данные есть, а 0 только за сегодня — это всегда одно из этих трёх."
+        ),
+    },
+    "security": {
+        "label": "🛡 Безопасность данных",
+        "photo": None,
+        "caption": (
+            "🛡 <b>Безопасность данных</b>\n\n"
+            "• Пароль iiko шифруется (Fernet/AES) перед записью в БД. В открытом виде не лежит.\n"
+            "• Запросы Mini App проверяются по подписи Telegram <code>initData</code> — чужой telegram_id подменить нельзя.\n"
+            "• Каждый юзер видит только СВОИ подключённые рестораны.\n"
+            "• Мы — прокси к ВАШЕМУ iiko-серверу, копий ваших OLAP-отчётов не храним.\n\n"
+            "<b>Рекомендуем:</b> заведи в iikoOffice отдельную учётку для бота с минимальными правами "
+            "(Просмотр отчётов + Номенклатура + Создание накладных). Не используй админский логин."
+        ),
+    },
+    "multi": {
+        "label": "🏢 Несколько ресторанов",
+        "photo": "07_settings_modal.png",
+        "caption": (
+            "🏢 <b>Несколько ресторанов / филиалов</b>\n\n"
+            "Mini App → ⚙️ → «+ Добавить ресторан». Подключить можно любое число — каждый со своими "
+            "URL/логином/паролем.\n\n"
+            "В шапке главного экрана — переключатель «один филиал / Все филиалы».\n"
+            "«Все филиалы» суммирует метрики по сети, запросы идут параллельно.\n\n"
+            "📌 Чтобы видеть real-time по каждой точке — добавляй филиалы с их <b>локальными</b> "
+            "iikoServer-URL, а не один общий iikoChain."
+        ),
+    },
 }
+
+
+def _section_photo_url(filename: Optional[str]) -> Optional[str]:
+    """Полный URL к скрину для Telegram (telegram должен иметь публичный доступ)."""
+    if not filename:
+        return None
+    return f"{MINIAPP_URL}/static/screenshots/{filename}"
 
 
 def _faq_menu_kb() -> dict:
@@ -2129,6 +2135,37 @@ async def _tg_edit(chat_id: int, message_id: int, text: str, reply_markup: dict 
             await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", json=payload)
     except Exception as e:
         logger.warning(f"[tg_edit] {e}")
+
+
+async def _tg_send_photo(chat_id: int, photo_url: str, caption: str = "",
+                          reply_markup: dict = None) -> Optional[int]:
+    """Шлёт фото по URL. Telegram сам качает картинку с нашего сервера."""
+    if not BOT_TOKEN:
+        return None
+    payload = {"chat_id": chat_id, "photo": photo_url,
+               "caption": caption, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", json=payload)
+            data = r.json()
+            return (data.get("result") or {}).get("message_id")
+    except Exception as e:
+        logger.warning(f"[tg_send_photo] {e}")
+        return None
+
+
+async def _tg_delete_msg(chat_id: int, message_id: int):
+    """Удаляет сообщение. Тихо игнорит ошибку (сообщение могло уже быть удалено)."""
+    if not BOT_TOKEN or not message_id:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                         json={"chat_id": chat_id, "message_id": message_id})
+    except Exception as e:
+        logger.warning(f"[tg_delete] {e}")
 
 
 async def _tg_download_file(file_id: str) -> Optional[Tuple[bytes, str]]:
@@ -2799,23 +2836,42 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             # Инфо-меню: FAQ и setup. Не зависят от pending, работают всегда.
+            # Текущее сообщение может быть как текстом, так и фото (с раздела FAQ).
+            # editMessageText не работает на фото-сообщениях — для перехода фото→текст
+            # удаляем старое сообщение и шлём новое.
+            cb_msg = cb.get("message") or {}
+            is_photo_msg = bool(cb_msg.get("photo"))
+
+            async def _show_text(text: str, kb: dict):
+                if is_photo_msg:
+                    await _tg_delete_msg(chat_id, msg_id)
+                    await _tg_send(chat_id, text, kb)
+                else:
+                    await _tg_edit(chat_id, msg_id, text, kb)
+
             if action == "info:start":
-                await _tg_edit(chat_id, msg_id, WELCOME_TEXT, _start_kb())
+                await _show_text(WELCOME_TEXT, _start_kb())
                 return {"ok": True}
             if action == "info:faq":
-                await _tg_edit(chat_id, msg_id, FAQ_MENU_TEXT, _faq_menu_kb())
+                await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
                 return {"ok": True}
             if action.startswith("info:faq:"):
                 key = action.split(":", 2)[2]
                 section = FAQ_SECTIONS.get(key)
-                if section:
-                    _label, body = section
-                    await _tg_edit(chat_id, msg_id, body, _faq_back_kb())
+                if not section:
+                    await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
+                    return {"ok": True}
+                caption = section["caption"]
+                photo = _section_photo_url(section.get("photo"))
+                if photo:
+                    # Цель — фото. Старое сообщение (текст или фото) удаляем и шлём новое.
+                    await _tg_delete_msg(chat_id, msg_id)
+                    await _tg_send_photo(chat_id, photo, caption, _faq_back_kb())
                 else:
-                    await _tg_edit(chat_id, msg_id, FAQ_MENU_TEXT, _faq_menu_kb())
+                    await _show_text(caption, _faq_back_kb())
                 return {"ok": True}
             if action == "info:setup":
-                await _tg_edit(chat_id, msg_id, SETUP_IIKO_TEXT, _setup_back_kb())
+                await _show_text(SETUP_IIKO_TEXT, _setup_back_kb())
                 return {"ok": True}
 
             if not pending:
@@ -3051,3 +3107,4 @@ async def telegram_webhook(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
