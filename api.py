@@ -1409,17 +1409,22 @@ async def comparison(org_id: str,
 
 PLAN_BUCKETS = ["Доставка", "Зал / вынос", "Агрегаторы"]
 
-# OrderType.Name из iiko → корзина плана (подтверждено клиентом)
-PLAN_TYPE2BUCKET: Dict[str, str] = {
-    "Доставка": "Доставка",
-    "Сайт доставка": "Доставка",
-    "Обычный заказ": "Зал / вынос",
-    "Самовывоз": "Зал / вынос",
-    "Сайт самовывоз": "Зал / вынос",
-    "Wolt": "Агрегаторы",
-    "Яндекс Еда": "Агрегаторы",
-    "Chocofood": "Агрегаторы",
-}
+# Корзины «Зал / вынос» и «Доставка» — фиксированные наборы типов. Всё остальное
+# (Wolt, Яндекс Еда, Glovo, Chocofood и любые новые площадки) — Агрегаторы по умолчанию,
+# чтобы ни один тип заказа не терялся при разнице наборов между филиалами.
+_PLAN_ZAL = {"Обычный заказ", "Самовывоз", "Сайт самовывоз"}
+_PLAN_DELIVERY = {"Доставка", "Сайт доставка"}
+
+
+def _plan_bucket(order_type: str) -> Optional[str]:
+    t = (order_type or "").strip()
+    if not t:
+        return None
+    if t in _PLAN_ZAL:
+        return "Зал / вынос"
+    if t in _PLAN_DELIVERY:
+        return "Доставка"
+    return "Агрегаторы"
 
 
 def _gsheet_csv_url(url: str) -> str:
@@ -1439,48 +1444,79 @@ def _norm_branch(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
-def _parse_plan_csv(text: str, org_name: str) -> Dict[str, Dict[int, float]]:
-    """Парсит CSV плана для одного филиала → {корзина: {месяц: сумма_заказов}}.
-    Структура: 3 секции (= корзины), в каждой строка 'Торговое предприятие' с датами
-    (DD.MM.YYYY) и строки-филиалы с дневными значениями. Филиал ищется по
-    нормализованному имени (регистр/пробелы не важны)."""
+def _iso_from_ddmmyyyy(d: str) -> Optional[str]:
+    try:
+        dd, mm, yy = d.strip().split(".")
+        return f"{int(yy):04d}-{int(mm):02d}-{int(dd):02d}"
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_plan_csv(text: str, org_name: str):
+    """Парсит CSV плана для одного филиала. Возвращает (plan, date2week, week_meta):
+      plan[корзина][неделя] = сумма_заказов,
+      date2week["YYYY-MM-DD"] = номер_недели (из строки «Неделя» таблицы),
+      week_meta[неделя] = {"first": "YYYY-MM-DD"} — для подписи и сортировки.
+    Недели берём из таблицы клиента, чтобы план и факт делились одинаково.
+    Филиал ищется по нормализованному имени (регистр/пробелы не важны)."""
     target = _norm_branch(org_name)
     rows = list(csv.reader(text.splitlines()))
     plan: Dict[str, Dict[int, float]] = {b: {} for b in PLAN_BUCKETS}
+    date2week: Dict[str, int] = {}
+    week_meta: Dict[int, Dict[str, str]] = {}
     i = 0
     while i < len(rows):
         head = (rows[i][0] if rows[i] else "").strip()
         if head in PLAN_BUCKETS:
             bucket = head
             dates: Optional[List[str]] = None
+            weeks: Optional[List[str]] = None
             j = i + 1
             while j < len(rows):
                 label = (rows[j][0] if rows[j] else "").strip()
                 if label in PLAN_BUCKETS:
                     break
-                if label == "Торговое предприятие":
+                if label == "Неделя":
+                    weeks = rows[j]
+                elif label == "Торговое предприятие":
                     dates = rows[j]
+                    if weeks:
+                        for col in range(1, min(len(dates), len(weeks))):
+                            iso = _iso_from_ddmmyyyy(dates[col])
+                            wk = weeks[col].strip()
+                            if not iso or not wk:
+                                continue
+                            try:
+                                week = int(wk)
+                            except ValueError:
+                                continue
+                            date2week[iso] = week
+                            cur = week_meta.get(week)
+                            if cur is None or iso < cur["first"]:
+                                week_meta[week] = {"first": iso}
                 elif label == "Итого":
                     j += 1
                     break
                 elif target and _norm_branch(label) == target and dates:
                     row = rows[j]
                     for col in range(1, min(len(row), len(dates))):
-                        d = dates[col].strip()
+                        iso = _iso_from_ddmmyyyy(dates[col])
+                        week = date2week.get(iso) if iso else None
+                        if week is None:
+                            continue
                         v = row[col].strip().replace(" ", "").replace(" ", "").replace(",", ".")
-                        if not d or not v:
+                        if not v:
                             continue
                         try:
-                            month = int(d.split(".")[1])
                             val = float(v)
-                        except (ValueError, IndexError):
+                        except ValueError:
                             continue
-                        plan[bucket][month] = plan[bucket].get(month, 0.0) + val
+                        plan[bucket][week] = plan[bucket].get(week, 0.0) + val
                 j += 1
             i = j
             continue
         i += 1
-    return plan
+    return plan, date2week, week_meta
 
 
 @app.post("/api/plan/{org_id}")
@@ -1500,26 +1536,29 @@ async def plan_set_link(org_id: str, payload: Dict[str, Any],
 @app.get("/api/plan/{org_id}")
 async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
                           user: Dict = Depends(get_current_user)):
-    """План/факт/% по 3 корзинам, помесячно. Факт — 1 OLAP-запрос на филиал."""
+    """План/факт/% по 3 корзинам, понедельно. Факт — 1 OLAP-запрос на филиал.
+    Недели берём из таблицы клиента, чтобы план и факт делились одинаково."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"has_link": False, "buckets": PLAN_BUCKETS, "months": []}
+        return {"has_link": False, "buckets": PLAN_BUCKETS, "rows": []}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     org_name = info.get("org_name", "")
     url = get_plan_url(real_org)
     if not url:
-        return {"has_link": False, "buckets": PLAN_BUCKETS, "months": [], "url": ""}
+        return {"has_link": False, "buckets": PLAN_BUCKETS, "rows": [], "url": ""}
 
     yr = year or local_now().year
 
-    # 1) План из таблицы
+    # 1) План из таблицы (понедельно) + карта дата→неделя
     plan: Dict[str, Dict[int, float]] = {b: {} for b in PLAN_BUCKETS}
+    date2week: Dict[str, int] = {}
+    week_meta: Dict[int, Dict[str, str]] = {}
     plan_error = None
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
             resp = await cli.get(_gsheet_csv_url(url))
         if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
-            plan = _parse_plan_csv(resp.text, org_name)
+            plan, date2week, week_meta = _parse_plan_csv(resp.text, org_name)
             if not any(plan[b] for b in PLAN_BUCKETS):
                 plan_error = (f"Филиал «{org_name}» не найден в таблице (или у него пусто). "
                               f"Проверь, что название строки в таблице совпадает с названием филиала в приложении.")
@@ -1529,7 +1568,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
         logger.warning(f"[plan] fetch failed org={real_org}: {e}")
         plan_error = "Таблица недоступна по ссылке"
 
-    # 2) Факт из iiko — один OLAP по филиалу
+    # 2) Факт из iiko — один OLAP по филиалу, бакечим по неделям той же карты
     fact: Dict[str, Dict[int, float]] = {b: {} for b in PLAN_BUCKETS}
     try:
         client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
@@ -1538,37 +1577,40 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
             group_by=["OrderType.Name", "OpenDate.Typed"], aggregates=["OrdersCount"]
         )
         for d in res.get("data", []):
-            bucket = PLAN_TYPE2BUCKET.get(d.get("OrderType.Name"))
-            dt = (d.get("OpenDate.Typed") or "")[:10]
-            if not bucket or len(dt) < 10:
+            bucket = _plan_bucket(d.get("OrderType.Name"))
+            iso = (d.get("OpenDate.Typed") or "")[:10]
+            week = date2week.get(iso)
+            if not bucket or week is None:
                 continue
-            month = int(dt[5:7])
-            fact[bucket][month] = fact[bucket].get(month, 0.0) + float(d.get("OrdersCount", 0) or 0)
+            fact[bucket][week] = fact[bucket].get(week, 0.0) + float(d.get("OrdersCount", 0) or 0)
     except Exception as e:
         logger.warning(f"[plan] olap failed org={real_org}: {e}")
 
-    # 3) Сборка помесячной таблицы
-    MONTH_NAMES = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек']
-    months = []
-    for m in range(1, 13):
-        row = {"month": m, "label": MONTH_NAMES[m - 1], "buckets": {}}
+    # 3) Сборка недельной таблицы (только недели с данными)
+    rows_out = []
+    for wk in sorted(week_meta.keys()):
+        first = week_meta[wk].get("first", "")
+        label = f"Нед {wk}"
+        if len(first) >= 10:
+            label = f"Нед {wk} · {first[8:10]}.{first[5:7]}"
+        bk: Dict[str, Any] = {}
         has_data = False
         for b in PLAN_BUCKETS:
-            p = round(plan[b].get(m, 0))
-            f = round(fact[b].get(m, 0))
+            p = round(plan[b].get(wk, 0))
+            f = round(fact[b].get(wk, 0))
             pct = round(f / p * 100) if p else None
-            row["buckets"][b] = {"plan": p, "fact": f, "pct": pct}
+            bk[b] = {"plan": p, "fact": f, "pct": pct}
             if p or f:
                 has_data = True
         if has_data:
-            months.append(row)
+            rows_out.append({"week": wk, "label": label, "buckets": bk})
 
     return {
         "has_link": True,
         "url": url,
         "year": yr,
         "buckets": PLAN_BUCKETS,
-        "months": months,
+        "rows": rows_out,
         "error": plan_error,
     }
 
