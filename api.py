@@ -1454,68 +1454,85 @@ def _iso_from_ddmmyyyy(d: str) -> Optional[str]:
 
 def _parse_plan_csv(text: str, org_name: str):
     """Парсит CSV плана для одного филиала. Возвращает (plan, date2week, week_meta):
-      plan[корзина][неделя] = сумма_заказов,
-      date2week["YYYY-MM-DD"] = номер_недели (из строки «Неделя» таблицы),
-      week_meta[неделя] = {"first": "YYYY-MM-DD"} — для подписи и сортировки.
-    Недели берём из таблицы клиента, чтобы план и факт делились одинаково.
-    Филиал ищется по нормализованному имени (регистр/пробелы не важны)."""
+      plan[корзина][неделя] = сумма ПЛАНА (строки «{тип} план» нижних блоков),
+      date2week["YYYY-MM-DD"] = номер недели (из строки «Неделя» верхних секций),
+      week_meta[неделя] = {"first": "YYYY-MM-DD"}.
+    План берём ТОЛЬКО из строк «Доставка план / Зал / вынос план / Агрегаторы план»
+    в поблочной части по филиалам (короткое имя филиала входит в organization_name).
+    Факт из таблицы НЕ берём — он приходит из iiko. Недели — из строки «Неделя»,
+    колонки→даты — из верхней шапки «Торговое предприятие» (DD.MM.YYYY)."""
     target = _norm_branch(org_name)
     rows = list(csv.reader(text.splitlines()))
     plan: Dict[str, Dict[int, float]] = {b: {} for b in PLAN_BUCKETS}
+    col2iso: Dict[int, str] = {}
     date2week: Dict[str, int] = {}
     week_meta: Dict[int, Dict[str, str]] = {}
-    i = 0
-    while i < len(rows):
-        head = (rows[i][0] if rows[i] else "").strip()
-        if head in PLAN_BUCKETS:
-            bucket = head
-            dates: Optional[List[str]] = None
-            weeks: Optional[List[str]] = None
-            j = i + 1
-            while j < len(rows):
-                label = (rows[j][0] if rows[j] else "").strip()
-                if label in PLAN_BUCKETS:
-                    break
-                if label == "Неделя":
-                    weeks = rows[j]
-                elif label == "Торговое предприятие":
-                    dates = rows[j]
-                    if weeks:
-                        for col in range(1, min(len(dates), len(weeks))):
-                            iso = _iso_from_ddmmyyyy(dates[col])
-                            wk = weeks[col].strip()
-                            if not iso or not wk:
-                                continue
-                            try:
-                                week = int(wk)
-                            except ValueError:
-                                continue
-                            date2week[iso] = week
-                            cur = week_meta.get(week)
-                            if cur is None or iso < cur["first"]:
-                                week_meta[week] = {"first": iso}
-                elif label == "Итого":
-                    j += 1
-                    break
-                elif target and _norm_branch(label) == target and dates:
-                    row = rows[j]
-                    for col in range(1, min(len(row), len(dates))):
-                        iso = _iso_from_ddmmyyyy(dates[col])
-                        week = date2week.get(iso) if iso else None
-                        if week is None:
-                            continue
-                        v = row[col].strip().replace(" ", "").replace(" ", "").replace(",", ".")
-                        if not v:
-                            continue
-                        try:
-                            val = float(v)
-                        except ValueError:
-                            continue
-                        plan[bucket][week] = plan[bucket].get(week, 0.0) + val
-                j += 1
-            i = j
+
+    NON_BRANCH = set(PLAN_BUCKETS) | {
+        "Торговое предприятие", "Неделя", "Месяц", "День недели", "Итого",
+    }
+
+    def _is_branch_header(label: str) -> bool:
+        if not label or label in NON_BRANCH:
+            return False
+        if label.endswith(" план") or label.endswith(" факт"):
+            return False
+        if "Выполнение плана" in label:
+            return False
+        return True
+
+    weeks_row: Optional[List[str]] = None
+    in_target = False
+    for r in rows:
+        label = (r[0] if r else "").strip()
+
+        if label == "Неделя":
+            weeks_row = r
             continue
-        i += 1
+        if label == "Торговое предприятие":
+            for col in range(1, len(r)):
+                iso = _iso_from_ddmmyyyy(r[col])
+                if iso and col not in col2iso:
+                    col2iso[col] = iso
+            if weeks_row:
+                for col in range(1, min(len(r), len(weeks_row))):
+                    iso = _iso_from_ddmmyyyy(r[col])
+                    wk = weeks_row[col].strip()
+                    if not iso or not wk:
+                        continue
+                    try:
+                        week = int(wk)
+                    except ValueError:
+                        continue
+                    date2week[iso] = week
+                    cur = week_meta.get(week)
+                    if cur is None or iso < cur["first"]:
+                        week_meta[week] = {"first": iso}
+            weeks_row = None
+            continue
+
+        if _is_branch_header(label):
+            nl = _norm_branch(label)
+            in_target = bool(nl) and nl != "астана" and nl in target
+            continue
+
+        if in_target and label.endswith(" план"):
+            bucket = label[:-len(" план")].strip()
+            if bucket in PLAN_BUCKETS:
+                for col in range(1, len(r)):
+                    iso = col2iso.get(col)
+                    week = date2week.get(iso) if iso else None
+                    if week is None:
+                        continue
+                    v = r[col].replace("\xa0", "").strip().replace(" ", "").replace(",", ".")
+                    if not v:
+                        continue
+                    try:
+                        val = float(v)
+                    except ValueError:
+                        continue
+                    plan[bucket][week] = plan[bucket].get(week, 0.0) + val
+
     return plan, date2week, week_meta
 
 
@@ -1586,7 +1603,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
     except Exception as e:
         logger.warning(f"[plan] olap failed org={real_org}: {e}")
 
-    # 3) Сборка недельной таблицы (только недели с данными)
+    # 3) Сборка недельной таблицы (только недели, где ЕСТЬ план — это план-период)
     rows_out = []
     for wk in sorted(week_meta.keys()):
         first = week_meta[wk].get("first", "")
@@ -1594,15 +1611,15 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
         if len(first) >= 10:
             label = f"Нед {wk} · {first[8:10]}.{first[5:7]}"
         bk: Dict[str, Any] = {}
-        has_data = False
+        has_plan = False
         for b in PLAN_BUCKETS:
             p = round(plan[b].get(wk, 0))
             f = round(fact[b].get(wk, 0))
             pct = round(f / p * 100) if p else None
             bk[b] = {"plan": p, "fact": f, "pct": pct}
-            if p or f:
-                has_data = True
-        if has_data:
+            if p:
+                has_plan = True
+        if has_plan:
             rows_out.append({"week": wk, "label": label, "buckets": bk})
 
     return {
