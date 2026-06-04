@@ -3039,7 +3039,7 @@ async function loadPlan() {
     _planLoaded = true;
     if (data.url) document.getElementById('plan-url-input').value = data.url;
     if (!data.has_link) { status.textContent = 'Вставь ссылку на таблицу с планом и нажми «Сохранить».'; return; }
-    status.textContent = data.error ? ('⚠️ ' + data.error) : `Год ${data.year} · сравнение по количеству заказов`;
+    status.textContent = data.error ? ('⚠️ ' + data.error) : `Год ${data.year} · по неделям, количество заказов`;
     renderPlanTable(data);
   } catch(e) { console.error(e); status.textContent = 'Ошибка загрузки плана'; }
 }
@@ -3059,7 +3059,8 @@ async function savePlanLink() {
 
 function renderPlanTable(data) {
   const wrap = document.getElementById('plan-table-wrap');
-  if (!data.months || !data.months.length) {
+  const rows = data.rows || data.months || [];
+  if (!rows.length) {
     wrap.innerHTML = '<div class="card" style="text-align:center;color:var(--text-secondary)">Нет данных за год</div>';
     return;
   }
@@ -3069,9 +3070,9 @@ function renderPlanTable(data) {
       <div class="card-title" style="margin-bottom:12px">${b}</div>
       <div class="table-container" style="overflow-x:auto">
       <table class="data-table" style="min-width:0">
-        <thead><tr><th>Месяц</th><th class="num">План</th><th class="num">Факт</th><th class="num">%</th></tr></thead>
+        <thead><tr><th>Неделя</th><th class="num">План</th><th class="num">Факт</th><th class="num">%</th></tr></thead>
         <tbody>`;
-    for (const m of data.months) {
+    for (const m of rows) {
       const c = m.buckets[b] || { plan: 0, fact: 0, pct: null };
       const pct = (c.pct === null || c.pct === undefined) ? '—' : c.pct + '%';
       let color = 'var(--text)';
@@ -3276,6 +3277,7 @@ const HELP_CONTENT = {
 
       <h4>3. Внутри каждой секции</h4>
       <ul>
+        <li>строка <code>Неделя</code> — по столбцам номер недели (1, 1, 1, 2, 2 …). Сравнение идёт <b>по неделям</b> именно из этой строки</li>
         <li>строка <code>Торговое предприятие</code> — по столбцам <b>даты по дням</b> в формате <code>ДД.ММ.ГГГГ</code> (01.01.2026, 02.01.2026 …)</li>
         <li>строки филиалов — в первом столбце <b>точное название филиала, как в приложении</b> (регистр и лишние пробелы не важны, но текст должен совпадать), дальше по дням — <b>план в количестве заказов</b> (целые числа)</li>
         <li>строка <code>Итого</code> — необязательна, мы её игнорируем</li>
@@ -3284,11 +3286,12 @@ const HELP_CONTENT = {
       <div class="warn">⚠️ Главное — название филиала в таблице должно совпадать с названием в приложении (⚙️ → филиалы). Не совпало — план для него будет пустым.</div>
 
       <h4>4. Пример</h4>
-      <p>Месяцы считаем сами из дат. Схема:</p>
+      <p>Дни сворачиваем в недели по строке <code>Неделя</code>. Схема:</p>
       <p><code>Доставка</code><br>
-      <code>Торговое предприятие | 01.01.2026 | 02.01.2026 | …</code><br>
-      <code>Астана, ул. Бейбітшілік 71 | 6 | 14 | …</code><br>
-      <code>Итого | 107 | 144 | …</code></p>
+      <code>Неделя | 1 | 1 | 1 | 2 | …</code><br>
+      <code>Торговое предприятие | 01.01.2026 | 02.01.2026 | 03.01.2026 | 05.01.2026 | …</code><br>
+      <code>Астана, ул. Бейбітшілік 71 | 6 | 14 | 10 | 8 | …</code><br>
+      <code>Итого | 107 | 144 | 129 | … | …</code></p>
       <p>Дальше секции <code>Зал / вынос</code> и <code>Агрегаторы</code> — той же структурой.</p>
     `
   }
