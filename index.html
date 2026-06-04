@@ -181,6 +181,19 @@ html, body {
 .subtab { padding: 6px 12px; border-radius: 16px; font-size: 13px; cursor: pointer; color: var(--text-secondary); }
 .subtab.active { background: var(--bg-card); border: 1px solid var(--card-border); color: var(--text); font-weight: 600; }
 
+/* План: недельные карточки */
+.plan-week { background: var(--bg-card); border: 1px solid var(--card-border); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+.plan-week-h { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 12px; }
+.plan-line { margin-bottom: 12px; }
+.plan-line:last-child { margin-bottom: 0; }
+.plan-line-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.plan-cat { font-size: 12px; color: var(--text-secondary); }
+.plan-right { display: flex; align-items: center; gap: 8px; }
+.plan-nums { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.plan-pct { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 7px; font-variant-numeric: tabular-nums; min-width: 38px; text-align: center; }
+.plan-bar { height: 6px; border-radius: 3px; background: var(--bg-secondary); overflow: hidden; }
+.plan-bar > i { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
+
 /* Horizontal bar chart */
 .hbar-item { display: flex; align-items: center; margin-bottom: 10px; gap: 10px; }
 .hbar-label { width: 120px; font-size: 13px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; color: var(--text-secondary); }
@@ -3057,34 +3070,42 @@ async function savePlanLink() {
   } catch(e) { console.error(e); showToast('Ошибка сохранения'); }
 }
 
+function planPctColor(pct) {
+  if (pct == null) return '#6a6a6a';
+  if (pct >= 100) return '#34C759';
+  if (pct >= 90) return '#FF9F0A';
+  return '#FF3B30';
+}
+
 function renderPlanTable(data) {
   const wrap = document.getElementById('plan-table-wrap');
   const rows = data.rows || data.months || [];
   if (!rows.length) {
-    wrap.innerHTML = '<div class="card" style="text-align:center;color:var(--text-secondary)">Нет данных за год</div>';
+    wrap.innerHTML = '<div class="card" style="text-align:center;color:var(--text-secondary)">Плана в таблице нет</div>';
     return;
   }
-  let html = '';
-  for (const b of data.buckets) {
-    html += `<div class="card" style="margin-bottom:12px">
-      <div class="card-title" style="margin-bottom:12px">${b}</div>
-      <div class="table-container" style="overflow-x:auto">
-      <table class="data-table" style="min-width:0">
-        <thead><tr><th>Неделя</th><th class="num">План</th><th class="num">Факт</th><th class="num">%</th></tr></thead>
-        <tbody>`;
-    for (const m of rows) {
-      const c = m.buckets[b] || { plan: 0, fact: 0, pct: null };
-      const pct = (c.pct === null || c.pct === undefined) ? '—' : c.pct + '%';
-      let color = 'var(--text)';
-      if (c.pct !== null && c.pct !== undefined) {
-        color = c.pct >= 100 ? '#34c759' : (c.pct >= 90 ? 'var(--text)' : '#ff3b30');
-      }
-      html += `<tr><td class="name">${m.label}</td>`
-        + `<td class="num">${(c.plan || 0).toLocaleString('ru')}</td>`
-        + `<td class="num">${(c.fact || 0).toLocaleString('ru')}</td>`
-        + `<td class="num" style="color:${color};font-weight:600">${pct}</td></tr>`;
+  let html = '<div style="font-size:11px;color:var(--text-secondary);margin:0 2px 10px">формат: <b>факт / план</b> · бар и % — выполнение</div>';
+  for (const w of rows) {
+    html += `<div class="plan-week"><div class="plan-week-h">${w.label}</div>`;
+    for (const b of data.buckets) {
+      const c = w.buckets[b] || { plan: 0, fact: 0, pct: null };
+      const noFact = !c.fact;                       // факта ещё нет (будущая неделя)
+      const showPct = (c.pct != null) && !noFact;
+      const col = showPct ? planPctColor(c.pct) : '#6a6a6a';
+      const fill = showPct ? Math.min(c.pct, 100) : 0;
+      const pctTxt = showPct ? c.pct + '%' : '—';
+      html += `<div class="plan-line">
+        <div class="plan-line-top">
+          <span class="plan-cat">${b}</span>
+          <span class="plan-right">
+            <span class="plan-nums">${(c.fact || 0).toLocaleString('ru')} / ${(c.plan || 0).toLocaleString('ru')}</span>
+            <span class="plan-pct" style="color:${col};background:${col}22">${pctTxt}</span>
+          </span>
+        </div>
+        <div class="plan-bar"><i style="width:${fill}%;background:${col}"></i></div>
+      </div>`;
     }
-    html += `</tbody></table></div></div>`;
+    html += `</div>`;
   }
   wrap.innerHTML = html;
 }
