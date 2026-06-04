@@ -35,6 +35,7 @@ from database import (
     save_pending_invoice, get_pending_invoice, get_pending_invoice_by_chat,
     delete_pending_invoice_by_chat,
     get_plan_url, set_plan_url,
+    get_client_url, set_client_url,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -1707,6 +1708,110 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
         "rows": rows_out,
         "error": plan_error,
     }
+
+
+# ============ КЛИЕНТЫ / ЛОЯЛЬНОСТЬ (Продажи → суб-вкладка «Клиенты») ============
+# Клиент вставляет ссылку на Google-таблицу заказов (строка = заказ, колонки
+# «Торговое предприятие» + «Телефон клиента»). Считаем заказы на номер по филиалу →
+# сегменты: уникальные (1 заказ), лояльные (2+), VIP (10+), % повторных.
+
+def _norm_phone(s: str) -> Optional[str]:
+    s = (s or "").split(",")[0]            # первый телефон, если их несколько
+    digits = re.sub(r"\D", "", s)
+    return digits[-10:] if len(digits) >= 10 else None
+
+
+def _parse_clients_csv(text: str, org_name: str) -> Dict[str, int]:
+    """Считает число заказов на телефон для филиала → агрегаты сегментов."""
+    target = _norm_branch(org_name)
+    rows = list(csv.reader(text.splitlines()))
+    if not rows:
+        return {}
+    header = rows[0]
+
+    def col_idx(*names):
+        for i, h in enumerate(header):
+            hn = h.strip().lower()
+            if any(n in hn for n in names):
+                return i
+        return -1
+
+    i_branch = col_idx("торговое предприятие", "предприятие", "филиал")
+    i_phone = col_idx("телефон")
+    if i_branch < 0 or i_phone < 0:
+        return {}
+    orders: Dict[str, int] = {}
+    for r in rows[1:]:
+        if len(r) <= max(i_branch, i_phone):
+            continue
+        if _norm_branch(r[i_branch]) != target:
+            continue
+        p = _norm_phone(r[i_phone])
+        if not p:
+            continue
+        orders[p] = orders.get(p, 0) + 1
+    total = len(orders)
+    return {
+        "total": total,
+        "unique": sum(1 for v in orders.values() if v == 1),
+        "loyal": sum(1 for v in orders.values() if v >= 2),
+        "vip": sum(1 for v in orders.values() if v >= 10),
+    }
+
+
+@app.post("/api/clients/{org_id}")
+async def clients_set_link(org_id: str, payload: Dict[str, Any],
+                           user: Dict = Depends(get_current_user)):
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"ok": False, "error": "demo"}
+    real_org = _get_org_id(org_id, user)
+    url = (payload.get("url") or "").strip()
+    if url and not url.lower().startswith("http"):
+        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с http")
+    set_client_url(real_org, url)
+    return {"ok": True, "url": url}
+
+
+@app.get("/api/clients/{org_id}")
+async def clients_loyalty(org_id: str, user: Dict = Depends(get_current_user)):
+    """Сегменты лояльности по филиалу из таблицы заказов (по телефонам)."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"has_link": False, "segments": None}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    org_name = info.get("org_name", "")
+    url = get_client_url(real_org)
+    if not url:
+        return {"has_link": False, "segments": None, "url": ""}
+
+    error = None
+    seg: Dict[str, int] = {}
+    try:
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as cli:
+            resp = await cli.get(_gsheet_csv_url(url))
+        if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
+            seg = _parse_clients_csv(resp.text, org_name)
+            if not seg.get("total"):
+                error = (f"Для филиала «{org_name}» в таблице нет данных. Проверь колонки "
+                         f"«Торговое предприятие» / «Телефон клиента» и что филиал совпадает.")
+        else:
+            error = "Не удалось прочитать таблицу — открой доступ «по ссылке» и проверь, что это Google-таблица"
+    except Exception as e:
+        logger.warning(f"[clients] fetch failed org={real_org}: {e}")
+        error = "Таблица недоступна по ссылке"
+
+    segments = None
+    if seg.get("total"):
+        total = seg["total"]
+        pct = lambda n: round(n / total * 100) if total else 0
+        segments = {
+            "total": total,
+            "unique": {"count": seg["unique"], "pct": pct(seg["unique"])},
+            "loyal": {"count": seg["loyal"], "pct": pct(seg["loyal"])},
+            "vip": {"count": seg["vip"], "pct": pct(seg["vip"])},
+            "repeat_pct": pct(seg["loyal"]),
+        }
+    return {"has_link": True, "url": url, "segments": segments, "error": error}
 
 
 @app.get("/api/olap/{org_id}")
