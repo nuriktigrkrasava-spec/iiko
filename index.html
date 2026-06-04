@@ -894,6 +894,11 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="icon">⚠️</div>
       <div class="content"><h3>Демо-режим</h3><p>Данные примерные</p></div>
     </div>
+    <div class="subtabs" style="margin-top:8px">
+      <div class="subtab active" id="staff-sub-waiters" onclick="setStaffSubtab('waiters', this)">Официанты</div>
+      <div class="subtab" id="staff-sub-couriers" onclick="setStaffSubtab('couriers', this)">Курьеры</div>
+    </div>
+    <div id="staff-view-waiters">
     <!-- Сейчас на смене -->
     <div class="card" style="margin-top:16px;" id="shifts-card">
       <div class="card-header">
@@ -935,6 +940,27 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           </thead>
           <tbody></tbody>
         </table>
+      </div>
+    </div>
+    </div><!-- /staff-view-waiters -->
+
+    <div id="staff-view-couriers" style="display:none">
+      <div class="summary-row" style="margin-top:16px">
+        <div class="summary-card"><div class="summary-label">Доставок</div><div class="summary-value" id="cour-total" style="font-size:18px">—</div></div>
+        <div class="summary-card"><div class="summary-label">Ср. путь</div><div class="summary-value" id="cour-way" style="font-size:18px">—</div></div>
+        <div class="summary-card"><div class="summary-label">% опозд</div><div class="summary-value" id="cour-late" style="font-size:18px">—</div></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div class="card-title" style="margin-bottom:6px">Курьеры (30 дней)</div>
+        <div id="couriers-status" style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"></div>
+        <div class="table-container">
+          <table class="data-table" id="couriers-table" style="min-width:0">
+            <thead><tr>
+              <th>Курьер</th><th class="num">Дост.</th><th class="num">Путь</th><th class="num">Опозд</th><th class="num">% опозд</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
@@ -2510,6 +2536,7 @@ function toggleCompanion(i) {
 // ============ STAFF ============
 async function loadStaff() {
   if (!state.restaurant) return;
+  _couriersLoaded = false;  // курьеры перечитаются при открытии суб-вкладки
   const orgId = state.restaurant.organization_id;
 
   try {
@@ -2538,6 +2565,47 @@ async function loadStaff() {
         `).join('')
       : '<div style="color:var(--text-secondary);font-size:13px;text-align:center;padding:12px">Нет активных сотрудников сегодня</div>';
   } catch(e) { console.error(e); }
+}
+
+// ---- Курьеры (суб-вкладка в Персонале) ----
+let _couriersLoaded = false;
+
+function setStaffSubtab(view, el) {
+  document.getElementById('staff-sub-waiters').classList.toggle('active', view === 'waiters');
+  document.getElementById('staff-sub-couriers').classList.toggle('active', view === 'couriers');
+  document.getElementById('staff-view-waiters').style.display = view === 'waiters' ? '' : 'none';
+  document.getElementById('staff-view-couriers').style.display = view === 'couriers' ? '' : 'none';
+  if (view === 'couriers' && !_couriersLoaded) loadCouriers();
+}
+
+async function loadCouriers() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const status = document.getElementById('couriers-status');
+  const tb = document.querySelector('#couriers-table tbody');
+  status.textContent = 'Загрузка...';
+  tb.innerHTML = '';
+  try {
+    const data = await apiGet(withOrgIds(`/api/couriers/${orgId}?period=month`));
+    _couriersLoaded = true;
+    const s = data.summary || {};
+    document.getElementById('cour-total').textContent = s.deliveries != null ? s.deliveries.toLocaleString('ru') : '—';
+    document.getElementById('cour-way').textContent   = s.avg_way   != null ? s.avg_way + ' мин' : '—';
+    document.getElementById('cour-late').textContent  = s.late_pct  != null ? s.late_pct + '%' : '—';
+    const list = data.couriers || [];
+    if (!list.length) { status.textContent = 'Нет данных по доставкам за период'; return; }
+    status.textContent = `${list.length} курьеров · ${(s.deliveries || 0).toLocaleString('ru')} доставок · ср. путь ${s.avg_way} мин`;
+    tb.innerHTML = list.map(c => {
+      const lateCol = c.late_pct >= 50 ? '#FF3B30' : c.late_pct >= 25 ? '#FF9F0A' : '#34C759';
+      return `<tr>
+        <td class="name">${escHtml(c.name)}</td>
+        <td class="num">${c.deliveries}</td>
+        <td class="num">${c.avg_way} мин</td>
+        <td class="num">${c.avg_delay} мин</td>
+        <td class="num" style="color:${lateCol};font-weight:600">${c.late_pct}%</td>
+      </tr>`;
+    }).join('');
+  } catch(e) { console.error(e); status.textContent = 'Ошибка загрузки курьеров'; }
 }
 
 function renderStaffTable() {
