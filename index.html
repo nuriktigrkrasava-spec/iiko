@@ -1229,9 +1229,9 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="scroll-container">
       <div style="margin-top:16px">
         <div class="card" style="margin-bottom:12px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
             <div class="card-title">Ссылка на план (Google Таблица)</div>
-            <span onclick="openHelp('plan')" style="font-size:12px;color:var(--blue);cursor:pointer;white-space:nowrap">📋 Формат таблицы</span>
+            <button onclick="openHelp('plan')" aria-label="Какая таблица нужна" style="flex-shrink:0;width:30px;height:30px;border-radius:50%;background:var(--bg-card);border:1px solid var(--card-border);color:var(--text);font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center">?</button>
           </div>
           <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">Открой доступ к таблице «по ссылке». Сравниваем по количеству заказов.</p>
           <input type="text" class="input-field" id="plan-url-input" placeholder="https://docs.google.com/spreadsheets/..." style="margin-bottom:8px">
