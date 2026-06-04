@@ -101,6 +101,12 @@ def init_db():
         url TEXT,
         updated_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS client_links (
+        organization_id TEXT PRIMARY KEY,
+        url TEXT,
+        updated_at TEXT
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -450,6 +456,25 @@ def set_plan_url(organization_id: str, url: str):
     conn = get_db()
     conn.execute(
         "INSERT INTO plan_links (organization_id, url, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(organization_id) DO UPDATE SET url = excluded.url, updated_at = excluded.updated_at",
+        (organization_id, url, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_client_url(organization_id: str) -> Optional[str]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT url FROM client_links WHERE organization_id = ?", (organization_id,)
+    ).fetchone()
+    conn.close()
+    return row["url"] if row else None
+
+def set_client_url(organization_id: str, url: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO client_links (organization_id, url, updated_at) VALUES (?, ?, ?) "
         "ON CONFLICT(organization_id) DO UPDATE SET url = excluded.url, updated_at = excluded.updated_at",
         (organization_id, url, datetime.now().isoformat())
     )
