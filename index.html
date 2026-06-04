@@ -194,6 +194,13 @@ html, body {
 .plan-bar { height: 6px; border-radius: 3px; background: var(--bg-secondary); overflow: hidden; }
 .plan-bar > i { display: block; height: 100%; border-radius: 3px; transition: width .3s ease; }
 
+/* Клиенты: карточки сегментов */
+.seg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.seg-card { background: var(--bg-card); border: 1px solid var(--card-border); border-radius: 14px; padding: 14px; }
+.seg-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+.seg-value { font-size: 26px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.seg-sub { font-size: 11px; color: var(--text-secondary); margin-top: 6px; }
+
 /* Horizontal bar chart */
 .hbar-item { display: flex; align-items: center; margin-bottom: 10px; gap: 10px; }
 .hbar-label { width: 120px; font-size: 13px; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; color: var(--text-secondary); }
@@ -714,7 +721,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   </div>
   <div class="tabs" id="sales-tabs">
     <div class="tab active" onclick="setSalesTab('general', this)">Общие</div>
-    <div class="tab" onclick="setSalesTab('engineering', this)">Engineering</div>
+    <div class="tab" onclick="setSalesTab('clients', this)">Клиенты</div>
     <div class="tab" onclick="setSalesTab('abc', this)">ABC</div>
     <div class="tab" onclick="setSalesTab('cancels', this)">Отмены</div>
     <div class="tab" onclick="setSalesTab('cart', this)">Корзина</div>
@@ -756,46 +763,19 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <div class="legend" id="cat-legend"></div>
       </div>
     </div>
-    <!-- Engineering tab -->
-    <div id="sales-engineering" style="display:none">
+    <!-- Клиенты (лояльность) tab -->
+    <div id="sales-clients" style="display:none">
       <div class="card" style="margin-top:16px;">
-        <div class="card-header">
-          <div class="card-title">Матрица меню</div>
-          <button class="excel-btn" onclick="exportReport('engineering')">↓ Excel</button>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
+          <div class="card-title">Лояльность клиентов</div>
+          <button onclick="openHelp('clients')" aria-label="Какая таблица нужна" style="flex-shrink:0;width:30px;height:30px;border-radius:50%;background:var(--bg-card);border:1px solid var(--card-border);color:var(--text);font-size:16px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center">?</button>
         </div>
-        <div id="eng-note" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:8px;padding:8px;background:var(--bg-secondary);border-radius:8px;">⚠️ Себестоимость не заполнена — маржа рассчитана условно. Для точного анализа заполните техкарты в iiko.</div>
-        <div class="quad-grid">
-          <div class="quad-card stars">
-            <div class="quad-label">⭐ Звёзды</div>
-            <div class="quad-sub">Высокая выручка + высокая маржа</div>
-            <div id="eng-stars"></div>
-          </div>
-          <div class="quad-card horses">
-            <div class="quad-label">🐴 Лошади</div>
-            <div class="quad-sub">Высокая выручка + низкая маржа</div>
-            <div id="eng-horses"></div>
-          </div>
-          <div class="quad-card puzzles">
-            <div class="quad-label">❓ Загадки</div>
-            <div class="quad-sub">Низкая выручка + высокая маржа</div>
-            <div id="eng-puzzles"></div>
-          </div>
-          <div class="quad-card dogs">
-            <div class="quad-label">🐶 Собаки</div>
-            <div class="quad-sub">Низкая выручка + низкая маржа</div>
-            <div id="eng-dogs"></div>
-          </div>
-        </div>
+        <p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">Ссылка на таблицу заказов (по филиалам, с телефонами). Считаем заказы на номер для выбранного филиала.</p>
+        <input type="text" class="input-field" id="clients-url-input" placeholder="https://docs.google.com/spreadsheets/..." style="margin-bottom:8px">
+        <button class="btn-full btn-black" onclick="saveClientsLink()">Сохранить</button>
       </div>
-      <div class="card">
-        <div class="card-title" style="margin-bottom:12px;">Все позиции</div>
-        <div class="table-container">
-          <table class="data-table" id="eng-table">
-            <thead><tr><th>Блюдо</th><th>Выручка</th><th>Маржа%</th><th>Кол-во</th><th>Тип</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
+      <div id="clients-status" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px"></div>
+      <div id="clients-cards"></div>
     </div>
 
     <!-- ABC tab -->
@@ -2253,17 +2233,65 @@ async function setSalesTab(tab, el) {
   state.salesTab = tab;
   document.querySelectorAll('#sales-tabs .tab').forEach(t => t.classList.remove('active'));
   if (el) el.classList.add('active');
-  ['general', 'engineering', 'abc', 'cancels', 'cart'].forEach(t => {
+  ['general', 'clients', 'abc', 'cancels', 'cart'].forEach(t => {
     document.getElementById('sales-' + t).style.display = t === tab ? 'block' : 'none';
   });
   // Если salesData ещё не загружен — ждём
-  if ((tab === 'engineering' || tab === 'abc') && (!state.salesData?.top_dishes?.length)) {
+  if (tab === 'abc' && (!state.salesData?.top_dishes?.length)) {
     await loadSales();
   }
-  if (tab === 'engineering') renderEngineering();
+  if (tab === 'clients') loadClients();
   if (tab === 'abc') renderABC();
   if (tab === 'cancels') renderCancels().catch(console.error);
   if (tab === 'cart') renderCart().catch(console.error);
+}
+
+// ---- Клиенты / лояльность (суб-вкладка Продаж) ----
+async function loadClients() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const status = document.getElementById('clients-status');
+  const wrap = document.getElementById('clients-cards');
+  status.textContent = 'Загрузка...';
+  wrap.innerHTML = '';
+  try {
+    const data = await apiGet(`/api/clients/${orgId}`);
+    if (data.url) document.getElementById('clients-url-input').value = data.url;
+    if (!data.has_link) { status.textContent = 'Вставь ссылку на таблицу заказов и нажми «Сохранить».'; return; }
+    if (data.error || !data.segments) { status.textContent = '⚠️ ' + (data.error || 'Нет данных'); return; }
+    renderClients(data.segments);
+    status.textContent = `Всего клиентов: ${data.segments.total.toLocaleString('ru')}`;
+  } catch(e) { console.error(e); status.textContent = 'Ошибка загрузки клиентов'; }
+}
+
+async function saveClientsLink() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const url = document.getElementById('clients-url-input').value.trim();
+  try {
+    const r = await apiPost(`/api/clients/${orgId}`, { url });
+    if (r.error) { showToast('Не сохранено: ' + r.error); return; }
+    showToast('Ссылка сохранена');
+    loadClients();
+  } catch(e) { console.error(e); showToast('Ошибка сохранения'); }
+}
+
+function renderClients(s) {
+  const wrap = document.getElementById('clients-cards');
+  if (!s) { wrap.innerHTML = ''; return; }
+  const n = v => (v || 0).toLocaleString('ru');
+  const card = (label, value, sub, color) => `
+    <div class="seg-card">
+      <div class="seg-label">${label}</div>
+      <div class="seg-value" style="color:${color}">${value}</div>
+      <div class="seg-sub">${sub}</div>
+    </div>`;
+  wrap.innerHTML = `<div class="seg-grid">
+    ${card('Уникальные гости', n(s.unique.count), s.unique.pct + '% · 1 заказ', 'var(--text)')}
+    ${card('Лояльные', n(s.loyal.count), s.loyal.pct + '% · 2+ заказа', '#34C759')}
+    ${card('VIP', n(s.vip.count), s.vip.pct + '% · 10+ заказов', '#5B9CF6')}
+    ${card('Повторные', s.repeat_pct + '%', 'клиентов с 2+ заказами', '#FF9F0A')}
+  </div>`;
 }
 
 function renderCategoriesChart(cats) {
@@ -3351,6 +3379,7 @@ const HELP_CONTENT = {
   plan: {
     title: 'Формат таблицы плана',
     body: `
+      <p><a href="https://docs.google.com/spreadsheets/d/1XtqfG2gCejfRwLdOCPQQXB--PNtHxLf_/copy" target="_blank"><b>📋 Сделать копию шаблона плана</b></a> → заполни → вставь ссылку на свою копию.</p>
       <p>Из таблицы берём <b>только ПЛАН</b>, факт тянем из iiko. Сравниваем <b>по неделям</b>, по количеству заказов.</p>
 
       <h4>1. Доступ</h4>
@@ -3365,20 +3394,50 @@ const HELP_CONTENT = {
       </ul>
       <p>Строки <code>… факт</code> и <code>Выполнение плана, %</code> мы НЕ читаем — факт и % считаем сами из iiko.</p>
 
-      <h4>3. Что нужно в таблице</h4>
+      <h4>3. Условия (заполняй копию шаблона)</h4>
       <ul>
-        <li>строка <code>Неделя</code> (вверху) — номера недель по столбцам: по ней делим на недели</li>
-        <li>строка <code>Торговое предприятие</code> — даты по дням <code>ДД.ММ.ГГГГ</code></li>
-        <li>блок филиала начинается строкой с его <b>именем</b> (короткое имя должно входить в название филиала в приложении, напр. «Бейбітшілік»), внутри — строки <code>Доставка план</code> / <code>Зал / вынос план</code> / <code>Агрегаторы план</code> с планом по дням (целые числа заказов)</li>
+        <li>переименуй заглушки <code>Ваш филиал N</code> в реальные филиалы — как в приложении (⚙️ → филиалы)</li>
+        <li>заполни строку <code>Неделя</code> — номера недель по столбцам (по ней делим на недели)</li>
+        <li>заполни строку <code>Торговое предприятие</code> — даты по дням <code>ДД.ММ.ГГГГ</code></li>
+        <li>план вписывай <b>в блоках по филиалам снизу</b>: у каждого филиала строки <code>Доставка план</code> / <code>Зал / вынос план</code> / <code>Агрегаторы план</code> — целые числа заказов по дням</li>
       </ul>
+      <p>Читаем <b>только</b> строки <code>«… план»</code> в блоках по филиалам. Строки <code>«… факт»</code> и <code>«Выполнение плана, %»</code> не трогаем — факт и % считаем из iiko.</p>
 
-      <div class="warn">⚠️ Имя филиала в таблице должно совпадать (входить) в название филиала в приложении (⚙️ → филиалы). Не совпало — план будет пустым.</div>
+      <div class="warn">⚠️ Имя филиала в таблице должно совпадать (входить) в название филиала в приложении. Не совпало — план будет пустым. Структуру шаблона (строки и их порядок) не меняй.</div>
 
       <h4>4. Корзины</h4>
       <ul>
         <li><code>Доставка</code> = своя доставка + сайт-доставка</li>
         <li><code>Зал / вынос</code> = зал, самовывоз, сайт-самовывоз</li>
         <li><code>Агрегаторы</code> = Wolt, Яндекс Еда, Glovo, Chocofood и любые площадки</li>
+      </ul>
+    `
+  },
+  clients: {
+    title: 'Формат таблицы клиентов',
+    body: `
+      <p><a href="https://docs.google.com/spreadsheets/d/1Sh4dd7niXLMCN4dSZHV5omdW8gJeRv_W/copy" target="_blank"><b>📋 Сделать копию шаблона</b></a> → заполни → вставь ссылку на свою копию.</p>
+      <p>Анализ лояльности строится из <b>таблицы заказов</b> по ссылке. Считаем число заказов на телефон для выбранного филиала.</p>
+
+      <h4>1. Доступ</h4>
+      <p>Открой доступ к Google-таблице: «Все, у кого есть ссылка» → <b>Читатель</b>. Закрытую таблицу прочитать нельзя.</p>
+
+      <h4>2. Что нужно в таблице</h4>
+      <p>Первая строка — заголовки. Обязательны две колонки:</p>
+      <ul>
+        <li><code>Торговое предприятие</code> — филиал (как в приложении, ⚙️ → филиалы)</li>
+        <li><code>Телефон клиента</code> — номер (можно несколько через запятую — берём первый)</li>
+      </ul>
+      <p><b>Одна строка = один заказ.</b> Сколько раз встречается номер у филиала — столько у клиента заказов. Остальные колонки (суммы, даты) не важны.</p>
+
+      <div class="warn">⚠️ Название филиала в таблице должно совпадать с названием в приложении. Не совпало — данных по нему не будет.</div>
+
+      <h4>3. Сегменты</h4>
+      <ul>
+        <li><b>Уникальные гости</b> — 1 заказ</li>
+        <li><b>Лояльные</b> — 2+ заказа</li>
+        <li><b>VIP</b> — 10+ заказов</li>
+        <li><b>Повторные</b> — доля клиентов с 2+ заказами (retention)</li>
       </ul>
     `
   }
