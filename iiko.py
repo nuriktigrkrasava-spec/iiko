@@ -557,6 +557,38 @@ class IikoWebClient:
 
         raise Exception("iikoWeb OLAP: не удалось получить данные.")
 
+    async def olap_couriers(self, org_id: str, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """DELIVERIES OLAP по курьерам (группировка курьер×опоздание).
+        Возвращает сырые строки; агрегацию (ср. путь, ср. опоздание, % опозданий)
+        делает вызывающий код. Самовывоз/не-курьеров отсекаем по имени там же."""
+        filters: Dict[str, Any] = {"OpenDate.Typed": self._date_filter(date_from, date_to)}
+        if org_id and org_id != "demo":
+            filters["Department"] = {"filterType": "IncludeValues", "values": [org_id]}
+        payload = {
+            "reportType": "DELIVERIES",
+            "buildSummary": "false",
+            "groupByRowFields": ["Delivery.Courier", "Delivery.Delay"],
+            "aggregateFields": ["UniqOrderId.OrdersCount", "Delivery.WayDurationSum"],
+            "filters": filters,
+        }
+        for attempt in range(2):
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/v2/reports/olap",
+                    params={"key": token}, json=payload
+                )
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                if not resp.is_success:
+                    import logging
+                    logging.getLogger(__name__).warning(f"iikoWeb DELIVERIES 400: {resp.text[:200]}")
+                    return []
+                raw = resp.json()
+                return raw if isinstance(raw, list) else raw.get("data", [])
+        return []
+
     async def get_organizations(self) -> List[Dict[str, Any]]:
         """Список торговых точек (DEPARTMENT) из iikoWeb."""
         import xml.etree.ElementTree as ET
@@ -1108,3 +1140,4 @@ class IikoWebClient:
                     "error": "iikoServer не принял setStatus ни на одном из путей "
                              "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
                              "другой эндпоинт — пришли точный URL из iiko-докуменации."}
+
