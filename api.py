@@ -817,6 +817,83 @@ async def shifts(org_id: str, user: Dict = Depends(get_current_user)):
         return {"staff": []}
 
 
+@app.get("/api/couriers/{org_id}")
+async def couriers(org_id: str, period: str = "month",
+                   from_: Optional[str] = Query(None, alias="from"),
+                   to: Optional[str] = Query(None),
+                   org_ids: Optional[str] = Query(None),
+                   user: Dict = Depends(get_current_user)):
+    """Аналитика курьеров: доставок, ср. время в пути, ср. опоздание, % опозданий.
+    Один DELIVERIES OLAP на филиал (курьер×опоздание), агрегируем по курьеру."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"couriers": [], "summary": {}}
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    if from_ and to:
+        date_from, date_to = get_period_dates("custom", from_, to)
+    else:
+        # по умолчанию — скользящие 30 дней (карточка обещает «30 дней»)
+        end = local_now().date()
+        date_from, date_to = (end - timedelta(days=30)).isoformat(), end.isoformat()
+
+    async def fetch_one(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        if not hasattr(client, "olap_couriers"):
+            return []
+        try:
+            return await client.olap_couriers(_olap_dept(real_org, info), date_from, date_to)
+        except Exception as e:
+            logger.warning(f"[couriers] {real_org}: {e}")
+            return []
+
+    per_org = await asyncio.gather(*(fetch_one(o) for o in orgs))
+    rows = [r for batch in per_org for r in batch]
+
+    agg: Dict[str, Dict[str, float]] = {}
+    for d in rows:
+        name = str(d.get("Delivery.Courier") or "").strip()
+        if not name or "амовывоз" in name.lower():  # отсекаем самовывоз/не-курьеров
+            continue
+        n = float(d.get("UniqOrderId.OrdersCount") or 0)
+        if n <= 0:
+            continue
+        delay = float(d.get("Delivery.Delay") or 0)
+        way = float(d.get("Delivery.WayDurationSum") or 0)
+        a = agg.setdefault(name, {"n": 0.0, "late": 0.0, "way": 0.0, "delaysum": 0.0})
+        a["n"] += n
+        a["way"] += way
+        a["delaysum"] += delay * n
+        if delay > 0:
+            a["late"] += n
+
+    couriers_list = []
+    tot_n = tot_way = tot_delaysum = tot_late = 0.0
+    for name, a in agg.items():
+        n = a["n"]
+        if n < 1:
+            continue
+        couriers_list.append({
+            "name": name,
+            "deliveries": int(n),
+            "avg_way": round(a["way"] / n),
+            "avg_delay": round(a["delaysum"] / n),
+            "late_pct": round(a["late"] / n * 100),
+        })
+        tot_n += n; tot_way += a["way"]; tot_delaysum += a["delaysum"]; tot_late += a["late"]
+    couriers_list.sort(key=lambda x: x["deliveries"], reverse=True)
+
+    summary = {}
+    if tot_n:
+        summary = {
+            "deliveries": int(tot_n),
+            "couriers": len(couriers_list),
+            "avg_way": round(tot_way / tot_n),
+            "avg_delay": round(tot_delaysum / tot_n),
+            "late_pct": round(tot_late / tot_n * 100),
+        }
+    return {"couriers": couriers_list, "summary": summary}
+
+
 @app.get("/api/staff/{org_id}")
 async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
