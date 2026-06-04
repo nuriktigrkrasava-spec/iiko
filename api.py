@@ -2043,8 +2043,8 @@ def _section_photo_url(filename: Optional[str]) -> Optional[str]:
 
 
 def _faq_menu_kb() -> dict:
-    rows = [[{"text": label, "callback_data": f"info:faq:{key}"}]
-            for key, (label, _) in FAQ_SECTIONS.items()]
+    rows = [[{"text": data["label"], "callback_data": f"info:faq:{key}"}]
+            for key, data in FAQ_SECTIONS.items()]
     rows.append([{"text": "← В начало", "callback_data": "info:start"}])
     return {"inline_keyboard": rows}
 
