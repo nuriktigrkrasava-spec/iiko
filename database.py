@@ -95,6 +95,12 @@ def init_db():
         data TEXT,
         updated_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS plan_links (
+        organization_id TEXT PRIMARY KEY,
+        url TEXT,
+        updated_at TEXT
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -429,3 +435,23 @@ def get_price_history(telegram_id: int, days: int = 90) -> List[Dict[str, Any]]:
             })
     conn.close()
     return out
+
+
+# ── План продаж (ссылка на Google-таблицу с планом по филиалу) ──────────────
+def get_plan_url(organization_id: str) -> Optional[str]:
+    conn = get_db()
+    row = conn.execute(
+        "SELECT url FROM plan_links WHERE organization_id = ?", (organization_id,)
+    ).fetchone()
+    conn.close()
+    return row["url"] if row else None
+
+def set_plan_url(organization_id: str, url: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO plan_links (organization_id, url, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(organization_id) DO UPDATE SET url = excluded.url, updated_at = excluded.updated_at",
+        (organization_id, url, datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
