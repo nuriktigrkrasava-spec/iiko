@@ -2451,6 +2451,7 @@ def _start_kb() -> dict:
             [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
             [{"text": "📖 FAQ / Инструкция", "callback_data": "info:faq"}],
             [{"text": "🔧 Как настроить iiko Server", "callback_data": "info:setup"}],
+            [{"text": "💬 Связаться / Сообщить об ошибке", "url": "https://t.me/wiregroup"}],
         ]
     }
 
