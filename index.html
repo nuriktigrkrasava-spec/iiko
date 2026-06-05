@@ -49,6 +49,12 @@ html, body {
   font-size: 14px; color: #6a6a6a; margin-top: 8px;
   animation: splashFadeUp 0.6s ease 0.15s forwards; opacity: 0;
 }
+#splash .splash-by {
+  position: absolute; bottom: 40px;
+  font-size: 13px; color: #6a6a6a; letter-spacing: 0.4px;
+  animation: splashFadeUp 0.7s ease 0.45s forwards; opacity: 0;
+}
+#splash .splash-by b { color: #f0ece4; font-weight: 600; }
 @keyframes splashFadeUp {
   from { opacity: 0; transform: translateY(16px); }
   to { opacity: 1; transform: translateY(0); }
@@ -551,6 +557,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 <div id="splash">
   <div class="splash-title">iiko Analytics</div>
   <div class="splash-sub">Аналитика ресторана</div>
+  <div class="splash-by">by <b>wiregroup</b></div>
 </div>
 
 <!-- Onboarding -->
@@ -1353,6 +1360,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   <div class="modal-sheet">
     <div class="modal-title">Настройки</div>
     <div class="modal-item" onclick="addRestaurant()">+ Добавить ресторан</div>
+    <div class="modal-item" onclick="contactSupport()">💬 Связаться / Сообщить об ошибке</div>
     <div class="modal-item danger" onclick="logout()">Выйти</div>
     <div class="modal-item" onclick="closeSettingsDirect()">Закрыть</div>
   </div>
@@ -1363,7 +1371,10 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   <div class="modal-sheet">
     <div class="modal-title" id="help-title">Помощь</div>
     <div class="help-content" id="help-body"></div>
-    <button class="btn-full btn-black" style="margin-top:16px" onclick="closeHelp()">Понятно</button>
+    <div style="text-align:center;margin-top:14px">
+      <span onclick="contactSupport()" style="font-size:13px;color:var(--blue);cursor:pointer">💬 Связаться / Сообщить об ошибке</span>
+    </div>
+    <button class="btn-full btn-black" style="margin-top:12px" onclick="closeHelp()">Понятно</button>
   </div>
 </div>
 
@@ -3481,6 +3492,15 @@ function openHelp(topic) {
 
 function closeHelp() {
   document.getElementById('help-modal').classList.remove('active');
+}
+
+// ============ ПОДДЕРЖКА ============
+function contactSupport() {
+  haptic();
+  const url = 'https://t.me/wiregroup';
+  const tg = window.Telegram?.WebApp;
+  if (tg && tg.openTelegramLink) tg.openTelegramLink(url);
+  else window.open(url, '_blank');
 }
 
 // ============ SETTINGS ============
