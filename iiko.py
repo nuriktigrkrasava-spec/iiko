@@ -589,6 +589,37 @@ class IikoWebClient:
                 return raw if isinstance(raw, list) else raw.get("data", [])
         return []
 
+    async def olap_clients(self, org_id: str, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """DELIVERIES OLAP по телефону клиента: заказов + выручка на номер.
+        Для вкладки «Клиенты» (лояльность напрямую из iiko, без ручной таблицы)."""
+        filters: Dict[str, Any] = {"OpenDate.Typed": self._date_filter(date_from, date_to)}
+        if org_id and org_id != "demo":
+            filters["Department"] = {"filterType": "IncludeValues", "values": [org_id]}
+        payload = {
+            "reportType": "DELIVERIES",
+            "buildSummary": "false",
+            "groupByRowFields": ["Delivery.CustomerPhone"],
+            "aggregateFields": ["UniqOrderId.OrdersCount", "DishDiscountSumInt"],
+            "filters": filters,
+        }
+        for attempt in range(2):
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/v2/reports/olap",
+                    params={"key": token}, json=payload
+                )
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                if not resp.is_success:
+                    import logging
+                    logging.getLogger(__name__).warning(f"iikoWeb DELIVERIES(clients) 400: {resp.text[:200]}")
+                    return []
+                raw = resp.json()
+                return raw if isinstance(raw, list) else raw.get("data", [])
+        return []
+
     async def get_organizations(self) -> List[Dict[str, Any]]:
         """Список торговых точек (DEPARTMENT) из iikoWeb."""
         import xml.etree.ElementTree as ET
