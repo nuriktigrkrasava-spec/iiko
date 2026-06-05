@@ -1711,18 +1711,52 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
 
 
 # ============ КЛИЕНТЫ / ЛОЯЛЬНОСТЬ (Продажи → суб-вкладка «Клиенты») ============
-# Клиент вставляет ссылку на Google-таблицу заказов (строка = заказ, колонки
-# «Торговое предприятие» + «Телефон клиента»). Считаем заказы на номер по филиалу →
-# сегменты: уникальные (1 заказ), лояльные (2+), VIP (10+), % повторных.
+# Два источника (тумблер на фронте):
+#   source=iiko  — напрямую из iiko (DELIVERIES по Delivery.CustomerPhone)
+#   source=table — из вставленной Google-таблицы заказов (колонки
+#                  «Торговое предприятие» + «Телефон клиента», опц. «Итого»)
+# Оба пути сводятся к agg {телефон: {orders, spend}} и общей сборке сегментов.
+
+def _mask_phone(p: str) -> str:
+    d = re.sub(r"\D", "", p or "")
+    if len(d) < 7:
+        return p or "—"
+    return f"+{d[:2]}…{d[-4:]}"
+
 
 def _norm_phone(s: str) -> Optional[str]:
-    s = (s or "").split(",")[0]            # первый телефон, если их несколько
-    digits = re.sub(r"\D", "", s)
-    return digits[-10:] if len(digits) >= 10 else None
+    s = (s or "").split(",")[0]
+    d = re.sub(r"\D", "", s)
+    return d[-10:] if len(d) >= 10 else None
 
 
-def _parse_clients_csv(text: str, org_name: str) -> Dict[str, int]:
-    """Считает число заказов на телефон для филиала → агрегаты сегментов."""
+def _clients_segments(agg: Dict[str, Dict[str, float]]):
+    """agg {phone: {orders, spend}} → (segments, top_vip)."""
+    total = len(agg)
+    if not total:
+        return None, []
+    unique = sum(1 for a in agg.values() if a["orders"] == 1)
+    loyal = sum(1 for a in agg.values() if a["orders"] >= 2)
+    vip = sum(1 for a in agg.values() if a["orders"] >= 10)
+    spend = sum(a["spend"] for a in agg.values())
+    pct = lambda x: round(x / total * 100) if total else 0
+    top = sorted(agg.items(), key=lambda kv: kv[1]["orders"], reverse=True)[:8]
+    top_vip = [{"phone": _mask_phone(ph), "orders": int(a["orders"]), "spend": round(a["spend"])}
+               for ph, a in top]
+    segments = {
+        "total": total,
+        "unique": {"count": unique, "pct": pct(unique)},
+        "loyal": {"count": loyal, "pct": pct(loyal)},
+        "vip": {"count": vip, "pct": pct(vip)},
+        "repeat_pct": pct(loyal),
+        "revenue": round(spend),
+        "ltv": round(spend / total) if total else 0,
+    }
+    return segments, top_vip
+
+
+def _parse_clients_csv(text: str, org_name: str) -> Dict[str, Dict[str, float]]:
+    """Из таблицы заказов: заказы и выручка на телефон для филиала → agg."""
     target = _norm_branch(org_name)
     rows = list(csv.reader(text.splitlines()))
     if not rows:
@@ -1732,15 +1766,16 @@ def _parse_clients_csv(text: str, org_name: str) -> Dict[str, int]:
     def col_idx(*names):
         for i, h in enumerate(header):
             hn = h.strip().lower()
-            if any(n in hn for n in names):
+            if any(nm in hn for nm in names):
                 return i
         return -1
 
     i_branch = col_idx("торговое предприятие", "предприятие", "филиал")
     i_phone = col_idx("телефон")
+    i_sum = col_idx("итого", "сумма")
     if i_branch < 0 or i_phone < 0:
         return {}
-    orders: Dict[str, int] = {}
+    agg: Dict[str, Dict[str, float]] = {}
     for r in rows[1:]:
         if len(r) <= max(i_branch, i_phone):
             continue
@@ -1749,19 +1784,21 @@ def _parse_clients_csv(text: str, org_name: str) -> Dict[str, int]:
         p = _norm_phone(r[i_phone])
         if not p:
             continue
-        orders[p] = orders.get(p, 0) + 1
-    total = len(orders)
-    return {
-        "total": total,
-        "unique": sum(1 for v in orders.values() if v == 1),
-        "loyal": sum(1 for v in orders.values() if v >= 2),
-        "vip": sum(1 for v in orders.values() if v >= 10),
-    }
+        a = agg.setdefault(p, {"orders": 0, "spend": 0.0})
+        a["orders"] += 1
+        if 0 <= i_sum < len(r):
+            v = r[i_sum].replace(" ", "").replace("\xa0", "").replace(",", ".")
+            try:
+                a["spend"] += float(v)
+            except ValueError:
+                pass
+    return agg
 
 
 @app.post("/api/clients/{org_id}")
 async def clients_set_link(org_id: str, payload: Dict[str, Any],
                            user: Dict = Depends(get_current_user)):
+    """Сохранить ссылку на таблицу клиентов (для source=table)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
@@ -1773,45 +1810,73 @@ async def clients_set_link(org_id: str, payload: Dict[str, Any],
 
 
 @app.get("/api/clients/{org_id}")
-async def clients_loyalty(org_id: str, user: Dict = Depends(get_current_user)):
-    """Сегменты лояльности по филиалу из таблицы заказов (по телефонам)."""
+async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year",
+                          from_: Optional[str] = Query(None, alias="from"),
+                          to: Optional[str] = Query(None),
+                          org_ids: Optional[str] = Query(None),
+                          user: Dict = Depends(get_current_user)):
+    """Лояльность клиентов: source=iiko (из доставок iiko) или source=table (из ссылки)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"has_link": False, "segments": None}
+        return {"segments": None, "source": source}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     org_name = info.get("org_name", "")
-    url = get_client_url(real_org)
-    if not url:
-        return {"has_link": False, "segments": None, "url": ""}
 
-    error = None
-    seg: Dict[str, int] = {}
-    try:
-        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as cli:
-            resp = await cli.get(_gsheet_csv_url(url))
-        if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
-            seg = _parse_clients_csv(resp.text, org_name)
-            if not seg.get("total"):
-                error = (f"Для филиала «{org_name}» в таблице нет данных. Проверь колонки "
-                         f"«Торговое предприятие» / «Телефон клиента» и что филиал совпадает.")
-        else:
-            error = "Не удалось прочитать таблицу — открой доступ «по ссылке» и проверь, что это Google-таблица"
-    except Exception as e:
-        logger.warning(f"[clients] fetch failed org={real_org}: {e}")
-        error = "Таблица недоступна по ссылке"
+    # ── Источник: таблица по ссылке ──
+    if source == "table":
+        url = get_client_url(real_org)
+        if not url:
+            return {"segments": None, "source": "table", "has_link": False, "url": ""}
+        agg: Dict[str, Dict[str, float]] = {}
+        error = None
+        try:
+            async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as cli:
+                resp = await cli.get(_gsheet_csv_url(url))
+            if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
+                agg = _parse_clients_csv(resp.text, org_name)
+                if not agg:
+                    error = (f"Для филиала «{org_name}» нет данных. Проверь колонки "
+                             f"«Торговое предприятие» / «Телефон клиента» и совпадение филиала.")
+            else:
+                error = "Не удалось прочитать таблицу — открой доступ «по ссылке»"
+        except Exception as e:
+            logger.warning(f"[clients/table] {real_org}: {e}")
+            error = "Таблица недоступна по ссылке"
+        segments, top_vip = _clients_segments(agg)
+        return {"segments": segments, "top_vip": top_vip, "source": "table",
+                "has_link": True, "url": url, "error": error}
 
-    segments = None
-    if seg.get("total"):
-        total = seg["total"]
-        pct = lambda n: round(n / total * 100) if total else 0
-        segments = {
-            "total": total,
-            "unique": {"count": seg["unique"], "pct": pct(seg["unique"])},
-            "loyal": {"count": seg["loyal"], "pct": pct(seg["loyal"])},
-            "vip": {"count": seg["vip"], "pct": pct(seg["vip"])},
-            "repeat_pct": pct(seg["loyal"]),
-        }
-    return {"has_link": True, "url": url, "segments": segments, "error": error}
+    # ── Источник: iiko (по умолчанию) ──
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    if from_ and to:
+        date_from, date_to = get_period_dates("custom", from_, to)
+    else:
+        date_from, date_to = f"{local_now().year}-01-01", local_now().date().isoformat()
+
+    async def fetch_one(real: str):
+        i = _get_restaurant_info(real, user)
+        client = get_client(i["api_login"], i.get("iiko_server"), i.get("api_password"))
+        if not hasattr(client, "olap_clients"):
+            return []
+        try:
+            return await client.olap_clients(_olap_dept(real, i), date_from, date_to)
+        except Exception as e:
+            logger.warning(f"[clients/iiko] {real}: {e}")
+            return []
+
+    per_org = await asyncio.gather(*(fetch_one(o) for o in orgs))
+    agg = {}
+    for batch in per_org:
+        for d in batch:
+            ph = (d.get("Delivery.CustomerPhone") or "").strip()
+            n = int(d.get("UniqOrderId.OrdersCount") or 0)
+            if not ph or n <= 0:
+                continue
+            a = agg.setdefault(ph, {"orders": 0, "spend": 0.0})
+            a["orders"] += n
+            a["spend"] += float(d.get("DishDiscountSumInt") or 0)
+    segments, top_vip = _clients_segments(agg)
+    return {"segments": segments, "top_vip": top_vip, "source": "iiko", "year": date_from[:4]}
 
 
 @app.get("/api/olap/{org_id}")
