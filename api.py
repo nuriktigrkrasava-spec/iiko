@@ -1076,7 +1076,8 @@ async def cashshifts(org_id: str, period: str = "week", user: Dict = Depends(get
     try:
         if not hasattr(client, "get_cash_shifts"):
             return {"shifts": [], "totals": {"cash": 0, "card": 0, "other": 0, "total": 0}}
-        raw = await client.get_cash_shifts(date_from, date_to)
+        raw = await client.get_cash_shifts(date_from, date_to,
+                                           dept_id=real_org, dept_name=info.get("org_name"))
         names: Dict[str, str] = {}
         if raw and hasattr(client, "get_employees"):
             try:
@@ -2486,6 +2487,51 @@ async def debug_tx_types(org_id: str, days: int = 60):
         # Сортируем по расходу — изъятия будут среди крупных Sum.Outgoing
         data.sort(key=lambda r: float(r.get("Sum.Outgoing") or 0), reverse=True)
         return {"org": row["organization_name"], "rows": data[:60]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/debug/cashshift-raw/{org_id}")
+async def debug_cashshift_raw(org_id: str, days: int = 14):
+    """Диагностика: сырые поля кассовой смены (чтобы понять поле департамента
+    для фильтра по филиалу). Без auth. Возвращает имя филиала из БД + 2 смены as-is."""
+    conn = get_db()
+    if org_id == "auto":
+        row = conn.execute(
+            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
+            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
+            "FROM restaurants WHERE organization_id = ? LIMIT 1", (org_id,)
+        ).fetchone()
+    conn.close()
+    if not row:
+        return {"error": "no restaurant found", "org_id": org_id}
+    api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
+    client = get_client(row["api_login"], row["iiko_server"], api_password)
+    base = getattr(client, "base_url", None)
+    if not base:
+        return {"error": "cloud client — not supported"}
+    end = local_now().date()
+    start = end - timedelta(days=days)
+    try:
+        token = await client._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as cli:
+            resp = await cli.get(f"{base}/api/v2/cashshifts/list",
+                                 params={"key": token, "openDateFrom": start.isoformat(),
+                                         "openDateTo": end.isoformat(), "status": "ANY"})
+        if not resp.is_success:
+            return {"status": resp.status_code, "body": resp.text[:1000]}
+        data = resp.json()
+        shifts = data if isinstance(data, list) else data.get("cashShifts", data.get("data", []))
+        return {
+            "my_org_id": row["organization_id"],
+            "my_org_name": row["organization_name"],
+            "shift_count": len(shifts),
+            "sample": shifts[:2],
+        }
     except Exception as e:
         return {"error": str(e)}
 
