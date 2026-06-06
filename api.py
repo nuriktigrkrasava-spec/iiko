@@ -1167,7 +1167,15 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
     if cached:
         return cached
 
-    date_from, date_to = get_period_dates(period)
+    # Скользящие окна, чтобы период был вложенным (месяц ⊇ неделя ⊇ день).
+    # Календарный «с 1-го числа» в начале месяца оказывался уже недели — путало.
+    _today = local_now().date()
+    _win = {"day": 0, "week": 6, "month": 29}.get(period)
+    if _win is not None:
+        date_from = (_today - timedelta(days=_win)).isoformat()
+        date_to = _today.isoformat()
+    else:
+        date_from, date_to = get_period_dates(period)
     client = get_client(login, info.get("iiko_server"), info.get("api_password"))
     d_from, d_to = date_from[:10], date_to[:10]
     result_list = []
