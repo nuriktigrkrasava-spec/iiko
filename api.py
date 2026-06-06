@@ -117,6 +117,8 @@ class PeriodEnum(str, Enum):
 # In-memory cache for iiko responses (изолирован по user_id)
 _cache: Dict[str, Any] = {}
 _cache_time: Dict[str, datetime] = {}
+# TTL кэша ответов iiko. 3 мин — баланс свежести и нагрузки на iiko-серверы.
+_CACHE_TTL = timedelta(minutes=3)
 
 
 def _cache_key(user_id: int, endpoint: str, org_id: str, period: str) -> str:
@@ -125,7 +127,7 @@ def _cache_key(user_id: int, endpoint: str, org_id: str, period: str) -> str:
 
 def _get_cached(key: str) -> Optional[Any]:
     if key in _cache and key in _cache_time:
-        if datetime.now() - _cache_time[key] < timedelta(minutes=1):
+        if datetime.now() - _cache_time[key] < _CACHE_TTL:
             return _cache[key]
     return None
 
@@ -969,27 +971,38 @@ async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_curr
 
 
 @app.get("/api/load-heatmap/{org_id}")
-async def load_heatmap(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
-    """Загрузка по дням недели × часам (heatmap «Час пик»). Метрика — кол-во заказов."""
+async def load_heatmap(org_id: str, period: str = "month",
+                       org_ids: Optional[str] = Query(None),
+                       user: Dict = Depends(get_current_user)):
+    """Загрузка по дням недели × часам (heatmap «Час пик»). Метрика — кол-во заказов.
+    Поддерживает «Все филиалы» через org_ids (агрегация по всем филиалам)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
         return DEMO_HEATMAP
 
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    key = _cache_key(user.get("id", 0), "heatmap", real_org, period)
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    key = _cache_key(user.get("id", 0), "heatmap", ",".join(sorted(orgs)), period)
     cached = _get_cached(key)
     if cached:
         return cached
 
     date_from, date_to = get_period_dates(period)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-    try:
-        result = await client.olap_report(
-            _olap_dept(real_org, info), date_from, date_to,
-            ["HourOpen", "OpenDate.Typed"],
-            ["OrdersCount", "DishAmountSum"],
-        )
-        grid: Dict[Tuple[int, int], Dict[str, float]] = {}
+
+    async def fetch_one(real: str):
+        info = _get_restaurant_info(real, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        try:
+            return await client.olap_report(
+                _olap_dept(real, info), date_from, date_to,
+                ["HourOpen", "OpenDate.Typed"],
+                ["OrdersCount", "DishAmountSum"],
+            )
+        except Exception as e:
+            logger.warning(f"[heatmap] {real}: {e}")
+            return {"data": []}
+
+    per_org = await asyncio.gather(*(fetch_one(o) for o in orgs))
+    grid: Dict[Tuple[int, int], Dict[str, float]] = {}
+    for result in per_org:
         for row in result.get("data", []):
             try:
                 h = int(str(row.get("HourOpen", "")).split(":")[0])
@@ -1005,21 +1018,19 @@ async def load_heatmap(org_id: str, period: str = "month", user: Dict = Depends(
             cell = grid.setdefault((d, h), {"orders": 0, "revenue": 0.0})
             cell["orders"] += orders
             cell["revenue"] += revenue
-        cells, mx, peak = [], 0, {"d": 0, "h": 0, "orders": 0}
-        for (d, h), v in grid.items():
-            o = int(v["orders"])
-            if o <= 0:
-                continue
-            cells.append({"d": d, "h": h, "orders": o, "revenue": round(v["revenue"])})
-            mx = max(mx, o)
-            if o > peak["orders"]:
-                peak = {"d": d, "h": h, "orders": o}
-        resp = {"cells": cells, "max": mx, "peak": peak, "metric": "orders"}
-        _set_cached(key, resp)
-        return resp
-    except Exception as e:
-        print(f"[heatmap] {e}")
-        return DEMO_HEATMAP
+
+    cells, mx, peak = [], 0, {"d": 0, "h": 0, "orders": 0}
+    for (d, h), v in grid.items():
+        o = int(v["orders"])
+        if o <= 0:
+            continue
+        cells.append({"d": d, "h": h, "orders": o, "revenue": round(v["revenue"])})
+        mx = max(mx, o)
+        if o > peak["orders"]:
+            peak = {"d": d, "h": h, "orders": o}
+    resp = {"cells": cells, "max": mx, "peak": peak, "metric": "orders"}
+    _set_cached(key, resp)
+    return resp
 
 
 @app.get("/api/foodcost/{org_id}")
@@ -2292,178 +2303,6 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
          "code": p.get("code"), "unit": p.get("unit") or p.get("mainUnit")}
         for p in products
     ]}
-
-
-@app.get("/api/debug/iiko-fields/{org_id}")
-async def debug_iiko_fields(org_id: str, report_type: str = "TRANSACTIONS"):
-    """Диагностика OLAP-полей: пробует несколько URL-схем columns-эндпоинта
-    и возвращает статус+тело каждой попытки. Без auth, без данных юзера."""
-    conn = get_db()
-    if org_id == "auto":
-        row = conn.execute(
-            "SELECT organization_id, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT organization_id, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE organization_id = ? LIMIT 1", (org_id,)
-        ).fetchone()
-    conn.close()
-    if not row:
-        return {"error": "no restaurant found", "org_id": org_id}
-    real_org = row["organization_id"]
-    api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
-    client = get_client(row["api_login"], row["iiko_server"], api_password)
-    base = getattr(client, "base_url", None)
-    if not base:
-        # Cloud-клиент — другая схема, не наш случай
-        return {"error": "cloud client — debug not implemented", "org_id": real_org}
-    try:
-        token = await client._ensure_token()
-    except Exception as e:
-        return {"error": f"auth failed: {e}", "org_id": real_org}
-    candidates = [
-        f"{base}/api/v2/reports/olap/columns/{report_type}",
-        f"{base}/api/v2/reports/olap/columns?reportType={report_type}",
-        f"{base}/api/v2/reports/olap/columnsConfig",
-        f"{base}/api/v2/reports/olap/columnsConfig?reportType={report_type}",
-        f"{base}/api/reports/olap/columns/{report_type}",
-    ]
-    attempts: List[Dict[str, Any]] = []
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as cli:
-        for url in candidates:
-            try:
-                sep = "&" if "?" in url else "?"
-                resp = await cli.get(f"{url}{sep}key={token}")
-                attempts.append({
-                    "url": url,
-                    "status": resp.status_code,
-                    "body": resp.text[:1500],
-                })
-            except Exception as e:
-                attempts.append({"url": url, "error": str(e)})
-    return {"org_id": real_org, "report_type": report_type, "attempts": attempts}
-
-
-@app.get("/api/debug/tx-types/{org_id}")
-async def debug_tx_types(org_id: str, days: int = 60):
-    """Диагностика: реальные значения TransactionType + счета с расходом за `days` дней.
-    Нужно, чтобы подобрать точный тип для изъятий наличных. Без auth."""
-    conn = get_db()
-    if org_id == "auto":
-        row = conn.execute(
-            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE organization_id = ? LIMIT 1", (org_id,)
-        ).fetchone()
-    conn.close()
-    if not row:
-        return {"error": "no restaurant found", "org_id": org_id}
-    api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
-    client = get_client(row["api_login"], row["iiko_server"], api_password)
-    base = getattr(client, "base_url", None)
-    if not base:
-        return {"error": "cloud client — not supported"}
-    end = local_now().date()
-    start = end - timedelta(days=days)
-    payload = {
-        "reportType": "TRANSACTIONS",
-        "buildSummary": "false",
-        "groupByRowFields": ["TransactionType", "Account.Name"],
-        "aggregateFields": ["Sum.Outgoing", "Sum.Incoming"],
-        "filters": {
-            "DateTime.OperDayFilter": {
-                "filterType": "DateRange", "periodType": "CUSTOM",
-                "from": start.isoformat(), "to": end.isoformat(),
-                "includeLow": "true", "includeHigh": "true",
-            },
-        },
-    }
-    try:
-        token = await client._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as cli:
-            resp = await cli.post(f"{base}/api/v2/reports/olap",
-                                  params={"key": token}, json=payload)
-            rows = resp.json() if resp.is_success else None
-        if rows is None:
-            return {"status": resp.status_code, "body": resp.text[:1500]}
-        data = rows if isinstance(rows, list) else rows.get("data", [])
-        # Сортируем по расходу — изъятия будут среди крупных Sum.Outgoing
-        data.sort(key=lambda r: float(r.get("Sum.Outgoing") or 0), reverse=True)
-        return {"org": row["organization_name"], "rows": data[:60]}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.get("/api/debug/invoices-raw/{org_id}")
-async def debug_invoices_raw(org_id: str, period: str = "month"):
-    """Диагностика накладных: что реально возвращает OLAP за период + даты бот-накладных.
-    Помогает понять, почему фильтр периода 'не работает'. Без auth."""
-    conn = get_db()
-    if org_id == "auto":
-        row = conn.execute(
-            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
-        ).fetchone()
-    else:
-        row = conn.execute(
-            "SELECT organization_id, organization_name, api_login, iiko_server, api_password "
-            "FROM restaurants WHERE organization_id = ? LIMIT 1", (org_id,)
-        ).fetchone()
-    conn.close()
-    if not row:
-        return {"error": "no restaurant found", "org_id": org_id}
-    real_org = row["organization_id"]
-    org_name = row["organization_name"]
-    api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
-    client = get_client(row["api_login"], row["iiko_server"], api_password)
-    base = getattr(client, "base_url", None)
-    if not base:
-        return {"error": "cloud client"}
-    date_from, date_to = get_period_dates(period)
-    dept = org_name or real_org
-    payload = {
-        "reportType": "TRANSACTIONS",
-        "buildSummary": "false",
-        "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id"],
-        "aggregateFields": ["Sum.Incoming"],
-        "filters": {
-            "DateTime.OperDayFilter": client._tx_date_filter(date_from, date_to),
-            "TransactionType": {"filterType": "IncludeValues", "values": ["INVOICE", "SESSION_ACCEPTANCE"]},
-            "Department": {"filterType": "IncludeValues", "values": [dept]},
-        },
-    }
-    out: Dict[str, Any] = {"org": org_name, "period": period, "range": [date_from, date_to]}
-    try:
-        token = await client._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as cli:
-            resp = await cli.post(f"{base}/api/v2/reports/olap", params={"key": token}, json=payload)
-        out["olap_status"] = resp.status_code
-        if resp.is_success:
-            d = resp.json()
-            rows = d if isinstance(d, list) else d.get("data", [])
-            out["olap_row_count"] = len(rows)
-            out["olap_sample"] = rows[:10]
-        else:
-            out["olap_body"] = resp.text[:800]
-    except Exception as e:
-        out["olap_error"] = str(e)
-    # Бот-накладные: какие даты и сколько попадает в фильтр периода
-    try:
-        bot = get_bot_invoices(limit=1000, organization_id=real_org)
-        out["bot_total"] = len(bot)
-        out["bot_dates_sample"] = [
-            {"date": b.get("date"), "created_at": b.get("created_at"), "status": b.get("status")}
-            for b in bot[:10]
-        ]
-    except Exception as e:
-        out["bot_error"] = str(e)
-    return out
 
 
 @app.get("/api/suppliers/{org_id}")
