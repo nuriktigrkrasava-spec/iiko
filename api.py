@@ -360,6 +360,38 @@ DEMO_WITHDRAWALS = {
     "total": 205000,
 }
 
+def _demo_heatmap():
+    import random as _r
+    _r.seed(7)
+    cells, mx, peak = [], 0, {"d": 0, "h": 0, "orders": 0}
+    for d in range(7):
+        for h in range(10, 23):
+            base = 6 if h in (13, 14, 19, 20) else 2
+            wk = 1.4 if d >= 4 else 1.0
+            orders = max(0, int(base * wk + _r.randint(-1, 3)))
+            if orders <= 0:
+                continue
+            cells.append({"d": d, "h": h, "orders": orders, "revenue": orders * 4500})
+            if orders > mx:
+                mx = orders
+            if orders > peak["orders"]:
+                peak = {"d": d, "h": h, "orders": orders}
+    return {"cells": cells, "max": mx, "peak": peak, "metric": "orders"}
+
+DEMO_HEATMAP = _demo_heatmap()
+
+DEMO_CASHSHIFTS = {
+    "shifts": [
+        {"number": 412, "register": "Касса 1", "open": "2026-06-05 09:58", "close": "2026-06-05 23:14",
+         "responsible": "Виктория Ким", "status": "CLOSED", "cash": 320000, "card": 610000, "other": 45000, "total": 975000},
+        {"number": 411, "register": "Касса 1", "open": "2026-06-04 10:02", "close": "2026-06-04 23:05",
+         "responsible": "Артём Волков", "status": "CLOSED", "cash": 280000, "card": 540000, "other": 30000, "total": 850000},
+        {"number": 413, "register": "Касса 2", "open": "2026-06-06 09:50", "close": "", "responsible": "Камила Ахметова",
+         "status": "OPEN", "cash": 95000, "card": 210000, "other": 0, "total": 305000},
+    ],
+    "totals": {"cash": 695000, "card": 1360000, "other": 75000, "total": 2130000},
+}
+
 DEMO_STOPLIST = {
     "items": [
         {"name": "Стейк Рибай", "sku": "ST-001", "balance": 0, "category": "Основные блюда", "status": "stop"},
@@ -946,6 +978,136 @@ async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_curr
         print(f"[staff] {e}")
         demo = dict(DEMO_STAFF)
         return demo
+
+
+@app.get("/api/load-heatmap/{org_id}")
+async def load_heatmap(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
+    """Загрузка по дням недели × часам (heatmap «Час пик»). Метрика — кол-во заказов."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return DEMO_HEATMAP
+
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    key = _cache_key(user.get("id", 0), "heatmap", real_org, period)
+    cached = _get_cached(key)
+    if cached:
+        return cached
+
+    date_from, date_to = get_period_dates(period)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        result = await client.olap_report(
+            _olap_dept(real_org, info), date_from, date_to,
+            ["HourOpen", "OpenDate.Typed"],
+            ["OrdersCount", "DishAmountSum"],
+        )
+        grid: Dict[Tuple[int, int], Dict[str, float]] = {}
+        for row in result.get("data", []):
+            try:
+                h = int(str(row.get("HourOpen", "")).split(":")[0])
+            except Exception:
+                continue
+            ds = str(row.get("OpenDate.Typed", ""))[:10]
+            try:
+                d = datetime.strptime(ds, "%Y-%m-%d").weekday()  # 0=Пн
+            except Exception:
+                continue
+            orders = int(row.get("OrdersCount", 0) or 0)
+            revenue = float(row.get("DishAmountSum", 0) or 0)
+            cell = grid.setdefault((d, h), {"orders": 0, "revenue": 0.0})
+            cell["orders"] += orders
+            cell["revenue"] += revenue
+        cells, mx, peak = [], 0, {"d": 0, "h": 0, "orders": 0}
+        for (d, h), v in grid.items():
+            o = int(v["orders"])
+            if o <= 0:
+                continue
+            cells.append({"d": d, "h": h, "orders": o, "revenue": round(v["revenue"])})
+            mx = max(mx, o)
+            if o > peak["orders"]:
+                peak = {"d": d, "h": h, "orders": o}
+        resp = {"cells": cells, "max": mx, "peak": peak, "metric": "orders"}
+        _set_cached(key, resp)
+        return resp
+    except Exception as e:
+        print(f"[heatmap] {e}")
+        return DEMO_HEATMAP
+
+
+def _cs_num(d: Dict[str, Any], *keys) -> float:
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                pass
+    return 0.0
+
+
+def _cs_str(d: Dict[str, Any], *keys) -> str:
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return str(v)
+    return ""
+
+
+@app.get("/api/cashshifts/{org_id}")
+async def cashshifts(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
+    """Кассовые смены: кто открыл/закрыл, типы оплат (нал/карта/прочее) — для сверки.
+
+    Источник — REST iikoServer /api/v2/cashshifts/list. Имена полей сумм у разных
+    версий iikoServer отличаются, поэтому парсятся защитно; при пустом ответе —
+    demo-fallback.
+    """
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return DEMO_CASHSHIFTS
+
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    key = _cache_key(user.get("id", 0), "cashshifts", real_org, period)
+    cached = _get_cached(key)
+    if cached:
+        return cached
+
+    date_from, date_to = get_period_dates(period)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        if not hasattr(client, "get_cash_shifts"):
+            return {"shifts": [], "totals": {"cash": 0, "card": 0, "other": 0, "total": 0}}
+        raw = await client.get_cash_shifts(date_from, date_to)
+        names: Dict[str, str] = {}
+        if raw and hasattr(client, "get_employees"):
+            try:
+                names = await client.get_employees()
+            except Exception as e:
+                logger.warning(f"[cashshifts] employees: {e}")
+        shifts = []
+        tot = {"cash": 0.0, "card": 0.0, "other": 0.0, "total": 0.0}
+        for s in raw:
+            cash = _cs_num(s, "salesCash", "cashSum", "payCash")
+            card = _cs_num(s, "salesCard", "cardSum", "payCard", "salesCredit")
+            total = _cs_num(s, "payOrders", "salesTotal", "total", "sum") or (cash + card)
+            other = max(0.0, total - cash - card)
+            resp_id = _cs_str(s, "responsibleUserId", "managerId", "responsibleUser", "manager")
+            shifts.append({
+                "number": _cs_str(s, "sessionNumber", "number", "fiscalNumber") or "—",
+                "register": _cs_str(s, "cashRegName", "cashRegNumber", "cashRegSerialNumber") or "—",
+                "open": _cs_str(s, "openDate", "open")[:16].replace("T", " "),
+                "close": _cs_str(s, "acceptDate", "closeDate", "close")[:16].replace("T", " "),
+                "responsible": names.get(resp_id, resp_id) or "—",
+                "status": _cs_str(s, "status", "sessionStatus") or "—",
+                "cash": round(cash), "card": round(card), "other": round(other), "total": round(total),
+            })
+            tot["cash"] += cash; tot["card"] += card; tot["other"] += other; tot["total"] += total
+        shifts.sort(key=lambda x: x["open"], reverse=True)
+        result = {"shifts": shifts, "totals": {k: round(v) for k, v in tot.items()}}
+        _set_cached(key, result)
+        return result
+    except Exception as e:
+        print(f"[cashshifts] {e}")
+        return DEMO_CASHSHIFTS
 
 
 @app.get("/api/foodcost/{org_id}")
