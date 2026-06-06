@@ -953,7 +953,16 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
       <div class="card">
         <div class="card-title" style="margin-bottom:4px">Час пик — загрузка по заказам</div>
-        <div id="hm-peak" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px"></div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;line-height:1.5">
+          Строки — дни недели, столбцы — часы. Число в ячейке — сколько заказов открыто в этот час.
+          Чем насыщеннее зелёный, тем выше загрузка.
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary);margin-bottom:12px">
+          <span>меньше</span>
+          <span style="display:inline-block;width:90px;height:10px;border-radius:5px;background:linear-gradient(90deg, rgba(52,199,89,0.15), rgba(52,199,89,1))"></span>
+          <span>больше</span>
+        </div>
+        <div id="hm-peak" style="font-size:13px;color:var(--text);font-weight:600;margin-bottom:12px"></div>
         <div id="hm-grid" style="overflow-x:auto"></div>
       </div>
     </div>
