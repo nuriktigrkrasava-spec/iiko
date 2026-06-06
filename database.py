@@ -32,8 +32,16 @@ def decrypt_password(encrypted: str) -> str:
         return encrypted
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
+    # WAL: читатели не блокируют писателя и наоборот → лучше параллельность под нагрузкой.
+    # busy_timeout: вместо мгновенной ошибки "database is locked" ждём до 5с.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
     return conn
 
 def init_db():
@@ -109,6 +117,11 @@ def init_db():
         organization_id TEXT PRIMARY KEY,
         url TEXT,
         updated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT
     );
     """)
     conn.commit()
@@ -186,6 +199,60 @@ def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
             d["api_password"] = decrypt_password(d["api_password"])
         result.append(d)
     return result
+
+def get_all_restaurants() -> List[Dict[str, Any]]:
+    """Все филиалы сети (с расшифрованными паролями), дедуп по organization_id.
+    Для воскресного отчёта по всем точкам. ВНИМАНИЕ: при настоящем мульти-тенанте
+    (несколько независимых сетей) нужно будет скоупить по владельцу."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM restaurants WHERE iiko_server IS NOT NULL ORDER BY organization_name"
+    ).fetchall()
+    conn.close()
+    result, seen = [], set()
+    for r in rows:
+        d = dict(r)
+        oid = d.get("organization_id", "")
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if d.get("api_password"):
+            d["api_password"] = decrypt_password(d["api_password"])
+        result.append(d)
+    return result
+
+
+def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
+    """Поиск пользователя по @username (без учёта регистра). Нужен chat_id получателя."""
+    uname = (username or "").lstrip("@").strip().lower()
+    if not uname:
+        return None
+    conn = get_db()
+    row = conn.execute(
+        "SELECT telegram_id, username, first_name FROM users WHERE LOWER(username) = ?",
+        (uname,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_app_state(key: str) -> Optional[str]:
+    conn = get_db()
+    row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else None
+
+
+def set_app_state(key: str, value: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO app_state (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
+
 
 def add_restaurant(telegram_id: int, api_login: str, org_id: str, org_name: str,
                    iiko_server: str = None, api_password: str = None):
