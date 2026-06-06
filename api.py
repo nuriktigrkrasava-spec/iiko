@@ -1090,13 +1090,15 @@ async def cashshifts(org_id: str, period: str = "week", user: Dict = Depends(get
             card = _cs_num(s, "salesCard", "cardSum", "payCard", "salesCredit")
             total = _cs_num(s, "payOrders", "salesTotal", "total", "sum") or (cash + card)
             other = max(0.0, total - cash - card)
-            resp_id = _cs_str(s, "responsibleUserId", "managerId", "responsibleUser", "manager")
+            resp_name = _cs_str(s, "responsibleUserName", "managerName", "responsibleName", "cashier", "userName")
+            resp_id = _cs_str(s, "responsibleUserId", "managerId", "responsibleUser", "manager", "userId")
+            responsible = resp_name or names.get(resp_id, "") or "—"
             shifts.append({
                 "number": _cs_str(s, "sessionNumber", "number", "fiscalNumber") or "—",
                 "register": _cs_str(s, "cashRegName", "cashRegNumber", "cashRegSerialNumber") or "—",
                 "open": _cs_str(s, "openDate", "open")[:16].replace("T", " "),
                 "close": _cs_str(s, "acceptDate", "closeDate", "close")[:16].replace("T", " "),
-                "responsible": names.get(resp_id, resp_id) or "—",
+                "responsible": responsible,
                 "status": _cs_str(s, "status", "sessionStatus") or "—",
                 "cash": round(cash), "card": round(card), "other": round(other), "total": round(total),
             })
