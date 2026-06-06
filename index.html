@@ -887,6 +887,8 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="subtabs" style="margin-top:8px">
       <div class="subtab active" id="staff-sub-waiters" onclick="setStaffSubtab('waiters', this)">Официанты</div>
       <div class="subtab" id="staff-sub-couriers" onclick="setStaffSubtab('couriers', this)">Курьеры</div>
+      <div class="subtab" id="staff-sub-heatmap" onclick="setStaffSubtab('heatmap', this)">Час пик</div>
+      <div class="subtab" id="staff-sub-report" onclick="setStaffSubtab('report', this)">Отчёт</div>
     </div>
     <div id="staff-view-waiters">
     <!-- Сейчас на смене -->
@@ -942,6 +944,41 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
       <div id="couriers-status" style="font-size:12px;color:var(--text-secondary);margin:12px 2px 8px"></div>
       <div id="couriers-list"></div>
+    </div>
+
+    <div id="staff-view-heatmap" style="display:none">
+      <div class="subtabs" id="hm-period-tabs" style="margin-top:16px;margin-bottom:10px">
+        <div class="subtab" data-p="week" onclick="setHeatmapPeriod('week', this)">Неделя</div>
+        <div class="subtab active" data-p="month" onclick="setHeatmapPeriod('month', this)">Месяц</div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:4px">Час пик — загрузка по заказам</div>
+        <div id="hm-peak" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px"></div>
+        <div id="hm-grid" style="overflow-x:auto"></div>
+      </div>
+    </div>
+
+    <div id="staff-view-report" style="display:none">
+      <div class="subtabs" id="cs-period-tabs" style="margin-top:16px;margin-bottom:10px">
+        <div class="subtab" data-p="day" onclick="setReportPeriod('day', this)">День</div>
+        <div class="subtab active" data-p="week" onclick="setReportPeriod('week', this)">Неделя</div>
+        <div class="subtab" data-p="month" onclick="setReportPeriod('month', this)">Месяц</div>
+      </div>
+      <div class="summary-row">
+        <div class="summary-card"><div class="summary-label">Наличные</div><div class="summary-value" id="cs-cash" style="font-size:16px">—</div></div>
+        <div class="summary-card"><div class="summary-label">Карта</div><div class="summary-value" id="cs-card" style="font-size:16px">—</div></div>
+        <div class="summary-card"><div class="summary-label">Прочее</div><div class="summary-value" id="cs-other" style="font-size:16px">—</div></div>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div class="card-title" style="margin-bottom:4px">Кассовые смены</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">Кто закрыл смену и чем платили — для сверки. Прокрутите вправо →</div>
+        <div class="table-container">
+          <table class="data-table" id="cs-table" style="min-width:0">
+            <thead><tr><th>Смена</th><th>Кто закрыл</th><th>Открыта</th><th>Закрыта</th><th class="num">Нал</th><th class="num">Карта</th><th class="num">Итого</th><th>Статус</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -2679,11 +2716,107 @@ async function loadStaff() {
 let _couriersLoaded = false;
 
 function setStaffSubtab(view, el) {
-  document.getElementById('staff-sub-waiters').classList.toggle('active', view === 'waiters');
-  document.getElementById('staff-sub-couriers').classList.toggle('active', view === 'couriers');
-  document.getElementById('staff-view-waiters').style.display = view === 'waiters' ? '' : 'none';
-  document.getElementById('staff-view-couriers').style.display = view === 'couriers' ? '' : 'none';
+  const views = ['waiters', 'couriers', 'heatmap', 'report'];
+  views.forEach(v => {
+    document.getElementById('staff-sub-' + v).classList.toggle('active', v === view);
+    document.getElementById('staff-view-' + v).style.display = v === view ? '' : 'none';
+  });
   if (view === 'couriers' && !_couriersLoaded) loadCouriers();
+  if (view === 'heatmap') loadHeatmap();
+  if (view === 'report') loadCashReport();
+}
+
+// ---- Час пик (heatmap загрузки по дням×часам) ----
+state.heatmapPeriod = state.heatmapPeriod || 'month';
+function setHeatmapPeriod(p, el) {
+  haptic();
+  state.heatmapPeriod = p;
+  document.querySelectorAll('#hm-period-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadHeatmap();
+}
+
+async function loadHeatmap() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const grid = document.getElementById('hm-grid');
+  const peakEl = document.getElementById('hm-peak');
+  grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Загрузка...</div>';
+  try {
+    const data = await apiGet(withOrgIds(`/api/load-heatmap/${orgId}?period=${state.heatmapPeriod}`));
+    const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+    const cells = data.cells || [];
+    if (!cells.length) { grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Нет данных за период</div>'; peakEl.textContent = ''; return; }
+    const hours = [...new Set(cells.map(c => c.h))].sort((a, b) => a - b);
+    const mx = data.max || 1;
+    const map = {};
+    cells.forEach(c => { map[c.d + '_' + c.h] = c; });
+    const heat = (o) => {
+      if (!o) return 'transparent';
+      const t = o / mx; // 0..1
+      const alpha = 0.15 + t * 0.85;
+      return `rgba(52,199,89,${alpha.toFixed(2)})`;
+    };
+    let html = `<table style="border-collapse:collapse;font-size:11px"><thead><tr><th style="padding:2px 4px"></th>`;
+    hours.forEach(h => { html += `<th style="padding:2px 3px;color:var(--text-secondary);font-weight:500">${h}</th>`; });
+    html += `</tr></thead><tbody>`;
+    for (let d = 0; d < 7; d++) {
+      html += `<tr><td style="padding:2px 6px;color:var(--text-secondary)">${days[d]}</td>`;
+      hours.forEach(h => {
+        const c = map[d + '_' + h];
+        const o = c ? c.orders : 0;
+        html += `<td title="${days[d]} ${h}:00 — ${o} заказов" style="width:20px;height:20px;background:${heat(o)};border:1px solid var(--bg-secondary);text-align:center;color:${o && o / mx > 0.6 ? '#fff' : 'var(--text-secondary)'}">${o || ''}</td>`;
+      });
+      html += `</tr>`;
+    }
+    html += `</tbody></table>`;
+    grid.innerHTML = html;
+    if (data.peak && data.peak.orders) {
+      peakEl.textContent = `🔥 Пик: ${days[data.peak.d]} в ${data.peak.h}:00 — ${data.peak.orders} заказов`;
+    }
+  } catch (e) { console.error(e); grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Ошибка загрузки</div>'; }
+}
+
+// ---- Отчёт (кассовые смены: типы оплат + кто закрыл) ----
+state.reportPeriod = state.reportPeriod || 'week';
+function setReportPeriod(p, el) {
+  haptic();
+  state.reportPeriod = p;
+  document.querySelectorAll('#cs-period-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadCashReport();
+}
+
+async function loadCashReport() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const tb = document.querySelector('#cs-table tbody');
+  tb.innerHTML = '<tr><td colspan="8" style="color:var(--text-secondary);font-size:13px">Загрузка...</td></tr>';
+  try {
+    const data = await apiGet(`/api/cashshifts/${orgId}?period=${state.reportPeriod}`);
+    const t = data.totals || {};
+    document.getElementById('cs-cash').textContent = formatMoney(t.cash || 0);
+    document.getElementById('cs-card').textContent = formatMoney(t.card || 0);
+    document.getElementById('cs-other').textContent = formatMoney(t.other || 0);
+    const shifts = data.shifts || [];
+    tb.innerHTML = shifts.length
+      ? shifts.map(s => {
+          const badge = s.status === 'OPEN'
+            ? '<span class="badge badge-blue">Открыта</span>'
+            : '<span class="badge badge-green">Закрыта</span>';
+          return `<tr>
+            <td class="name">#${escHtml(String(s.number))} · ${escHtml(s.register)}</td>
+            <td class="name">${escHtml(s.responsible)}</td>
+            <td>${escHtml(s.open)}</td>
+            <td>${escHtml(s.close || '—')}</td>
+            <td class="num">${formatMoney(s.cash)}</td>
+            <td class="num">${formatMoney(s.card)}</td>
+            <td class="num">${formatMoney(s.total)}</td>
+            <td>${badge}</td>
+          </tr>`;
+        }).join('')
+      : '<tr><td colspan="8" style="color:var(--text-secondary);font-size:13px">Нет смен за период</td></tr>';
+  } catch (e) { console.error(e); tb.innerHTML = '<tr><td colspan="8" style="color:var(--text-secondary);font-size:13px">Ошибка загрузки</td></tr>'; }
 }
 
 async function loadCouriers() {
