@@ -1091,11 +1091,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 
     <!-- Invoices tab -->
     <div id="tab-invoices" style="display:none">
-      <div style="margin-top:16px;">
-        <div class="date-filters" style="padding:0 0 12px;">
-          <div class="date-chip active">Эта н...</div>
-        </div>
-      </div>
+      <div style="margin-top:16px;"></div>
       <div class="inv-subview">
         <button class="inv-subview-pill active" id="inv-pill-list" onclick="switchInvoiceSubview('list')">📋 Список</button>
         <button class="inv-subview-pill" id="inv-pill-prices" onclick="switchInvoiceSubview('prices')">📊 Цены</button>
@@ -2981,7 +2977,7 @@ async function loadExpenses() {
             <div class="invoice-id">#${inv.id}</div>
             <div class="badge ${cls}">${inv.status}</div>
           </div>
-          <div class="invoice-meta">${inv.supplier} · ${inv.date} · ${inv.items} позиций${inv.branch ? ' · 🏢 ' + inv.branch : ''}</div>
+          <div class="invoice-meta">${inv.supplier} · ${inv.date}${inv.items ? ' · ' + inv.items + ' позиций' : ''}${inv.branch ? ' · 🏢 ' + inv.branch : ''}</div>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
             <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}${vatLine}</div>
             <div class="invoice-actions">${actions}</div>
