@@ -729,17 +729,18 @@ class IikoWebClient:
             ]
             return {"writeoffs": [{"items": items}]}
 
+    # Ключевые слова для распознавания счёта изъятия наличных по названию
+    _WITHDRAWAL_KEYWORDS = ("изъят", "инкасс", "выемк", "вынос", "изьят")
+
     async def get_cash_withdrawals(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Изъятия наличных из кассы через OLAP TRANSACTIONS.
 
-        ВНИМАНИЕ: точный код типа транзакции изъятия наличных ("CASH_REMOVAL")
-        нужно подтвердить через columns-introspection на живом iikoServer —
-        у разных версий значение может отличаться. До подтверждения возможен
-        пустой результат (тогда сработает demo-fallback в api.py).
+        Не фильтруем по TransactionType (его точный код для изъятий зависит от версии
+        iikoServer и даёт 400 при неверном значении). Вместо этого тянем расход по счетам
+        и оставляем только счета, чьё название похоже на изъятие/инкассацию.
         """
         filters: Dict[str, Any] = {
             "DateTime.OperDayFilter": self._tx_date_filter(date_from, date_to),
-            "TransactionType": {"filterType": "IncludeValues", "values": ["CASH_REMOVAL"]},
         }
         if org_ids and org_ids[0] and org_ids[0] != "demo":
             filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
@@ -761,14 +762,19 @@ class IikoWebClient:
             resp.raise_for_status()
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
-            withdrawals = [
-                {
+            withdrawals = []
+            for r in rows:
+                amount = float(r.get("Sum.Outgoing") or 0)
+                if amount <= 0:
+                    continue
+                account = str(r.get("Account.Name") or "")
+                if not any(kw in account.lower() for kw in self._WITHDRAWAL_KEYWORDS):
+                    continue
+                withdrawals.append({
                     "date": str(r.get("DateTime.DateTyped") or "")[:10],
-                    "sum": float(r.get("Sum.Outgoing") or 0),
-                    "comment": r.get("Account.Name") or "Изъятие",
-                }
-                for r in rows if float(r.get("Sum.Outgoing") or 0) > 0
-            ]
+                    "sum": amount,
+                    "comment": account or "Изъятие",
+                })
             return {"withdrawals": withdrawals}
 
     async def get_cash_shifts(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
@@ -796,7 +802,10 @@ class IikoWebClient:
             return raw if isinstance(raw, list) else raw.get("cashShifts", raw.get("data", []))
 
     async def get_employees(self) -> Dict[str, str]:
-        """Карта id→ФИО сотрудников (для резолва кассира/ответственного по смене)."""
+        """Карта id→ФИО сотрудников (для резолва кассира/ответственного по смене).
+
+        iikoServer `/resto/api/employees` отдаёт XML, не JSON — парсим оба варианта.
+        """
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
             resp = await client.get(
@@ -804,9 +813,31 @@ class IikoWebClient:
                 params={"key": token},
             )
             resp.raise_for_status()
-            raw = resp.json()
-            rows = raw if isinstance(raw, list) else raw.get("employees", raw.get("data", []))
+            text = resp.text.strip()
             out: Dict[str, str] = {}
+            if text.startswith("<"):
+                # XML: <employees><employee><id>..</id><name>..</name>...
+                import xml.etree.ElementTree as ET
+                try:
+                    root = ET.fromstring(text)
+                except ET.ParseError:
+                    return out
+                for emp in root.iter():
+                    if emp.tag.lower() not in ("employee", "employeedto"):
+                        continue
+                    fields = {child.tag.lower(): (child.text or "").strip() for child in emp}
+                    eid = fields.get("id") or fields.get("guid")
+                    name = (fields.get("name") or fields.get("displayname")
+                            or f"{fields.get('firstname','')} {fields.get('lastname','')}".strip())
+                    if eid and name:
+                        out[eid] = name
+                return out
+            # JSON-вариант
+            try:
+                raw = resp.json()
+            except Exception:
+                return out
+            rows = raw if isinstance(raw, list) else raw.get("employees", raw.get("data", []))
             for e in rows:
                 eid = e.get("id") or e.get("guid")
                 name = e.get("name") or e.get("displayName") or (
