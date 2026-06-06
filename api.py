@@ -36,6 +36,7 @@ from database import (
     delete_pending_invoice_by_chat,
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
+    get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -476,6 +477,8 @@ class ExportSendPayload(BaseModel):
 @app.on_event("startup")
 async def startup():
     init_db()
+    # Фоновый планировщик воскресного отчёта ген.директору
+    asyncio.create_task(_weekly_report_scheduler())
 
 
 @app.get("/")
@@ -1394,6 +1397,38 @@ async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_
     except Exception as e:
         print(f"[writeoffs] {e}")
         return DEMO_WRITEOFFS
+
+
+@app.get("/api/weekly-report/preview")
+async def weekly_report_preview(
+        send: bool = False,
+        token: Optional[str] = Query(None),
+        x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
+    """Предпросмотр воскресного отчёта (и отправка получателю при send=true).
+    Доступ: секретный токен (для браузера) ИЛИ Telegram-авторизация (из Mini App)."""
+    authed = bool(REPORT_PREVIEW_TOKEN and token == REPORT_PREVIEW_TOKEN)
+    if not authed:
+        try:
+            u = await get_current_user(x_telegram_init_data)
+            authed = not _is_demo_user(u)
+        except Exception:
+            authed = False
+    if not authed:
+        raise HTTPException(status_code=404, detail="Not Found")
+    text = await _build_weekly_report_text()
+    if not text:
+        return {"ok": False, "error": "нет филиалов"}
+    result = {"ok": True, "text": text, "recipient": REPORT_RECIPIENT_USERNAME}
+    if send:
+        recipient = get_user_by_username(REPORT_RECIPIENT_USERNAME)
+        if not recipient or not recipient.get("telegram_id"):
+            result["sent"] = False
+            result["error"] = (f"@{REPORT_RECIPIENT_USERNAME} ещё не запускал бота — "
+                               f"chat_id неизвестен. Пусть нажмёт Start в боте.")
+        else:
+            await _tg_send(int(recipient["telegram_id"]), text)
+            result["sent"] = True
+    return result
 
 
 @app.get("/api/withdrawals/{org_id}")
@@ -2708,6 +2743,111 @@ async def _tg_send(chat_id: int, text: str, reply_markup: dict = None) -> Option
     except Exception as e:
         logger.warning(f"[tg_send] {e}")
         return None
+
+
+# ============ ВОСКРЕСНЫЙ ОТЧЁТ ГЕН.ДИРЕКТОРУ ============
+# Каждое воскресенье — одному получателю (@username), по каждому филиалу отдельно:
+# оборот неделя-к-неделе (рост/падение) и средний чек.
+# Получатель воскресного отчёта — ген.директор (дядя), он уже нажал Start в боте.
+REPORT_RECIPIENT_USERNAME = os.getenv("REPORT_RECIPIENT_USERNAME", "AibolatAvilkhan")
+REPORT_HOUR_LOCAL = int(os.getenv("REPORT_HOUR_LOCAL", "10"))  # во сколько (локальное) слать
+# Секрет для открытия превью отчёта из браузера (URL никуда не выводится).
+REPORT_PREVIEW_TOKEN = os.getenv("REPORT_PREVIEW_TOKEN", "e8c893c7c1fd22c47d5ceedbd5973d93")
+
+
+async def _branch_week_metrics(rest: Dict[str, Any], date_from: str, date_to: str):
+    """Оборот, гости и средний чек одного филиала за период. None при ошибке."""
+    client = get_client(rest["api_login"], rest.get("iiko_server"), rest.get("api_password"))
+    dept = rest.get("organization_name") or rest.get("organization_id")
+    try:
+        r = await client.olap_report(dept, date_from, date_to,
+                                     ["OpenDate.Typed"], ["GuestNum", "DishAmountSum", "OrdersCount"])
+        rows = r.get("data", [])
+        revenue = sum(float(x.get("DishAmountSum", 0) or 0) for x in rows)
+        guests = sum(float(x.get("GuestNum", 0) or 0) for x in rows)
+        avg_check = revenue / guests if guests else 0
+        return {"revenue": revenue, "guests": guests, "avg_check": avg_check}
+    except Exception as e:
+        logger.warning(f"[weekly_report] {dept}: {e}")
+        return None
+
+
+def _fmt_delta(cur: float, prev: float) -> str:
+    """'▲ +12%' / '▼ −8%' / '— 0%' к прошлой неделе."""
+    if prev <= 0:
+        return "🆕 нет данных за прошлую неделю" if cur > 0 else "—"
+    pct = round((cur - prev) / prev * 100)
+    if pct > 0:
+        return f"🟢 ▲ +{pct}%"
+    if pct < 0:
+        return f"🔴 ▼ {pct}%"
+    return "⚪ 0%"
+
+
+async def _build_weekly_report_text() -> Optional[str]:
+    """Формирует текст отчёта по всем филиалам: оборот н/н + средний чек."""
+    today = local_now().date()
+    cur_from, cur_to = (today - timedelta(days=6)).isoformat(), today.isoformat()
+    prev_from, prev_to = (today - timedelta(days=13)).isoformat(), (today - timedelta(days=7)).isoformat()
+
+    rests = get_all_restaurants()
+    if not rests:
+        return None
+
+    cur = await asyncio.gather(*(_branch_week_metrics(r, cur_from, cur_to) for r in rests))
+    prev = await asyncio.gather(*(_branch_week_metrics(r, prev_from, prev_to) for r in rests))
+
+    def d(x): return datetime.fromisoformat(x).strftime("%d.%m")
+    lines = [f"📊 <b>Недельный отчёт</b> ({d(cur_from)}–{d(cur_to)})",
+             f"<i>сравнение с прошлой неделей ({d(prev_from)}–{d(prev_to)})</i>", ""]
+    tot_cur = tot_prev = 0.0
+    for rest, c, p in zip(rests, cur, prev):
+        name = rest.get("organization_name") or "Филиал"
+        if not c:
+            lines.append(f"🏢 <b>{name}</b>\n   ⚠️ нет данных\n")
+            continue
+        pc = p or {"revenue": 0, "avg_check": 0}
+        tot_cur += c["revenue"]; tot_prev += pc["revenue"]
+        lines.append(
+            f"🏢 <b>{name}</b>\n"
+            f"   Оборот: <b>{format_money(c['revenue'])}</b>  {_fmt_delta(c['revenue'], pc['revenue'])}\n"
+            f"   Средний чек: <b>{format_money(c['avg_check'])}</b>  {_fmt_delta(c['avg_check'], pc['avg_check'])}\n"
+        )
+    lines.append(f"━━━━━━━━━━━━━━\n💰 <b>Итого по сети:</b> {format_money(tot_cur)}  {_fmt_delta(tot_cur, tot_prev)}")
+    return "\n".join(lines)
+
+
+async def _send_weekly_report() -> bool:
+    """Шлёт отчёт получателю (@REPORT_RECIPIENT_USERNAME). True если отправлено."""
+    user = get_user_by_username(REPORT_RECIPIENT_USERNAME)
+    if not user or not user.get("telegram_id"):
+        logger.warning(f"[weekly_report] получатель @{REPORT_RECIPIENT_USERNAME} не найден в боте "
+                       f"(он должен нажать Start в боте). Отчёт не отправлен.")
+        return False
+    text = await _build_weekly_report_text()
+    if not text:
+        logger.warning("[weekly_report] нет филиалов — отчёт пуст")
+        return False
+    await _tg_send(int(user["telegram_id"]), text)
+    return True
+
+
+async def _weekly_report_scheduler():
+    """Фоновый цикл: по воскресеньям после REPORT_HOUR_LOCAL шлёт отчёт один раз."""
+    while True:
+        try:
+            now = local_now()
+            # weekday(): 6 = воскресенье
+            if now.weekday() == 6 and now.hour >= REPORT_HOUR_LOCAL:
+                today_str = now.date().isoformat()
+                if get_app_state("weekly_report_last_sent") != today_str:
+                    ok = await _send_weekly_report()
+                    if ok:
+                        set_app_state("weekly_report_last_sent", today_str)
+                        logger.info(f"[weekly_report] отправлен за {today_str}")
+        except Exception as e:
+            logger.warning(f"[weekly_report] цикл: {e}")
+        await asyncio.sleep(1800)  # проверка каждые 30 мин
 
 
 async def _tg_edit(chat_id: int, message_id: int, text: str, reply_markup: dict = None):
