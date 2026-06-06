@@ -380,18 +380,6 @@ def _demo_heatmap():
 
 DEMO_HEATMAP = _demo_heatmap()
 
-DEMO_CASHSHIFTS = {
-    "shifts": [
-        {"number": 412, "register": "Касса 1", "open": "2026-06-05 09:58", "close": "2026-06-05 23:14",
-         "responsible": "Виктория Ким", "status": "CLOSED", "cash": 320000, "card": 610000, "other": 45000, "total": 975000},
-        {"number": 411, "register": "Касса 1", "open": "2026-06-04 10:02", "close": "2026-06-04 23:05",
-         "responsible": "Артём Волков", "status": "CLOSED", "cash": 280000, "card": 540000, "other": 30000, "total": 850000},
-        {"number": 413, "register": "Касса 2", "open": "2026-06-06 09:50", "close": "", "responsible": "Камила Ахметова",
-         "status": "OPEN", "cash": 95000, "card": 210000, "other": 0, "total": 305000},
-    ],
-    "totals": {"cash": 695000, "card": 1360000, "other": 75000, "total": 2130000},
-}
-
 DEMO_STOPLIST = {
     "items": [
         {"name": "Стейк Рибай", "sku": "ST-001", "balance": 0, "category": "Основные блюда", "status": "stop"},
@@ -1032,85 +1020,6 @@ async def load_heatmap(org_id: str, period: str = "month", user: Dict = Depends(
     except Exception as e:
         print(f"[heatmap] {e}")
         return DEMO_HEATMAP
-
-
-def _cs_num(d: Dict[str, Any], *keys) -> float:
-    for k in keys:
-        v = d.get(k)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-    return 0.0
-
-
-def _cs_str(d: Dict[str, Any], *keys) -> str:
-    for k in keys:
-        v = d.get(k)
-        if v:
-            return str(v)
-    return ""
-
-
-@app.get("/api/cashshifts/{org_id}")
-async def cashshifts(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    """Кассовые смены: кто открыл/закрыл, типы оплат (нал/карта/прочее) — для сверки.
-
-    Источник — REST iikoServer /api/v2/cashshifts/list. Имена полей сумм у разных
-    версий iikoServer отличаются, поэтому парсятся защитно; при пустом ответе —
-    demo-fallback.
-    """
-    if _is_demo_user(user) or org_id == "demo-org-1":
-        return DEMO_CASHSHIFTS
-
-    real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    key = _cache_key(user.get("id", 0), "cashshifts", real_org, period)
-    cached = _get_cached(key)
-    if cached:
-        return cached
-
-    date_from, date_to = get_period_dates(period)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-    try:
-        if not hasattr(client, "get_cash_shifts"):
-            return {"shifts": [], "totals": {"cash": 0, "card": 0, "other": 0, "total": 0}}
-        raw = await client.get_cash_shifts(date_from, date_to,
-                                           dept_id=real_org, dept_name=info.get("org_name"))
-        names: Dict[str, str] = {}
-        if raw and hasattr(client, "get_employees"):
-            try:
-                names = await client.get_employees()
-            except Exception as e:
-                logger.warning(f"[cashshifts] employees: {e}")
-        shifts = []
-        tot = {"cash": 0.0, "card": 0.0, "other": 0.0, "total": 0.0}
-        for s in raw:
-            cash = _cs_num(s, "salesCash", "cashSum", "payCash")
-            card = _cs_num(s, "salesCard", "cardSum", "payCard", "salesCredit")
-            total = _cs_num(s, "payOrders", "salesTotal", "total", "sum") or (cash + card)
-            other = max(0.0, total - cash - card)
-            resp_name = _cs_str(s, "responsibleUserName", "managerName", "responsibleName", "cashier", "userName")
-            resp_id = _cs_str(s, "responsibleUserId", "managerId", "responsibleUser", "manager", "userId")
-            responsible = resp_name or names.get(resp_id, "") or "—"
-            shifts.append({
-                "number": _cs_str(s, "sessionNumber", "number", "fiscalNumber") or "—",
-                "register": _cs_str(s, "cashRegName", "cashRegNumber", "cashRegSerialNumber") or "—",
-                "open": _cs_str(s, "openDate", "open")[:16].replace("T", " "),
-                "close": _cs_str(s, "acceptDate", "closeDate", "close")[:16].replace("T", " "),
-                "responsible": responsible,
-                "status": _cs_str(s, "status", "sessionStatus") or "—",
-                "cash": round(cash), "card": round(card), "other": round(other), "total": round(total),
-            })
-            tot["cash"] += cash; tot["card"] += card; tot["other"] += other; tot["total"] += total
-        shifts.sort(key=lambda x: x["open"], reverse=True)
-        result = {"shifts": shifts, "totals": {k: round(v) for k, v in tot.items()}}
-        _set_cached(key, result)
-        return result
-    except Exception as e:
-        print(f"[cashshifts] {e}")
-        return DEMO_CASHSHIFTS
 
 
 @app.get("/api/foodcost/{org_id}")
@@ -2176,14 +2085,6 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
         return DEMO_STOPLIST
 
 
-@app.post("/api/ai/analyze")
-@limiter.limit("20/minute")
-async def ai_analyze(request: Request, payload: AIAnalyze, user: Dict = Depends(get_current_user)):
-    org_id = payload.context.get("org_id", "demo")
-    response = await analyze_with_claude(payload.question, payload.context, org_id)
-    return {"response": response}
-
-
 @app.post("/api/expenses/manual")
 async def create_manual_expense(org_id: str, payload: ExpenseCreate, user: Dict = Depends(get_current_user)):
     _get_org_id(org_id, user)  # проверка доступа
@@ -2491,10 +2392,10 @@ async def debug_tx_types(org_id: str, days: int = 60):
         return {"error": str(e)}
 
 
-@app.get("/api/debug/cashshift-raw/{org_id}")
-async def debug_cashshift_raw(org_id: str, days: int = 14):
-    """Диагностика: сырые поля кассовой смены (чтобы понять поле департамента
-    для фильтра по филиалу). Без auth. Возвращает имя филиала из БД + 2 смены as-is."""
+@app.get("/api/debug/invoices-raw/{org_id}")
+async def debug_invoices_raw(org_id: str, period: str = "month"):
+    """Диагностика накладных: что реально возвращает OLAP за период + даты бот-накладных.
+    Помогает понять, почему фильтр периода 'не работает'. Без auth."""
     conn = get_db()
     if org_id == "auto":
         row = conn.execute(
@@ -2509,31 +2410,52 @@ async def debug_cashshift_raw(org_id: str, days: int = 14):
     conn.close()
     if not row:
         return {"error": "no restaurant found", "org_id": org_id}
+    real_org = row["organization_id"]
+    org_name = row["organization_name"]
     api_password = decrypt_password(row["api_password"]) if row["api_password"] else None
     client = get_client(row["api_login"], row["iiko_server"], api_password)
     base = getattr(client, "base_url", None)
     if not base:
-        return {"error": "cloud client — not supported"}
-    end = local_now().date()
-    start = end - timedelta(days=days)
+        return {"error": "cloud client"}
+    date_from, date_to = get_period_dates(period)
+    dept = org_name or real_org
+    payload = {
+        "reportType": "TRANSACTIONS",
+        "buildSummary": "false",
+        "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id"],
+        "aggregateFields": ["Sum.Incoming"],
+        "filters": {
+            "DateTime.OperDayFilter": client._tx_date_filter(date_from, date_to),
+            "TransactionType": {"filterType": "IncludeValues", "values": ["INVOICE", "SESSION_ACCEPTANCE"]},
+            "Department": {"filterType": "IncludeValues", "values": [dept]},
+        },
+    }
+    out: Dict[str, Any] = {"org": org_name, "period": period, "range": [date_from, date_to]}
     try:
         token = await client._ensure_token()
         async with httpx.AsyncClient(timeout=60.0, verify=False) as cli:
-            resp = await cli.get(f"{base}/api/v2/cashshifts/list",
-                                 params={"key": token, "openDateFrom": start.isoformat(),
-                                         "openDateTo": end.isoformat(), "status": "ANY"})
-        if not resp.is_success:
-            return {"status": resp.status_code, "body": resp.text[:1000]}
-        data = resp.json()
-        shifts = data if isinstance(data, list) else data.get("cashShifts", data.get("data", []))
-        return {
-            "my_org_id": row["organization_id"],
-            "my_org_name": row["organization_name"],
-            "shift_count": len(shifts),
-            "sample": shifts[:2],
-        }
+            resp = await cli.post(f"{base}/api/v2/reports/olap", params={"key": token}, json=payload)
+        out["olap_status"] = resp.status_code
+        if resp.is_success:
+            d = resp.json()
+            rows = d if isinstance(d, list) else d.get("data", [])
+            out["olap_row_count"] = len(rows)
+            out["olap_sample"] = rows[:10]
+        else:
+            out["olap_body"] = resp.text[:800]
     except Exception as e:
-        return {"error": str(e)}
+        out["olap_error"] = str(e)
+    # Бот-накладные: какие даты и сколько попадает в фильтр периода
+    try:
+        bot = get_bot_invoices(limit=1000, organization_id=real_org)
+        out["bot_total"] = len(bot)
+        out["bot_dates_sample"] = [
+            {"date": b.get("date"), "created_at": b.get("created_at"), "status": b.get("status")}
+            for b in bot[:10]
+        ]
+    except Exception as e:
+        out["bot_error"] = str(e)
+    return out
 
 
 @app.get("/api/suppliers/{org_id}")
