@@ -729,6 +729,48 @@ class IikoWebClient:
             ]
             return {"writeoffs": [{"items": items}]}
 
+    async def get_cash_withdrawals(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
+        """Изъятия наличных из кассы через OLAP TRANSACTIONS.
+
+        ВНИМАНИЕ: точный код типа транзакции изъятия наличных ("CASH_REMOVAL")
+        нужно подтвердить через columns-introspection на живом iikoServer —
+        у разных версий значение может отличаться. До подтверждения возможен
+        пустой результат (тогда сработает demo-fallback в api.py).
+        """
+        filters: Dict[str, Any] = {
+            "DateTime.OperDayFilter": self._tx_date_filter(date_from, date_to),
+            "TransactionType": {"filterType": "IncludeValues", "values": ["CASH_REMOVAL"]},
+        }
+        if org_ids and org_ids[0] and org_ids[0] != "demo":
+            filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
+
+        payload = {
+            "reportType": "TRANSACTIONS",
+            "buildSummary": "false",
+            "groupByRowFields": ["DateTime.OperDayFilter", "Account.Name"],
+            "aggregateFields": ["Sum.Outgoing"],
+            "filters": filters,
+        }
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.post(
+                f"{self.base_url}/api/v2/reports/olap",
+                params={"key": token},
+                json=payload
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            rows = raw if isinstance(raw, list) else raw.get("data", [])
+            withdrawals = [
+                {
+                    "date": (r.get("DateTime.OperDayFilter") or "")[:10],
+                    "sum": float(r.get("Sum.Outgoing") or 0),
+                    "comment": r.get("Account.Name") or "Изъятие",
+                }
+                for r in rows if float(r.get("Sum.Outgoing") or 0) > 0
+            ]
+            return {"withdrawals": withdrawals}
+
     async def get_invoices(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Накладные через OLAP TRANSACTIONS INVOICE — возвращает {"invoiceIncomings": [...]}"""
         filters: Dict[str, Any] = {
