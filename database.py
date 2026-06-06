@@ -5,7 +5,10 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from cryptography.fernet import Fernet
 
-DB_PATH = os.getenv("DB_PATH", "iiko_boss.db")
+# На Render persistent disk обычно монтируется в /data. Если он есть и DB_PATH
+# не задан явно — храним БД там, чтобы ссылки/накладные/расходы переживали редеплой.
+_DEFAULT_DB_DIR = "/data" if os.path.isdir("/data") else "."
+DB_PATH = os.getenv("DB_PATH", os.path.join(_DEFAULT_DB_DIR, "iiko_boss.db"))
 
 def _get_cipher() -> Optional[Fernet]:
     key = os.getenv("ENCRYPTION_KEY")
