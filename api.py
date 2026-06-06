@@ -351,6 +351,15 @@ DEMO_WRITEOFFS = {
     ]
 }
 
+DEMO_WITHDRAWALS = {
+    "withdrawals": [
+        {"date": "2026-06-05", "sum": 120000, "comment": "Инкассация"},
+        {"date": "2026-06-04", "sum": 35000, "comment": "Выемка на закуп"},
+        {"date": "2026-06-02", "sum": 50000, "comment": "Изъятие наличных"},
+    ],
+    "total": 205000,
+}
+
 DEMO_STOPLIST = {
     "items": [
         {"name": "Стейк Рибай", "sku": "ST-001", "balance": 0, "category": "Основные блюда", "status": "stop"},
@@ -1113,8 +1122,11 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
             "iiko_error": "Ошибка iiko",
             "pending": "В обработке",
         }
-        # Показываем только последние 10 накладных бота, чтобы список не копился
-        bot_invs = get_bot_invoices(limit=10, organization_id=real_org)
+        # Бот-накладные за период (фильтр по дате) — чтобы итог считался по всему периоду
+        bot_invs = get_bot_invoices(limit=1000, organization_id=real_org)
+        d_from, d_to = date_from[:10], date_to[:10]
+        bot_invs = [b for b in bot_invs
+                    if d_from <= ((b.get("date") or b.get("created_at") or "")[:10]) <= d_to]
         for b in bot_invs:
             raw_status = b.get("status") or "draft"
             if raw_status == "pending":
@@ -1137,7 +1149,8 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
             })
 
         result_list.sort(key=lambda x: x["date"], reverse=True)
-        result = {"invoices": result_list}
+        total_amount = round(sum(float(x.get("amount") or 0) for x in result_list))
+        result = {"invoices": result_list, "total_amount": total_amount, "count": len(result_list)}
         _set_cached(key, result)
         return result
     except Exception as e:
@@ -1288,6 +1301,35 @@ async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_
     except Exception as e:
         print(f"[writeoffs] {e}")
         return DEMO_WRITEOFFS
+
+
+@app.get("/api/withdrawals/{org_id}")
+async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
+    """Изъятия наличных из кассы (выемка/инкассация) за период."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return DEMO_WITHDRAWALS
+
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    key = _cache_key(user.get("id", 0), "withdrawals", real_org, period)
+    cached = _get_cached(key)
+    if cached:
+        return cached
+
+    date_from, date_to = get_period_dates(period)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        if not hasattr(client, "get_cash_withdrawals"):
+            return {"withdrawals": [], "total": 0}
+        data = await client.get_cash_withdrawals([_olap_dept(real_org, info)], date_from, date_to)
+        ws = data.get("withdrawals", [])
+        ws.sort(key=lambda w: w.get("date", ""), reverse=True)
+        result = {"withdrawals": ws, "total": round(sum(float(w.get("sum") or 0) for w in ws))}
+        _set_cached(key, result)
+        return result
+    except Exception as e:
+        print(f"[withdrawals] {e}")
+        return {"withdrawals": [], "total": 0}
 
 
 @app.get("/api/cancels/{org_id}")
@@ -1739,6 +1781,12 @@ def _clients_segments(agg: Dict[str, Dict[str, float]]):
     loyal = sum(1 for a in agg.values() if a["orders"] >= 2)
     vip = sum(1 for a in agg.values() if a["orders"] >= 10)
     spend = sum(a["spend"] for a in agg.values())
+    # Сколько принесли лояльные и сколько ещё могут — если довести их до VIP (10 заказов)
+    loyal_revenue = sum(a["spend"] for a in agg.values() if a["orders"] >= 2)
+    loyal_potential = sum(
+        max(0, 10 - a["orders"]) * (a["spend"] / a["orders"])
+        for a in agg.values() if 2 <= a["orders"] < 10 and a["orders"]
+    )
     pct = lambda x: round(x / total * 100) if total else 0
     top = sorted(agg.items(), key=lambda kv: kv[1]["orders"], reverse=True)[:8]
     top_vip = [{"phone": _mask_phone(ph), "orders": int(a["orders"]), "spend": round(a["spend"])}
@@ -1751,6 +1799,8 @@ def _clients_segments(agg: Dict[str, Dict[str, float]]):
         "repeat_pct": pct(loyal),
         "revenue": round(spend),
         "ltv": round(spend / total) if total else 0,
+        "loyal_revenue": round(loyal_revenue),
+        "loyal_potential": round(loyal_potential),
     }
     return segments, top_vip
 
@@ -2579,7 +2629,7 @@ SETUP_IIKO_TEXT = (
     "с другой авторизацией (Bearer-токен из ЛК iiko.biz). Если ваша интеграция идёт через него — пока не поддерживаем.\n\n"
     "<b>2. Узнайте URL вашего iikoServer</b>\n"
     "Адрес iikoOffice / iikoWeb. Примеры:\n"
-    "• <code>https://saya-co.iiko.it:443/resto</code>\n"
+    "• <code>https://ваш-ресторан.iiko.it:443/resto</code>\n"
     "• <code>https://192.168.1.10:443/resto</code> (локалка)\n"
     "• <code>https://your-domain.com:443/resto</code>\n"
     "Не знаете — спросите вашего iiko-администратора или интегратора.\n\n"
