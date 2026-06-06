@@ -729,18 +729,20 @@ class IikoWebClient:
             ]
             return {"writeoffs": [{"items": items}]}
 
-    # Ключевые слова для распознавания счёта изъятия наличных по названию
-    _WITHDRAWAL_KEYWORDS = ("изъят", "инкасс", "выемк", "вынос", "изьят")
+    # Типы транзакций изъятия наличных из кассы (подтверждены на live iikoServer):
+    # PAY_COLLECTION — инкассация, PAYOUT — выплаты/изъятия из кассы.
+    _WITHDRAWAL_TYPES = ["PAY_COLLECTION", "PAYOUT"]
+    _WITHDRAWAL_TYPE_LABEL = {"PAY_COLLECTION": "Инкассация", "PAYOUT": "Выплата из кассы"}
 
     async def get_cash_withdrawals(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Изъятия наличных из кассы через OLAP TRANSACTIONS.
 
-        Не фильтруем по TransactionType (его точный код для изъятий зависит от версии
-        iikoServer и даёт 400 при неверном значении). Вместо этого тянем расход по счетам
-        и оставляем только счета, чьё название похоже на изъятие/инкассацию.
+        Фильтр по типам PAY_COLLECTION (инкассация) и PAYOUT (выплаты из кассы).
+        Изоляция по филиалу — через Department.
         """
         filters: Dict[str, Any] = {
             "DateTime.OperDayFilter": self._tx_date_filter(date_from, date_to),
+            "TransactionType": {"filterType": "IncludeValues", "values": self._WITHDRAWAL_TYPES},
         }
         if org_ids and org_ids[0] and org_ids[0] != "demo":
             filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
@@ -748,7 +750,7 @@ class IikoWebClient:
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["DateTime.DateTyped", "Account.Name"],
+            "groupByRowFields": ["DateTime.DateTyped", "Account.Name", "TransactionType"],
             "aggregateFields": ["Sum.Outgoing"],
             "filters": filters,
         }
@@ -767,23 +769,25 @@ class IikoWebClient:
                 amount = float(r.get("Sum.Outgoing") or 0)
                 if amount <= 0:
                     continue
+                tt = r.get("TransactionType") or ""
+                label = self._WITHDRAWAL_TYPE_LABEL.get(tt, "Изъятие")
                 account = str(r.get("Account.Name") or "")
-                if not any(kw in account.lower() for kw in self._WITHDRAWAL_KEYWORDS):
-                    continue
                 withdrawals.append({
                     "date": str(r.get("DateTime.DateTyped") or "")[:10],
                     "sum": amount,
-                    "comment": account or "Изъятие",
+                    "comment": f"{label}" + (f" · {account}" if account else ""),
                 })
             return {"withdrawals": withdrawals}
 
-    async def get_cash_shifts(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    async def get_cash_shifts(self, date_from: str, date_to: str,
+                              dept_id: Optional[str] = None,
+                              dept_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """Кассовые смены через REST iikoServer /api/v2/cashshifts/list.
 
-        Возвращает список смен с кассиром/ответственным, временем открытия/закрытия
-        и разбивкой по типам оплат (нал/карта/...). Поля парсятся защитно —
-        у разных версий iikoServer имена могут отличаться. Имена сотрудников —
-        резолвятся вызывающим кодом при необходимости.
+        ВАЖНО: cashshifts/list отдаёт смены ВСЕГО сервера (все филиалы). Чтобы не было
+        утечки между филиалами, жёстко фильтруем по департаменту: смена остаётся, только
+        если её департамент совпадает с dept_id (GUID) или dept_name. Если совпадение
+        определить нельзя — смена ИСКЛЮЧАЕТСЯ (безопасный режим, без утечки).
         """
         token = await self._ensure_token()
         params = {
@@ -799,7 +803,23 @@ class IikoWebClient:
             )
             resp.raise_for_status()
             raw = resp.json()
-            return raw if isinstance(raw, list) else raw.get("cashShifts", raw.get("data", []))
+            shifts = raw if isinstance(raw, list) else raw.get("cashShifts", raw.get("data", []))
+
+        if not (dept_id or dept_name):
+            return shifts
+
+        # Поля, по которым департамент может быть указан в смене
+        DEPT_KEYS = ("departmentId", "department", "groupId", "conceptionId",
+                     "conception", "pointOfSaleId", "orgId", "departmentCode")
+        wanted = {str(x).strip().lower() for x in (dept_id, dept_name) if x}
+        out = []
+        for s in shifts:
+            if not isinstance(s, dict):
+                continue
+            vals = {str(s.get(k, "")).strip().lower() for k in DEPT_KEYS if s.get(k)}
+            if vals & wanted:
+                out.append(s)
+        return out
 
     async def get_employees(self) -> Dict[str, str]:
         """Карта id→ФИО сотрудников (для резолва кассира/ответственного по смене).
