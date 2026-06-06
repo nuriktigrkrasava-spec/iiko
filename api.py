@@ -1260,13 +1260,16 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
 
     date_from, date_to = get_period_dates(period)
     client = get_client(login, info.get("iiko_server"), info.get("api_password"))
+    d_from, d_to = date_from[:10], date_to[:10]
+    result_list = []
+
+    # ── Накладные из iiko (OLAP) — изолированный try, чтобы сбой не убил весь список ──
     try:
         data = await client.get_invoices([_olap_dept(real_org, info)], date_from, date_to)
         STATUS_MAP = {
             "New": "Новая", "Processed": "Проведена", "Deleted": "Удалена",
             "InProgress": "В работе", "Accepted": "Проведена",
         }
-        result_list = []
         for inv in data.get("invoiceIncomings", []):
             supplier = inv.get("supplier", {}) or {}
             items = inv.get("items", []) or []
@@ -1278,18 +1281,16 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
                 "items": len(items),
                 "amount": float(inv.get("sum", 0) or 0)
             })
-        # Добавляем накладные из Telegram бота
-        BOT_STATUS_MAP = {
-            "draft": "Черновик",
-            "draft_in_iiko": "Создан в iiko",
-            "posted": "Проведена",
-            "needs_mapping": "Нужно сопоставление",
-            "iiko_error": "Ошибка iiko",
-            "pending": "В обработке",
-        }
-        # Бот-накладные за период (фильтр по дате) — чтобы итог считался по всему периоду
+    except Exception as e:
+        print(f"[invoices] OLAP failed: {e}")
+
+    # ── Накладные из Telegram бота за период (всегда, даже если OLAP упал) ──
+    BOT_STATUS_MAP = {
+        "draft": "Черновик", "draft_in_iiko": "Создан в iiko", "posted": "Проведена",
+        "needs_mapping": "Нужно сопоставление", "iiko_error": "Ошибка iiko", "pending": "В обработке",
+    }
+    try:
         bot_invs = get_bot_invoices(limit=1000, organization_id=real_org)
-        d_from, d_to = date_from[:10], date_to[:10]
         bot_invs = [b for b in bot_invs
                     if d_from <= ((b.get("date") or b.get("created_at") or "")[:10]) <= d_to]
         for b in bot_invs:
@@ -1312,15 +1313,14 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
                 "branch": b.get("branch") or "",
                 "by": b.get("telegram_user") or "",
             })
-
-        result_list.sort(key=lambda x: x["date"], reverse=True)
-        total_amount = round(sum(float(x.get("amount") or 0) for x in result_list))
-        result = {"invoices": result_list, "total_amount": total_amount, "count": len(result_list)}
-        _set_cached(key, result)
-        return result
     except Exception as e:
-        print(f"[invoices] {e}")
-        return {"invoices": DEMO_INVOICES}
+        print(f"[invoices] bot invoices failed: {e}")
+
+    result_list.sort(key=lambda x: x["date"], reverse=True)
+    total_amount = round(sum(float(x.get("amount") or 0) for x in result_list))
+    result = {"invoices": result_list, "total_amount": total_amount, "count": len(result_list)}
+    _set_cached(key, result)
+    return result
 
 
 # ============ PRICE STATS (Mini App «📊 Цены») ============
