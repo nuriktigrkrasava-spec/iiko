@@ -961,6 +961,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="tab" onclick="setExpenseTab('expenses', this)">Расходы</div>
     <div class="tab" onclick="setExpenseTab('invoices', this)">Накладные</div>
     <div class="tab" onclick="setExpenseTab('writeoffs', this)">Списания</div>
+    <div class="tab" onclick="setExpenseTab('withdrawals_cash', this)">Изъятия</div>
   </div>
   <div class="scroll-container" id="expenses-scroll">
     <div class="demo-banner" id="expenses-demo" style="display:none">
@@ -1064,8 +1065,14 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
 
       <div id="invoices-list-wrap">
+        <div class="subtabs" id="inv-period-tabs" style="margin-bottom:10px">
+          <div class="subtab" data-p="day" onclick="setInvoicePeriod('day', this)">День</div>
+          <div class="subtab" data-p="week" onclick="setInvoicePeriod('week', this)">Неделя</div>
+          <div class="subtab active" data-p="month" onclick="setInvoicePeriod('month', this)">Месяц</div>
+        </div>
         <div class="card">
           <div class="card-title" style="margin-bottom:12px;">Список накладных</div>
+          <div id="inv-total" style="font-weight:700;font-size:15px;margin-bottom:10px"></div>
           <div id="invoices-list"></div>
         </div>
       </div>
@@ -1109,6 +1116,18 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card">
         <div class="card-title" style="margin-bottom:12px;">По категориям</div>
         <div id="writeoff-categories"></div>
+      </div>
+    </div>
+    <div id="tab-withdrawals_cash" style="display:none">
+      <div class="subtabs" id="cashw-period-tabs" style="margin-top:16px;margin-bottom:10px">
+        <div class="subtab" data-p="day" onclick="setWithdrawalPeriod('day', this)">День</div>
+        <div class="subtab" data-p="week" onclick="setWithdrawalPeriod('week', this)">Неделя</div>
+        <div class="subtab active" data-p="month" onclick="setWithdrawalPeriod('month', this)">Месяц</div>
+      </div>
+      <div class="card">
+        <div class="card-title" style="margin-bottom:8px">Изъятия наличных</div>
+        <div id="cashw-total" style="font-weight:700;font-size:15px;margin-bottom:10px"></div>
+        <div id="cashw-list"></div>
       </div>
     </div>
   </div>
@@ -2315,18 +2334,44 @@ function renderClients(data) {
     ${seg('Ср. LTV', formatMoney(s.ltv), 'на клиента', 'var(--text)')}
     ${seg('Выручка с клиентов', formatMoney(s.revenue), 'за период', 'var(--text)')}
   </div>`;
+  if (s.loyal_revenue || s.loyal_potential) {
+    html += `<div class="card" style="margin-top:10px">
+      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px">Потенциал лояльных</div>
+      <div style="font-size:15px;font-weight:600">Принесли ${formatMoney(s.loyal_revenue)} · могут принести ещё <span style="color:#34C759">+${formatMoney(s.loyal_potential)}</span></div>
+    </div>`;
+  }
   if (data.top_vip && data.top_vip.length) {
     html += `<div class="card" style="margin-top:12px">
-      <div class="card-title" style="margin-bottom:8px">Топ клиенты</div>
+      <div class="card-title" style="margin-bottom:8px">Топ клиенты <span style="font-weight:400;font-size:12px;color:var(--text-secondary)">— нажми на клиента</span></div>
       <div class="table-container">
         <table class="data-table" style="min-width:0">
           <thead><tr><th>Телефон</th><th class="num">Заказов</th><th class="num">Сумма</th></tr></thead>
-          <tbody>${data.top_vip.map(v => `<tr><td class="name">${escHtml(v.phone)}</td><td class="num">${v.orders}</td><td class="num">${formatMoney(v.spend)}</td></tr>`).join('')}</tbody>
+          <tbody>${data.top_vip.map((v, i) => {
+            const avg = v.orders ? Math.round(v.spend / v.orders) : 0;
+            const rec = v.orders >= 10
+              ? 'VIP-клиент. Удержание: персональная акция или привилегия.'
+              : `До VIP осталось ${10 - v.orders} заказов ≈ +${formatMoney((10 - v.orders) * avg)}`;
+            return `
+            <tr onclick="toggleClientCard(${i})" style="cursor:pointer">
+              <td class="name">${escHtml(v.phone)}</td><td class="num">${v.orders}</td><td class="num">${formatMoney(v.spend)}</td>
+            </tr>
+            <tr id="cli-card-${i}" style="display:none">
+              <td colspan="3" style="background:var(--bg-secondary);font-size:13px;padding:10px">
+                <div>Принёс: <b>${formatMoney(v.spend)}</b> · Заказов: <b>${v.orders}</b> · Средний чек: <b>${formatMoney(avg)}</b></div>
+                <div style="margin-top:6px;color:var(--text-secondary)">💡 ${rec}</div>
+              </td>
+            </tr>`;
+          }).join('')}</tbody>
         </table>
       </div>
     </div>`;
   }
   wrap.innerHTML = html;
+}
+
+function toggleClientCard(i) {
+  const el = document.getElementById('cli-card-' + i);
+  if (el) el.style.display = el.style.display === 'none' ? '' : 'none';
 }
 
 function renderCategoriesChart(cats) {
@@ -2766,7 +2811,9 @@ async function loadExpenses() {
 
   if (state.expenseTab === 'invoices') {
     try {
-      const data = await apiGet(`/api/invoices/${orgId}?period=week`);
+      const data = await apiGet(`/api/invoices/${orgId}?period=${state.invoicePeriod}`);
+      const totalEl = document.getElementById('inv-total');
+      if (totalEl) totalEl.textContent = `Итого за период: ${data.count || (data.invoices||[]).length} накладных на сумму ${formatMoney(data.total_amount || 0)}`;
       const badgeClass = (raw) => {
         if (raw === 'posted') return 'badge-green';
         if (raw === 'draft_in_iiko') return 'badge-blue';
@@ -2829,6 +2876,21 @@ async function loadExpenses() {
       `).join('');
     } catch(e) { console.error(e); }
   }
+
+  if (state.expenseTab === 'withdrawals_cash') {
+    try {
+      const data = await apiGet(`/api/withdrawals/${orgId}?period=${state.withdrawalPeriod}`);
+      document.getElementById('cashw-total').textContent = `Итого изъято за период: ${formatMoney(data.total || 0)}`;
+      const ws = data.withdrawals || [];
+      document.getElementById('cashw-list').innerHTML = ws.length
+        ? ws.map(w => `
+          <div class="wc-item">
+            <div class="wc-header"><div class="wc-name">${escHtml(w.comment || 'Изъятие')}</div><div class="wc-pct">${formatMoney(w.sum)}</div></div>
+            <div class="wc-meta">${escHtml(w.date || '')}</div>
+          </div>`).join('')
+        : '<div style="color:var(--text-secondary);font-size:13px">Нет изъятий за период</div>';
+    } catch(e) { console.error(e); }
+  }
 }
 
 function setExpenseTab(tab, el) {
@@ -2836,15 +2898,33 @@ function setExpenseTab(tab, el) {
   state.expenseTab = tab;
   document.querySelectorAll('#expense-tabs .tab').forEach(t => t.classList.remove('active'));
   if (el) el.classList.add('active');
-  ['foodcost', 'expenses', 'invoices', 'writeoffs'].forEach(t => {
+  ['foodcost', 'expenses', 'invoices', 'writeoffs', 'withdrawals_cash'].forEach(t => {
     document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
   });
+  loadExpenses();
+}
+
+state.withdrawalPeriod = state.withdrawalPeriod || 'month';
+function setWithdrawalPeriod(p, el) {
+  haptic();
+  state.withdrawalPeriod = p;
+  document.querySelectorAll('#cashw-period-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
   loadExpenses();
 }
 
 // Invoices subview (📋 Список / 📊 Цены)
 state.invoiceSubview = state.invoiceSubview || 'list';
 state.priceSearch = state.priceSearch || { query: '', timer: null };
+state.invoicePeriod = state.invoicePeriod || 'month';
+
+function setInvoicePeriod(p, el) {
+  haptic();
+  state.invoicePeriod = p;
+  document.querySelectorAll('#inv-period-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadExpenses();
+}
 
 function switchInvoiceSubview(view) {
   state.invoiceSubview = view;
