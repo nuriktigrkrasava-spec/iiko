@@ -926,12 +926,8 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     </div>
 
     <div id="staff-view-heatmap" style="display:none">
-      <div class="subtabs" id="hm-period-tabs" style="margin-top:16px;margin-bottom:10px">
-        <div class="subtab" data-p="week" onclick="setHeatmapPeriod('week', this)">Неделя</div>
-        <div class="subtab active" data-p="month" onclick="setHeatmapPeriod('month', this)">Месяц</div>
-      </div>
-      <div class="card">
-        <div class="card-title" style="margin-bottom:8px">Час пик — когда больше заказов</div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-title" style="margin-bottom:8px">Час пик — когда больше заказов <span style="font-weight:400;font-size:12px;color:var(--text-secondary)">· за неделю</span></div>
         <div id="hm-peak" style="font-size:14px;color:var(--text);font-weight:600;margin-bottom:14px"></div>
         <div id="hm-grid"></div>
       </div>
@@ -2667,14 +2663,7 @@ function setStaffSubtab(view, el) {
 }
 
 // ---- Час пик (heatmap загрузки по дням×часам) ----
-state.heatmapPeriod = state.heatmapPeriod || 'month';
-function setHeatmapPeriod(p, el) {
-  haptic();
-  state.heatmapPeriod = p;
-  document.querySelectorAll('#hm-period-tabs .subtab').forEach(t => t.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadHeatmap();
-}
+state.heatmapPeriod = 'week';  // всегда неделя (переключатель убран)
 
 async function loadHeatmap() {
   if (!state.restaurant) return;
