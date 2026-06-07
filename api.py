@@ -655,12 +655,36 @@ async def dashboard(org_id: str, period: str = "today",
             logger.warning(f"[dashboard] {real_org}: {e}")
             return []
 
+    # Выручка = кассовые смены (операционный день), как в кассе. SALES OLAP режет
+    # по дате открытия заказа и расходится с кассой; смены — эталон.
+    async def fetch_revenue(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        if not hasattr(client, "get_cashshifts"):
+            return None  # облачный клиент — кассовых смен нет, fallback на OLAP
+        try:
+            sessions = await client.get_cashshifts(date_from, date_to)
+            # ключ дедупа — чтобы филиалы на одном сервере с одними кредами не задвоились
+            return ((info.get("iiko_server"), info.get("api_login")),
+                    client.cashshifts_revenue(sessions))
+        except Exception as e:
+            logger.warning(f"[dashboard] cashshifts {real_org}: {e}")
+            return None
+
     try:
         results = await asyncio.gather(*(fetch_one(o) for o in orgs))
         all_rows = [row for batch in results for row in batch]
-        total = sum(r.get("DishAmountSum", 0) for r in all_rows)
+        olap_total = sum(r.get("DishAmountSum", 0) for r in all_rows)
         guests = sum(r.get("GuestNum", 0) for r in all_rows)
         orders = sum(r.get("OrdersCount", 0) for r in all_rows)
+
+        rev_results = await asyncio.gather(*(fetch_revenue(o) for o in orgs))
+        rev_by_client: Dict[tuple, float] = {}
+        for rr in rev_results:
+            if rr:
+                rev_by_client[rr[0]] = rr[1]
+        # есть смены → берём их; иначе старый OLAP-итог (облако/ошибка)
+        total = round(sum(rev_by_client.values()), 2) if rev_by_client else olap_total
         avg_check = total / guests if guests else 0
 
         resp = {
@@ -1466,37 +1490,31 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
         "org_name": row["organization_name"],
         "period": [date_from, date_to],
     }
+    try:
+        sessions = await client.get_cashshifts(date_from, date_to)
+    except Exception as e:
+        out["cashshifts_error"] = f"{type(e).__name__}: {e}"
+        return out
 
-    iso = date_from[:10]
-    ddmm = datetime.strptime(iso, "%Y-%m-%d").strftime("%d.%m.%Y")
-    base = client.base_url
-    token2 = await client._ensure_token()
-
-    # Один прогон нескольких вариантов эндпоинта/формата → увидим рабочий и тело ошибок.
-    variants = [
-        ("v1_ddmm",        f"{base}/api/closeSession/list",
-         {"key": token2, "dateFrom": ddmm, "dateTo": ddmm}),
-        ("v1_iso",         f"{base}/api/closeSession/list",
-         {"key": token2, "dateFrom": iso, "dateTo": iso}),
-        ("v2_openDate_iso", f"{base}/api/v2/cashshifts/list",
-         {"key": token2, "openDateFrom": iso, "openDateTo": iso, "status": "ANY"}),
-        ("v2_dateFrom_iso", f"{base}/api/v2/cashshifts/list",
-         {"key": token2, "dateFrom": iso, "dateTo": iso}),
-        ("events_sessions", f"{base}/api/events/sessions",
-         {"key": token2, "from": f"{iso}T00:00:00.000", "to": f"{iso}T23:59:59.999"}),
-    ]
-    out["probes"] = []
-    async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
-        for name, url, params in variants:
-            try:
-                r = await cli.get(url, params=params)
-                out["probes"].append({
-                    "name": name, "status": r.status_code,
-                    "ctype": r.headers.get("content-type", ""),
-                    "body": r.text[:600],
-                })
-            except Exception as e:
-                out["probes"].append({"name": name, "error": f"{type(e).__name__}: {e}"})
+    out["session_count"] = len(sessions)
+    out["total_payOrders"] = client.cashshifts_revenue(sessions)
+    # Разбивка по концепциям — увидим, не сидят ли на одном сервере чужие филиалы.
+    by_conc: Dict[str, float] = {}
+    for s in sessions:
+        cid = str(s.get("conceptionId") or "—")
+        try:
+            by_conc[cid] = round(by_conc.get(cid, 0.0) + float(s.get("payOrders") or 0), 2)
+        except (TypeError, ValueError):
+            pass
+    out["by_conception"] = by_conc
+    out["sessions"] = [{
+        "cashRegNumber": s.get("cashRegNumber"),
+        "sessionNumber": s.get("sessionNumber"),
+        "status": s.get("sessionStatus"),
+        "openDate": s.get("openDate"),
+        "payOrders": s.get("payOrders"),
+        "conceptionId": s.get("conceptionId"),
+    } for s in sessions]
     return out
 
 

@@ -780,36 +780,40 @@ class IikoWebClient:
                 })
             return {"withdrawals": withdrawals}
 
-    async def get_cashshifts(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
-        """Кассовые смены (closeSession/list) — выручка по ОПЕРАЦИОННОМУ дню.
+    async def get_cashshifts(self, date_from: str, date_to: str,
+                             status: str = "ANY") -> List[Dict[str, Any]]:
+        """Кассовые смены (cashshifts/list v2) — выручка по ОПЕРАЦИОННОМУ дню.
 
         Это эталон, который видит ресторатор в кассе: SALES OLAP режет по дате
         ОТКРЫТИЯ заказа, а касса — по учётному дню смены, поэтому только отсюда
-        цифра совпадает 1:1. Возвращает сырые CloseSessionDto (список dict),
-        фильтрацию по подразделению/выбор поля выручки делает вызывающий код.
+        цифра совпадает 1:1. Выручка смены = поле `payOrders` (проверено:
+        payOrders == salesCash+salesCard+salesCredit). Возвращает список смен.
 
-        Даты принимаем как YYYY-MM-DD (как везде в проекте), конвертим в DD.MM.YYYY,
-        которого ждёт resto API.
+        Эндпоинт ждёт openDateFrom/openDateTo в формате yyyy-MM-dd (подтверждено
+        пробами: closeSession/list даёт пустой XML, v2 cashshifts/list — JSON).
         """
-        def _ddmmyyyy(d: str) -> str:
-            return datetime.strptime(d[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
-
+        iso_from, iso_to = date_from[:10], date_to[:10]
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
             resp = await client.get(
-                f"{self.base_url}/api/closeSession/list",
-                params={"key": token, "dateFrom": _ddmmyyyy(date_from),
-                        "dateTo": _ddmmyyyy(date_to)},
+                f"{self.base_url}/api/v2/cashshifts/list",
+                params={"key": token, "openDateFrom": iso_from,
+                        "openDateTo": iso_to, "status": status},
             )
             resp.raise_for_status()
-            # resto API может отдать JSON-массив или XML — поддержим оба.
-            ctype = resp.headers.get("content-type", "")
-            if "json" in ctype.lower() or resp.text.lstrip()[:1] in "[{":
-                raw = resp.json()
-                return raw if isinstance(raw, list) else raw.get("data", raw.get("sessions", []))
-            import xml.etree.ElementTree as ET
-            root = ET.fromstring(resp.text)
-            return [{child.tag: child.text for child in node} for node in root]
+            raw = resp.json()
+            return raw if isinstance(raw, list) else raw.get("data", raw.get("sessions", []))
+
+    @staticmethod
+    def cashshifts_revenue(sessions: List[Dict[str, Any]]) -> float:
+        """Сумма выручки по сменам = Σ payOrders (как в кассе)."""
+        total = 0.0
+        for s in sessions:
+            try:
+                total += float(s.get("payOrders") or 0)
+            except (TypeError, ValueError):
+                pass
+        return round(total, 2)
 
     async def get_invoices(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Накладные через OLAP TRANSACTIONS INVOICE — возвращает {"invoiceIncomings": [...]}.
