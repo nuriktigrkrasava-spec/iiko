@@ -1507,6 +1507,32 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
         except (TypeError, ValueError):
             pass
     out["by_conception"] = by_conc
+
+    # карта conceptionId -> имя (чтобы понять, какая концепция = этот филиал)
+    try:
+        token3 = await client._ensure_token()
+        async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
+            rc = await cli.get(f"{client.base_url}/api/v2/entities/conceptions/list",
+                               params={"key": token3, "includeDeleted": "false"})
+        out["conceptions_status"] = rc.status_code
+        ct = rc.headers.get("content-type", "").lower()
+        if rc.status_code == 200 and "json" in ct:
+            out["conceptions"] = {c.get("id"): c.get("name")
+                                  for c in rc.json() if isinstance(c, dict)}
+        else:
+            out["conceptions_raw"] = rc.text[:500]
+    except Exception as e:
+        out["conceptions_error"] = f"{type(e).__name__}: {e}"
+
+    # OLAP этого Department(org_name), группировка по Conception(имя) — чем торгует филиал
+    try:
+        r = await client.olap_report(row["organization_name"], date_from, date_to,
+                                     ["Conception"], ["DishAmountSum"])
+        out["olap_by_conception_name"] = {
+            x.get("Conception"): x.get("DishAmountSum") for x in r.get("data", [])}
+    except Exception as e:
+        out["olap_by_conception_error"] = f"{type(e).__name__}: {e}"
+
     out["sessions"] = [{
         "cashRegNumber": s.get("cashRegNumber"),
         "sessionNumber": s.get("sessionNumber"),
