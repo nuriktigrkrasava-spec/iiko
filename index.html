@@ -931,18 +931,9 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <div class="subtab active" data-p="month" onclick="setHeatmapPeriod('month', this)">Месяц</div>
       </div>
       <div class="card">
-        <div class="card-title" style="margin-bottom:4px">Час пик — загрузка по заказам</div>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;line-height:1.5">
-          Строки — дни недели, столбцы — часы. Число в ячейке — сколько заказов открыто в этот час.
-          Чем насыщеннее зелёный, тем выше загрузка.
-        </div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary);margin-bottom:12px">
-          <span>меньше</span>
-          <span style="display:inline-block;width:90px;height:10px;border-radius:5px;background:linear-gradient(90deg, rgba(52,199,89,0.15), rgba(52,199,89,1))"></span>
-          <span>больше</span>
-        </div>
-        <div id="hm-peak" style="font-size:13px;color:var(--text);font-weight:600;margin-bottom:12px"></div>
-        <div id="hm-grid" style="overflow-x:auto"></div>
+        <div class="card-title" style="margin-bottom:8px">Час пик — когда больше заказов</div>
+        <div id="hm-peak" style="font-size:14px;color:var(--text);font-weight:600;margin-bottom:14px"></div>
+        <div id="hm-grid"></div>
       </div>
     </div>
 
@@ -2317,54 +2308,41 @@ function renderClients(data) {
   const s = data.segments;
   if (!s) { wrap.innerHTML = ''; return; }
   const n = v => (v || 0).toLocaleString('ru');
-  const seg = (label, value, sub, color) => `
-    <div class="seg-card">
-      <div class="seg-label">${label}</div>
+  // Карточка-сегмент: тап раскрывает показатели/пояснение
+  const seg = (i, label, value, sub, color, detail) => `
+    <div class="seg-card" onclick="toggleClientCard(${i})" style="cursor:pointer">
+      <div class="seg-label">${label} <span style="color:var(--text-secondary)">▾</span></div>
       <div class="seg-value" style="color:${color}">${value}</div>
       <div class="seg-sub">${sub}</div>
+      <div id="cli-card-${i}" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--divider);font-size:12px;color:var(--text-secondary);text-align:left;line-height:1.45">${detail}</div>
     </div>`;
+  const total = s.total || 0;
   let html = `<div class="seg-grid">
-    ${seg('Уникальные', n(s.unique.count), s.unique.pct + '% · 1 заказ', 'var(--text)')}
-    ${seg('Лояльные', n(s.loyal.count), s.loyal.pct + '% · 2+ заказа', '#34C759')}
-    ${seg('VIP', n(s.vip.count), s.vip.pct + '% · 10+ заказов', '#5B9CF6')}
-    ${seg('Повторные', s.repeat_pct + '%', 'клиентов с 2+', '#FF9F0A')}
+    ${seg(0, 'Уникальные', n(s.unique.count), s.unique.pct + '% · 1 заказ', 'var(--text)',
+      `${n(s.unique.count)} клиентов заказали 1 раз (${s.unique.pct}% от ${n(total)}). Цель — вернуть на 2-й заказ.`)}
+    ${seg(1, 'Лояльные', n(s.loyal.count), s.loyal.pct + '% · 2+ заказа', '#34C759',
+      `${n(s.loyal.count)} клиентов с 2+ заказами. Принесли <b>${formatMoney(s.loyal_revenue)}</b>. Могут принести ещё <b style="color:#34C759">+${formatMoney(s.loyal_potential)}</b>, если довести до 10 заказов.`)}
+    ${seg(2, 'VIP', n(s.vip.count), s.vip.pct + '% · 10+ заказов', '#5B9CF6',
+      `${n(s.vip.count)} клиентов с 10+ заказами (${s.vip.pct}%). Самые ценные — удерживать персонально.`)}
+    ${seg(3, 'Повторные', s.repeat_pct + '%', 'клиентов с 2+', '#FF9F0A',
+      `${s.repeat_pct}% клиентов возвращаются (2+ заказа). Чем выше — тем стабильнее выручка.`)}
   </div>
   <div class="seg-grid" style="margin-top:10px">
-    ${seg('Ср. LTV', formatMoney(s.ltv), 'на клиента', 'var(--text)')}
-    ${seg('Выручка с клиентов', formatMoney(s.revenue), 'за период', 'var(--text)')}
+    ${seg(4, 'Ср. LTV', formatMoney(s.ltv), 'на клиента', 'var(--text)',
+      `В среднем один клиент принёс <b>${formatMoney(s.ltv)}</b> за период.`)}
+    ${seg(5, 'Выручка с клиентов', formatMoney(s.revenue), 'за период', 'var(--text)',
+      `Всего <b>${formatMoney(s.revenue)}</b> от ${n(total)} клиентов за период.`)}
   </div>`;
-  if (s.loyal_revenue || s.loyal_potential) {
-    html += `<div class="card" style="margin-top:10px">
-      <div style="font-size:13px;color:var(--text-secondary);margin-bottom:4px">Потенциал лояльных</div>
-      <div style="font-size:15px;font-weight:600">Принесли ${formatMoney(s.loyal_revenue)} · могут принести ещё <span style="color:#34C759">+${formatMoney(s.loyal_potential)}</span></div>
-    </div>`;
-  }
   if (data.top_vip && data.top_vip.length) {
-    html += `<div style="margin-top:12px;margin-bottom:8px;font-weight:600;font-size:15px">Топ клиенты <span style="font-weight:400;font-size:12px;color:var(--text-secondary)">— нажми на карточку</span></div>`;
-    html += data.top_vip.map((v, i) => {
-      const avg = v.orders ? Math.round(v.spend / v.orders) : 0;
-      const rec = v.orders >= 10
-        ? 'VIP-клиент. Удержание: персональная акция или привилегия.'
-        : `До VIP осталось ${10 - v.orders} заказов ≈ +${formatMoney((10 - v.orders) * avg)}`;
-      const badge = v.orders >= 10 ? '#5B9CF6' : (v.orders >= 2 ? '#34C759' : 'var(--text-secondary)');
-      return `
-      <div class="card client-card" onclick="toggleClientCard(${i})" style="margin-bottom:8px;cursor:pointer;padding:12px">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div style="display:flex;align-items:center;gap:8px">
-            <span style="width:8px;height:8px;border-radius:50%;background:${badge};display:inline-block"></span>
-            <span style="font-weight:600">${escHtml(v.phone)}</span>
-          </div>
-          <div style="text-align:right">
-            <div style="font-weight:700">${formatMoney(v.spend)}</div>
-            <div style="font-size:12px;color:var(--text-secondary)">${v.orders} заказов</div>
-          </div>
-        </div>
-        <div id="cli-card-${i}" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--divider);font-size:13px">
-          <div>Принёс: <b>${formatMoney(v.spend)}</b> · Заказов: <b>${v.orders}</b> · Средний чек: <b>${formatMoney(avg)}</b></div>
-          <div style="margin-top:6px;color:var(--text-secondary)">💡 ${rec}</div>
-        </div>
-      </div>`;
-    }).join('');
+    html += `<div class="card" style="margin-top:12px">
+      <div class="card-title" style="margin-bottom:8px">Топ клиенты</div>
+      <div class="table-container">
+        <table class="data-table" style="min-width:0">
+          <thead><tr><th>Телефон</th><th class="num">Заказов</th><th class="num">Сумма</th></tr></thead>
+          <tbody>${data.top_vip.map(v => `<tr><td class="name">${escHtml(v.phone)}</td><td class="num">${v.orders}</td><td class="num">${formatMoney(v.spend)}</td></tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
   }
   wrap.innerHTML = html;
 }
@@ -2709,33 +2687,43 @@ async function loadHeatmap() {
     const days = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
     const cells = data.cells || [];
     if (!cells.length) { grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Нет данных за период</div>'; peakEl.textContent = ''; return; }
-    const hours = [...new Set(cells.map(c => c.h))].sort((a, b) => a - b);
-    const mx = data.max || 1;
-    const map = {};
-    cells.forEach(c => { map[c.d + '_' + c.h] = c; });
-    const heat = (o) => {
-      if (!o) return 'transparent';
-      const t = o / mx; // 0..1
-      const alpha = 0.15 + t * 0.85;
-      return `rgba(52,199,89,${alpha.toFixed(2)})`;
+
+    // Суммируем заказы по часам и по дням недели
+    const byHour = {}, byDay = {};
+    cells.forEach(c => {
+      byHour[c.h] = (byHour[c.h] || 0) + c.orders;
+      byDay[c.d] = (byDay[c.d] || 0) + c.orders;
+    });
+
+    // Строка пика: самый загруженный час и день
+    const topHour = Object.entries(byHour).sort((a, b) => b[1] - a[1])[0];
+    const topDay = Object.entries(byDay).sort((a, b) => b[1] - a[1])[0];
+    peakEl.innerHTML = `🔥 Больше всего заказов: <span style="color:#34C759">${topHour[0]}:00</span>, день — <span style="color:#34C759">${days[topDay[0]]}</span>`;
+
+    const bar = (label, v, mx, color) => {
+      const w = mx ? Math.round(v / mx * 100) : 0;
+      return `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:13px">
+          <div style="width:46px;color:var(--text-secondary)">${label}</div>
+          <div style="flex:1;background:var(--bg-secondary);border-radius:6px;overflow:hidden">
+            <div style="width:${w}%;min-width:2px;height:16px;background:${color};border-radius:6px"></div>
+          </div>
+          <div style="width:42px;text-align:right;font-weight:600">${v}</div>
+        </div>`;
     };
-    let html = `<table style="border-collapse:collapse;font-size:11px"><thead><tr><th style="padding:2px 4px"></th>`;
-    hours.forEach(h => { html += `<th style="padding:2px 3px;color:var(--text-secondary);font-weight:500">${h}</th>`; });
-    html += `</tr></thead><tbody>`;
-    for (let d = 0; d < 7; d++) {
-      html += `<tr><td style="padding:2px 6px;color:var(--text-secondary)">${days[d]}</td>`;
-      hours.forEach(h => {
-        const c = map[d + '_' + h];
-        const o = c ? c.orders : 0;
-        html += `<td title="${days[d]} ${h}:00 — ${o} заказов" style="width:20px;height:20px;background:${heat(o)};border:1px solid var(--bg-secondary);text-align:center;color:${o && o / mx > 0.6 ? '#fff' : 'var(--text-secondary)'}">${o || ''}</td>`;
-      });
-      html += `</tr>`;
-    }
-    html += `</tbody></table>`;
+
+    // Полоски по дням недели (Пн–Вс)
+    const maxD = Math.max(...Object.values(byDay), 1);
+    let html = '<div style="font-size:12px;color:var(--text-secondary);margin:0 0 6px">Заказы по дням недели</div>';
+    for (let d = 0; d < 7; d++) html += bar(days[d], byDay[d] || 0, maxD, '#5B9CF6');
+
+    // Полоски по часам
+    const hoursSorted = Object.keys(byHour).map(Number).sort((a, b) => a - b);
+    const maxH = Math.max(...Object.values(byHour), 1);
+    html += '<div style="font-size:12px;color:var(--text-secondary);margin:14px 0 6px">Заказы по часам</div>';
+    hoursSorted.forEach(h => { html += bar(`${h}:00`, byHour[h], maxH, '#34C759'); });
+
     grid.innerHTML = html;
-    if (data.peak && data.peak.orders) {
-      peakEl.textContent = `🔥 Пик: ${days[data.peak.d]} в ${data.peak.h}:00 — ${data.peak.orders} заказов`;
-    }
   } catch (e) { console.error(e); grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Ошибка загрузки</div>'; }
 }
 
