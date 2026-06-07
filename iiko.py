@@ -780,6 +780,37 @@ class IikoWebClient:
                 })
             return {"withdrawals": withdrawals}
 
+    async def get_cashshifts(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """Кассовые смены (closeSession/list) — выручка по ОПЕРАЦИОННОМУ дню.
+
+        Это эталон, который видит ресторатор в кассе: SALES OLAP режет по дате
+        ОТКРЫТИЯ заказа, а касса — по учётному дню смены, поэтому только отсюда
+        цифра совпадает 1:1. Возвращает сырые CloseSessionDto (список dict),
+        фильтрацию по подразделению/выбор поля выручки делает вызывающий код.
+
+        Даты принимаем как YYYY-MM-DD (как везде в проекте), конвертим в DD.MM.YYYY,
+        которого ждёт resto API.
+        """
+        def _ddmmyyyy(d: str) -> str:
+            return datetime.strptime(d[:10], "%Y-%m-%d").strftime("%d.%m.%Y")
+
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/closeSession/list",
+                params={"key": token, "dateFrom": _ddmmyyyy(date_from),
+                        "dateTo": _ddmmyyyy(date_to)},
+            )
+            resp.raise_for_status()
+            # resto API может отдать JSON-массив или XML — поддержим оба.
+            ctype = resp.headers.get("content-type", "")
+            if "json" in ctype.lower() or resp.text.lstrip()[:1] in "[{":
+                raw = resp.json()
+                return raw if isinstance(raw, list) else raw.get("data", raw.get("sessions", []))
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp.text)
+            return [{child.tag: child.text for child in node} for node in root]
+
     async def get_invoices(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Накладные через OLAP TRANSACTIONS INVOICE — возвращает {"invoiceIncomings": [...]}.
 

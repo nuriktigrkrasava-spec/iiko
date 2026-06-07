@@ -1431,56 +1431,61 @@ async def weekly_report_preview(
     return result
 
 
-@app.get("/api/debug/sales-columns")
-async def debug_sales_columns(token: Optional[str] = Query(None)):
-    """РАЗОВО: список SALES-полей, связанных с днём/датой — чтобы найти точное имя
-    операционного дня. Закрыто тем же токеном, что превью отчёта. Потом удалю."""
+@app.get("/api/debug/cashshifts")
+async def debug_cashshifts(token: Optional[str] = Query(None),
+                           org: Optional[str] = Query(None),
+                           period: str = Query("yesterday")):
+    """РАЗОВО: сверка кассовых смен с кассой. Закрыто REPORT_PREVIEW_TOKEN.
+    Берём ресторан (по вхождению `org` в название, иначе первый с iiko_server),
+    тянем closeSession/list за период и считаем кандидаты на «выручку», чтобы
+    понять, какое поле = касса, и есть ли у смены поле подразделения. Потом удалю."""
     if token != REPORT_PREVIEW_TOKEN:
         raise HTTPException(status_code=404, detail="Not Found")
     conn = get_db()
-    row = conn.execute(
-        "SELECT api_login, iiko_server, api_password FROM restaurants "
-        "WHERE iiko_server IS NOT NULL LIMIT 1"
-    ).fetchone()
+    if org:
+        row = conn.execute(
+            "SELECT api_login, iiko_server, api_password, organization_name "
+            "FROM restaurants WHERE iiko_server IS NOT NULL "
+            "AND organization_name LIKE ? LIMIT 1", (f"%{org}%",)
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT api_login, iiko_server, api_password, organization_name "
+            "FROM restaurants WHERE iiko_server IS NOT NULL LIMIT 1"
+        ).fetchone()
     conn.close()
     if not row:
         return {"error": "no restaurant"}
     pw = decrypt_password(row["api_password"]) if row["api_password"] else None
     client = get_client(row["api_login"], row["iiko_server"], pw)
-    base = getattr(client, "base_url", None)
-    if not base:
+    if not getattr(client, "base_url", None):
         return {"error": "cloud client"}
-    out: Dict[str, Any] = {}
-    # 1) пробуем штатную интроспекцию колонок SALES
+
+    date_from, date_to = get_period_dates(period)
+    out: Dict[str, Any] = {
+        "org_name": row["organization_name"],
+        "period": [date_from, date_to],
+    }
     try:
-        cols = await client.get_olap_columns("SALES")
-        names = []
-        for c in cols:
-            if isinstance(c, dict):
-                names.append(c.get("name") or c.get("display") or "")
-            else:
-                names.append(str(c))
-        out["day_fields"] = sorted({n for n in names
-                                    if any(k in n.lower() for k in ("day", "date", "oper", "typed"))})
-        out["total_cols"] = len(names)
+        sessions = await client.get_cashshifts(date_from, date_to)
     except Exception as e:
-        out["columns_error"] = str(e)
-    # 2) пробуем фильтр OperDay напрямую — работает ли (200 vs 400)
-    try:
-        token2 = await client._ensure_token()
-        today = local_now().date().isoformat()
-        payload = {
-            "reportType": "SALES", "buildSummary": "false",
-            "groupByRowFields": ["OpenDate.Typed"], "aggregateFields": ["DishSumInt"],
-            "filters": {"OpenDate.OperDayFilter": {
-                "filterType": "DateRange", "periodType": "CUSTOM",
-                "from": today, "to": today, "includeLow": "true", "includeHigh": "true"}},
-        }
-        async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
-            r = await cli.post(f"{base}/api/v2/reports/olap", params={"key": token2}, json=payload)
-        out["operday_filter_test"] = {"status": r.status_code, "body": r.text[:300]}
-    except Exception as e:
-        out["operday_filter_error"] = str(e)
+        out["cashshifts_error"] = f"{type(e).__name__}: {e}"
+        return out
+
+    def _f(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    out["session_count"] = len(sessions)
+    out["sum_payOrders"] = round(sum(_f(s.get("payOrders")) for s in sessions), 2)
+    out["sum_salesCash+Card+Credit"] = round(sum(
+        _f(s.get("salesCash")) + _f(s.get("salesCard")) + _f(s.get("salesCredit"))
+        for s in sessions), 2)
+    if sessions:
+        out["first_session_keys"] = sorted(sessions[0].keys())
+        out["first_session_sample"] = sessions[0]
     return out
 
 
