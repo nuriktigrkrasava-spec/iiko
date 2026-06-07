@@ -1508,30 +1508,33 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
             pass
     out["by_conception"] = by_conc
 
-    # карта conceptionId -> имя (чтобы понять, какая концепция = этот филиал)
+    # ГЛАВНОЕ: достать conceptionId этого филиала ПО GUID из OLAP (имена грязные).
+    # Пробуем разные имена поля id концепции — какое примет сервер.
+    for fld in ["Conception.Id", "ConceptionId", "Conception.Code", "Conception.Num"]:
+        try:
+            r = await client.olap_report(row["organization_name"], date_from, date_to,
+                                         [fld], ["DishAmountSum"])
+            out[f"olap[{fld}]"] = [
+                {fld: x.get(fld), "sum": x.get("DishAmountSum")} for x in r.get("data", [])]
+        except Exception as e:
+            out[f"olap[{fld}]_err"] = f"{type(e).__name__}: {str(e)[:120]}"
+
+    # departments XML целиком — вдруг там есть conceptionId на подразделение
     try:
         token3 = await client._ensure_token()
         async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
-            rc = await cli.get(f"{client.base_url}/api/v2/entities/conceptions/list",
-                               params={"key": token3, "includeDeleted": "false"})
-        out["conceptions_status"] = rc.status_code
-        ct = rc.headers.get("content-type", "").lower()
-        if rc.status_code == 200 and "json" in ct:
-            out["conceptions"] = {c.get("id"): c.get("name")
-                                  for c in rc.json() if isinstance(c, dict)}
-        else:
-            out["conceptions_raw"] = rc.text[:500]
+            rd = await cli.get(f"{client.base_url}/api/corporation/departments",
+                               params={"key": token3})
+            out["departments_raw"] = rd.text[:1500]
+            # альтернативные эндпоинты списка концепций
+            for path in ["/api/conceptions", "/api/v2/entities/list?rootType=Conception"]:
+                try:
+                    ra = await cli.get(f"{client.base_url}{path}", params={"key": token3})
+                    out[f"alt[{path}]"] = {"status": ra.status_code, "body": ra.text[:400]}
+                except Exception as e:
+                    out[f"alt[{path}]_err"] = f"{type(e).__name__}: {str(e)[:120]}"
     except Exception as e:
-        out["conceptions_error"] = f"{type(e).__name__}: {e}"
-
-    # OLAP этого Department(org_name), группировка по Conception(имя) — чем торгует филиал
-    try:
-        r = await client.olap_report(row["organization_name"], date_from, date_to,
-                                     ["Conception"], ["DishAmountSum"])
-        out["olap_by_conception_name"] = {
-            x.get("Conception"): x.get("DishAmountSum") for x in r.get("data", [])}
-    except Exception as e:
-        out["olap_by_conception_error"] = f"{type(e).__name__}: {e}"
+        out["departments_error"] = f"{type(e).__name__}: {e}"
 
     out["sessions"] = [{
         "cashRegNumber": s.get("cashRegNumber"),
