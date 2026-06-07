@@ -1431,6 +1431,59 @@ async def weekly_report_preview(
     return result
 
 
+@app.get("/api/debug/sales-columns")
+async def debug_sales_columns(token: Optional[str] = Query(None)):
+    """РАЗОВО: список SALES-полей, связанных с днём/датой — чтобы найти точное имя
+    операционного дня. Закрыто тем же токеном, что превью отчёта. Потом удалю."""
+    if token != REPORT_PREVIEW_TOKEN:
+        raise HTTPException(status_code=404, detail="Not Found")
+    conn = get_db()
+    row = conn.execute(
+        "SELECT api_login, iiko_server, api_password FROM restaurants "
+        "WHERE iiko_server IS NOT NULL LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"error": "no restaurant"}
+    pw = decrypt_password(row["api_password"]) if row["api_password"] else None
+    client = get_client(row["api_login"], row["iiko_server"], pw)
+    base = getattr(client, "base_url", None)
+    if not base:
+        return {"error": "cloud client"}
+    out: Dict[str, Any] = {}
+    # 1) пробуем штатную интроспекцию колонок SALES
+    try:
+        cols = await client.get_olap_columns("SALES")
+        names = []
+        for c in cols:
+            if isinstance(c, dict):
+                names.append(c.get("name") or c.get("display") or "")
+            else:
+                names.append(str(c))
+        out["day_fields"] = sorted({n for n in names
+                                    if any(k in n.lower() for k in ("day", "date", "oper", "typed"))})
+        out["total_cols"] = len(names)
+    except Exception as e:
+        out["columns_error"] = str(e)
+    # 2) пробуем фильтр OperDay напрямую — работает ли (200 vs 400)
+    try:
+        token2 = await client._ensure_token()
+        today = local_now().date().isoformat()
+        payload = {
+            "reportType": "SALES", "buildSummary": "false",
+            "groupByRowFields": ["OpenDate.Typed"], "aggregateFields": ["DishSumInt"],
+            "filters": {"OpenDate.OperDayFilter": {
+                "filterType": "DateRange", "periodType": "CUSTOM",
+                "from": today, "to": today, "includeLow": "true", "includeHigh": "true"}},
+        }
+        async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
+            r = await cli.post(f"{base}/api/v2/reports/olap", params={"key": token2}, json=payload)
+        out["operday_filter_test"] = {"status": r.status_code, "body": r.text[:300]}
+    except Exception as e:
+        out["operday_filter_error"] = str(e)
+    return out
+
+
 @app.get("/api/withdrawals/{org_id}")
 async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
     """Изъятия наличных из кассы (выемка/инкассация) за период."""
