@@ -815,6 +815,31 @@ class IikoWebClient:
                 pass
         return round(total, 2)
 
+    _conceptions_cache: Optional[Tuple[datetime, List[Dict[str, Any]]]] = None
+
+    async def get_conceptions(self) -> List[Dict[str, Any]]:
+        """Список концепций сервера: [{id, code, name}] через entities/list.
+        Нужен, чтобы по Conception.Code филиала (из OLAP) найти conceptionId смены.
+        Кеш на 6 часов — справочник статичный."""
+        if self._conceptions_cache and \
+                (datetime.now() - self._conceptions_cache[0]) < timedelta(hours=6):
+            return self._conceptions_cache[1]
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v2/entities/list",
+                params={"key": token, "rootType": "Conception", "includeDeleted": "false"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("data", [])
+            out = [{"id": c.get("id"),
+                    "code": str(c.get("code")) if c.get("code") is not None else None,
+                    "name": c.get("name")}
+                   for c in items if isinstance(c, dict) and c.get("id")]
+            self._conceptions_cache = (datetime.now(), out)
+            return out
+
     async def get_invoices(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Накладные через OLAP TRANSACTIONS INVOICE — возвращает {"invoiceIncomings": [...]}.
 

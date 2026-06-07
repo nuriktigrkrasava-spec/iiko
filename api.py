@@ -624,6 +624,51 @@ def _get_api_login(org_id: str, user: Dict) -> str:
     return _get_restaurant_info(org_id, user)["api_login"]
 
 
+async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
+                               ) -> Tuple[Optional[float], Dict[str, Any]]:
+    """Выручка ОДНОГО филиала из кассовых смен (операционный день = как в кассе).
+
+    Сервер может держать несколько филиалов (концепций) на одних кредах, а в
+    смене из полей-разделителей есть только conceptionId. Поэтому сужаем смены
+    до концепций ИМЕННО этого филиала по детерминированной цепочке (без имён):
+      Department(филиал) → Conception.Code (OLAP) → conceptionId (entities/list).
+    Если сузить не удалось (одиночный сервер/справочник пуст) — берём все смены.
+    Возвращает (выручка | None при ошибке, debug-инфо).
+    """
+    dbg: Dict[str, Any] = {}
+    sessions = await client.get_cashshifts(date_from, date_to)
+    dbg["session_count"] = len(sessions)
+
+    codes: set = set()
+    try:
+        r = await client.olap_report(dept, date_from, date_to,
+                                     ["Conception.Code"], ["DishAmountSum"])
+        codes = {str(x.get("Conception.Code")) for x in r.get("data", [])
+                 if x.get("Conception.Code") is not None}
+    except Exception as e:
+        dbg["codes_err"] = str(e)[:160]
+    dbg["codes"] = sorted(codes)
+
+    target_ids: set = set()
+    if codes:
+        try:
+            concs = await client.get_conceptions()
+            target_ids = {c["id"] for c in concs
+                          if c.get("code") in codes and c.get("id")}
+        except Exception as e:
+            dbg["conceptions_err"] = str(e)[:160]
+    dbg["target_ids"] = sorted(target_ids)
+
+    if target_ids:
+        sel = [s for s in sessions if s.get("conceptionId") in target_ids]
+    else:
+        sel = sessions  # не смогли сузить → одиночный сервер, берём все
+    dbg["selected_sessions"] = len(sel)
+    rev = client.cashshifts_revenue(sel)
+    dbg["revenue"] = rev
+    return rev, dbg
+
+
 @app.get("/api/dashboard/{org_id}")
 async def dashboard(org_id: str, period: str = "today",
                     from_: Optional[str] = Query(None, alias="from"),
@@ -656,17 +701,18 @@ async def dashboard(org_id: str, period: str = "today",
             return []
 
     # Выручка = кассовые смены (операционный день), как в кассе. SALES OLAP режет
-    # по дате открытия заказа и расходится с кассой; смены — эталон.
+    # по дате открытия заказа и расходится с кассой; смены — эталон. Каждый филиал
+    # сужаем до своих концепций (см. branch_shift_revenue), поэтому на общем сервере
+    # филиалы не смешиваются и не задваиваются.
     async def fetch_revenue(real_org: str):
         info = _get_restaurant_info(real_org, user)
         client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         if not hasattr(client, "get_cashshifts"):
             return None  # облачный клиент — кассовых смен нет, fallback на OLAP
         try:
-            sessions = await client.get_cashshifts(date_from, date_to)
-            # ключ дедупа — чтобы филиалы на одном сервере с одними кредами не задвоились
-            return ((info.get("iiko_server"), info.get("api_login")),
-                    client.cashshifts_revenue(sessions))
+            rev, _dbg = await branch_shift_revenue(
+                client, _olap_dept(real_org, info), date_from, date_to)
+            return rev
         except Exception as e:
             logger.warning(f"[dashboard] cashshifts {real_org}: {e}")
             return None
@@ -679,12 +725,9 @@ async def dashboard(org_id: str, period: str = "today",
         orders = sum(r.get("OrdersCount", 0) for r in all_rows)
 
         rev_results = await asyncio.gather(*(fetch_revenue(o) for o in orgs))
-        rev_by_client: Dict[tuple, float] = {}
-        for rr in rev_results:
-            if rr:
-                rev_by_client[rr[0]] = rr[1]
-        # есть смены → берём их; иначе старый OLAP-итог (облако/ошибка)
-        total = round(sum(rev_by_client.values()), 2) if rev_by_client else olap_total
+        revs = [r for r in rev_results if r is not None]
+        # есть смены → сумма по филиалам; иначе старый OLAP-итог (облако/ошибка)
+        total = round(sum(revs), 2) if revs else olap_total
         avg_check = total / guests if guests else 0
 
         resp = {
@@ -1490,60 +1533,22 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
         "org_name": row["organization_name"],
         "period": [date_from, date_to],
     }
+    # Проверка финальной логики: выручка филиала через тот же helper, что и дашборд.
     try:
-        sessions = await client.get_cashshifts(date_from, date_to)
-    except Exception as e:
-        out["cashshifts_error"] = f"{type(e).__name__}: {e}"
-        return out
-
-    out["session_count"] = len(sessions)
-    out["total_payOrders"] = client.cashshifts_revenue(sessions)
-    # Разбивка по концепциям — увидим, не сидят ли на одном сервере чужие филиалы.
-    by_conc: Dict[str, float] = {}
-    for s in sessions:
-        cid = str(s.get("conceptionId") or "—")
+        rev, dbg = await branch_shift_revenue(
+            client, row["organization_name"], date_from, date_to)
+        out["branch_revenue"] = rev
+        out["debug"] = dbg
+        # для наглядности: какой conception.code → какой id выбран
         try:
-            by_conc[cid] = round(by_conc.get(cid, 0.0) + float(s.get("payOrders") or 0), 2)
-        except (TypeError, ValueError):
-            pass
-    out["by_conception"] = by_conc
-
-    # ГЛАВНОЕ: достать conceptionId этого филиала ПО GUID из OLAP (имена грязные).
-    # Пробуем разные имена поля id концепции — какое примет сервер.
-    for fld in ["Conception.Id", "ConceptionId", "Conception.Code", "Conception.Num"]:
-        try:
-            r = await client.olap_report(row["organization_name"], date_from, date_to,
-                                         [fld], ["DishAmountSum"])
-            out[f"olap[{fld}]"] = [
-                {fld: x.get(fld), "sum": x.get("DishAmountSum")} for x in r.get("data", [])]
+            concs = await client.get_conceptions()
+            out["conceptions_total"] = len(concs)
+            out["code_to_id"] = {c["code"]: c["id"] for c in concs
+                                 if c.get("code") in set(dbg.get("codes", []))}
         except Exception as e:
-            out[f"olap[{fld}]_err"] = f"{type(e).__name__}: {str(e)[:120]}"
-
-    # departments XML целиком — вдруг там есть conceptionId на подразделение
-    try:
-        token3 = await client._ensure_token()
-        async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
-            rd = await cli.get(f"{client.base_url}/api/corporation/departments",
-                               params={"key": token3})
-            out["departments_raw"] = rd.text[:1500]
-            # альтернативные эндпоинты списка концепций
-            for path in ["/api/conceptions", "/api/v2/entities/list?rootType=Conception"]:
-                try:
-                    ra = await cli.get(f"{client.base_url}{path}", params={"key": token3})
-                    out[f"alt[{path}]"] = {"status": ra.status_code, "body": ra.text[:400]}
-                except Exception as e:
-                    out[f"alt[{path}]_err"] = f"{type(e).__name__}: {str(e)[:120]}"
+            out["conceptions_err"] = f"{type(e).__name__}: {str(e)[:160]}"
     except Exception as e:
-        out["departments_error"] = f"{type(e).__name__}: {e}"
-
-    out["sessions"] = [{
-        "cashRegNumber": s.get("cashRegNumber"),
-        "sessionNumber": s.get("sessionNumber"),
-        "status": s.get("sessionStatus"),
-        "openDate": s.get("openDate"),
-        "payOrders": s.get("payOrders"),
-        "conceptionId": s.get("conceptionId"),
-    } for s in sessions]
+        out["branch_revenue_error"] = f"{type(e).__name__}: {e}"
     return out
 
 
