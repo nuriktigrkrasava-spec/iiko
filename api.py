@@ -1466,26 +1466,37 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
         "org_name": row["organization_name"],
         "period": [date_from, date_to],
     }
-    try:
-        sessions = await client.get_cashshifts(date_from, date_to)
-    except Exception as e:
-        out["cashshifts_error"] = f"{type(e).__name__}: {e}"
-        return out
 
-    def _f(v):
-        try:
-            return float(v or 0)
-        except (TypeError, ValueError):
-            return 0.0
+    iso = date_from[:10]
+    ddmm = datetime.strptime(iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+    base = client.base_url
+    token2 = await client._ensure_token()
 
-    out["session_count"] = len(sessions)
-    out["sum_payOrders"] = round(sum(_f(s.get("payOrders")) for s in sessions), 2)
-    out["sum_salesCash+Card+Credit"] = round(sum(
-        _f(s.get("salesCash")) + _f(s.get("salesCard")) + _f(s.get("salesCredit"))
-        for s in sessions), 2)
-    if sessions:
-        out["first_session_keys"] = sorted(sessions[0].keys())
-        out["first_session_sample"] = sessions[0]
+    # Один прогон нескольких вариантов эндпоинта/формата → увидим рабочий и тело ошибок.
+    variants = [
+        ("v1_ddmm",        f"{base}/api/closeSession/list",
+         {"key": token2, "dateFrom": ddmm, "dateTo": ddmm}),
+        ("v1_iso",         f"{base}/api/closeSession/list",
+         {"key": token2, "dateFrom": iso, "dateTo": iso}),
+        ("v2_openDate_iso", f"{base}/api/v2/cashshifts/list",
+         {"key": token2, "openDateFrom": iso, "openDateTo": iso, "status": "ANY"}),
+        ("v2_dateFrom_iso", f"{base}/api/v2/cashshifts/list",
+         {"key": token2, "dateFrom": iso, "dateTo": iso}),
+        ("events_sessions", f"{base}/api/events/sessions",
+         {"key": token2, "from": f"{iso}T00:00:00.000", "to": f"{iso}T23:59:59.999"}),
+    ]
+    out["probes"] = []
+    async with httpx.AsyncClient(timeout=40.0, verify=False) as cli:
+        for name, url, params in variants:
+            try:
+                r = await cli.get(url, params=params)
+                out["probes"].append({
+                    "name": name, "status": r.status_code,
+                    "ctype": r.headers.get("content-type", ""),
+                    "body": r.text[:600],
+                })
+            except Exception as e:
+                out["probes"].append({"name": name, "error": f"{type(e).__name__}: {e}"})
     return out
 
 
