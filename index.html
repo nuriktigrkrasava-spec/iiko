@@ -640,17 +640,17 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card metric-full">
         <div class="metric-label">Выручка сегодня</div>
         <div class="metric-value" id="m-revenue">0 ₸</div>
-        <div class="metric-change up" id="m-revenue-change">↑ +0% к вчера</div>
+        <div class="metric-change up" id="m-revenue-change"></div>
       </div>
       <div class="card">
         <div class="metric-label">Средний чек</div>
         <div class="metric-value" style="font-size:24px;" id="m-check">0 ₸</div>
-        <div class="metric-change up" id="m-check-change">↑ +0% к вчера</div>
+        <div class="metric-change up" id="m-check-change"></div>
       </div>
       <div class="card">
         <div class="metric-label">Гостей</div>
         <div class="metric-value" style="font-size:24px;" id="m-guests">0</div>
-        <div class="metric-change up" id="m-guests-change">↑ +0% к вчера</div>
+        <div class="metric-change up" id="m-guests-change"></div>
       </div>
     </div>
     <div class="card">
@@ -1924,9 +1924,15 @@ async function loadDashboard() {
   // Сначала пробуем OLAP (один запрос)
   const rows = await fetchOlap(state.period);
   if (rows && rows.length > 0) {
-    const revenue = olapSum(rows, 'DishAmountSum');
     const guests  = olapSum(rows, 'GuestNum');
     const orders  = olapSum(rows, 'OrdersCount');
+    // Выручка — из КАССОВЫХ СМЕН (операционный день, как в кассе), а не из OLAP
+    // по дате открытия. Гости/чеки/график остаются на OLAP.
+    let revenue = olapSum(rows, 'DishAmountSum');
+    try {
+      const rev = await apiGet(`/api/revenue/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+      if (rev && rev.ok && rev.revenue != null) revenue = rev.revenue;
+    } catch(e) {}
     const avgCheck = guests > 0 ? revenue / guests : 0;
     hideIikoError();
     animateValue('m-revenue', revenue, ' ₸');
@@ -1972,13 +1978,10 @@ async function loadDashboard() {
     document.getElementById('m-open').textContent = data.open_orders;
     document.getElementById('m-yesterday').textContent = formatMoney(data.revenue_yesterday);
     document.getElementById('m-forecast').textContent = formatMoney(data.forecast);
-    const revChange = document.getElementById('m-revenue-change');
-    const chChange = document.getElementById('m-check-change');
-    const gChange = document.getElementById('m-guests-change');
-    revChange.innerHTML = `↑ +${data.revenue_change}% к вчера`;
-    revChange.className = 'metric-change ' + (data.revenue_change >= 0 ? 'up' : 'down');
-    chChange.innerHTML = `↑ +${data.avg_check_change}% к вчера`;
-    gChange.innerHTML = `↑ +${data.guests_change}% к вчера`;
+    // Плашка «% к вчера» убрана — backend реальную динамику не считает (всегда 0).
+    document.getElementById('m-revenue-change').innerHTML = '';
+    document.getElementById('m-check-change').innerHTML = '';
+    document.getElementById('m-guests-change').innerHTML = '';
     renderRevenueChart(data.chart_7days);
   } catch(e) { console.error(e); }
 }

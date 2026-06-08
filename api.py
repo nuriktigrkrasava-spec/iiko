@@ -483,7 +483,10 @@ async def startup():
 
 @app.get("/")
 async def root():
-    return FileResponse("index.html")
+    # no-store — иначе Telegram-webview держит старый бандл и не подхватывает
+    # новые правки фронта (показывал старую выручку из старого index.html).
+    return FileResponse("index.html",
+                        headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 @app.post("/api/setup/validate")
@@ -636,17 +639,24 @@ async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
     Возвращает (выручка | None при ошибке, debug-инфо).
     """
     dbg: Dict[str, Any] = {}
-    sessions = await client.get_cashshifts(date_from, date_to)
-    dbg["session_count"] = len(sessions)
 
-    codes: set = set()
-    try:
-        r = await client.olap_report(dept, date_from, date_to,
-                                     ["Conception.Code"], ["DishAmountSum"])
-        codes = {str(x.get("Conception.Code")) for x in r.get("data", [])
-                 if x.get("Conception.Code") is not None}
-    except Exception as e:
-        dbg["codes_err"] = str(e)[:160]
+    async def _fetch_sessions():
+        return await client.get_cashshifts(date_from, date_to)
+
+    async def _fetch_codes():
+        try:
+            r = await client.olap_report(dept, date_from, date_to,
+                                         ["Conception.Code"], ["DishAmountSum"])
+            return {str(x.get("Conception.Code")) for x in r.get("data", [])
+                    if x.get("Conception.Code") is not None}, None
+        except Exception as e:
+            return set(), str(e)[:160]
+
+    # cashshifts и OLAP-коды концепции — параллельно (уменьшает лаг)
+    sessions, (codes, codes_err) = await asyncio.gather(_fetch_sessions(), _fetch_codes())
+    dbg["session_count"] = len(sessions)
+    if codes_err:
+        dbg["codes_err"] = codes_err
     dbg["codes"] = sorted(codes)
 
     target_ids: set = set()
@@ -750,6 +760,51 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
     except Exception as e:
         print(f"[dashboard] {e}")
         return dict(DEMO_DASHBOARD)
+
+
+@app.get("/api/revenue/{org_id}")
+async def revenue(org_id: str, response: Response, period: str = "today",
+                  from_: Optional[str] = Query(None, alias="from"),
+                  to: Optional[str] = Query(None),
+                  org_ids: Optional[str] = Query(None),
+                  user: Dict = Depends(get_current_user)):
+    """Выручка из КАССОВЫХ СМЕН (операционный день = как в кассе). Фронт берёт
+    её для шапки дашборда вместо OLAP-суммы (та считается по дате открытия и
+    расходится с кассой). Гости/чеки/график остаются на OLAP."""
+    response.headers["Cache-Control"] = "no-store"
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"revenue": DEMO_DASHBOARD["revenue_today"], "ok": False, "source": "demo"}
+
+    orgs = _parse_org_ids(org_ids, org_id, user)
+    date_from, date_to = get_period_dates(period, from_, to)
+    branches_key = ",".join(sorted(orgs))
+    cache_period_key = _cache_period_part(period, from_, to) + ":" + branches_key
+    key = _cache_key(user.get("id", 0), "revenue", branches_key, cache_period_key)
+    cached = _get_cached(key)
+    if cached:
+        return cached
+
+    async def one(real_org: str):
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        if not hasattr(client, "get_cashshifts"):
+            return None
+        try:
+            rev, _dbg = await branch_shift_revenue(
+                client, _olap_dept(real_org, info), date_from, date_to)
+            return rev
+        except Exception as e:
+            logger.warning(f"[revenue] {real_org}: {e}")
+            return None
+
+    results = await asyncio.gather(*(one(o) for o in orgs))
+    revs = [r for r in results if r is not None]
+    if not revs:
+        # не смогли получить смены (облако/ошибка) — пусть фронт остаётся на OLAP
+        return {"revenue": None, "ok": False, "source": "none"}
+    resp = {"revenue": round(sum(revs), 2), "ok": True, "source": "cashshifts"}
+    _set_cached(key, resp)
+    return resp
 
 
 # ── Индивидуальная поправка каналов «для дяди» ──────────────────────────────
