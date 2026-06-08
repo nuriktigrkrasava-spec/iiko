@@ -1619,6 +1619,79 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
     return out
 
 
+@app.get("/api/debug/allbranches")
+async def debug_allbranches(token: Optional[str] = Query(None),
+                            ref: str = Query("Алиев")):
+    """РАЗОВО: кассовая выручка по ВСЕМ филиалам сервера за 2 дня (06.xx, 07.xx).
+    Экономно: смены — 1 запрос на день (на весь сервер), коды концепции — по
+    филиалу. Закрыто REPORT_PREVIEW_TOKEN. Потом удалю."""
+    if token != REPORT_PREVIEW_TOKEN:
+        raise HTTPException(status_code=404, detail="Not Found")
+    conn = get_db()
+    refrow = conn.execute(
+        "SELECT api_login, iiko_server, api_password FROM restaurants "
+        "WHERE iiko_server IS NOT NULL AND organization_name LIKE ? LIMIT 1",
+        (f"%{ref}%",)).fetchone()
+    if not refrow:
+        conn.close()
+        return {"error": "no ref restaurant"}
+    server = refrow["iiko_server"]
+    rows = conn.execute(
+        "SELECT DISTINCT organization_name FROM restaurants "
+        "WHERE iiko_server = ? AND organization_name IS NOT NULL "
+        "ORDER BY organization_name", (server,)).fetchall()
+    conn.close()
+    pw = decrypt_password(refrow["api_password"]) if refrow["api_password"] else None
+    client = get_client(refrow["api_login"], server, pw)
+    if not getattr(client, "base_url", None):
+        return {"error": "cloud client"}
+
+    today = local_now().date()
+    days = [(today - timedelta(days=1)).isoformat(),
+            (today - timedelta(days=2)).isoformat()]
+    out: Dict[str, Any] = {"server": server, "days": days, "branches": []}
+
+    try:
+        concs = await client.get_conceptions()
+    except Exception as e:
+        return {"error": f"conceptions: {e}", "days": days}
+
+    # выручка по conceptionId за каждый день — 1 запрос смен на день
+    by_day: Dict[str, Dict[str, float]] = {}
+    for d in days:
+        try:
+            sessions = await client.get_cashshifts(d, d)
+            agg: Dict[str, float] = {}
+            for s in sessions:
+                cid = s.get("conceptionId")
+                try:
+                    agg[cid] = agg.get(cid, 0.0) + float(s.get("payOrders") or 0)
+                except (TypeError, ValueError):
+                    pass
+            by_day[d] = agg
+        except Exception as e:
+            out[f"sessions_err[{d}]"] = str(e)[:140]
+            by_day[d] = {}
+
+    for r in rows:
+        name = r["organization_name"]
+        entry: Dict[str, Any] = {"branch": name}
+        try:
+            rr = await client.olap_report(name, days[0], days[0],
+                                          ["Conception.Code"], ["DishAmountSum"])
+            codes = {str(x.get("Conception.Code")) for x in rr.get("data", [])
+                     if x.get("Conception.Code") is not None}
+        except Exception as e:
+            codes = set()
+            entry["code_err"] = str(e)[:100]
+        ids = {c["id"] for c in concs if c.get("code") in codes and c.get("id")}
+        entry["codes"] = sorted(codes)
+        for d in days:
+            entry[d] = round(sum(by_day.get(d, {}).get(i, 0.0) for i in ids), 2)
+        out["branches"].append(entry)
+    return out
+
+
 @app.get("/api/withdrawals/{org_id}")
 async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
     """Изъятия наличных из кассы (выемка/инкассация) за период."""
