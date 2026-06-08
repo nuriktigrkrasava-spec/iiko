@@ -571,16 +571,13 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   </div>
   <div class="onboarding" id="onboarding-step2" style="display:none">
     <button class="help-btn" onclick="openHelp('register')" aria-label="Помощь">?</button>
-    <div class="emoji">🔑</div>
-    <h2>API ключ iiko</h2>
-    <p>Введите API Login из личного кабинета iiko</p>
-    <input type="text" class="input-field" id="api-login-input" placeholder="API Login">
-    <div style="margin-top:8px">
-      <button class="btn-full btn-white" style="font-size:13px;padding:10px" onclick="toggleIikoWebFields()">⚙️ Свой сервер iikoWeb</button>
-      <div id="iikweb-fields" style="display:none;flex-direction:column;gap:8px;margin-top:8px">
-        <input type="text" class="input-field" id="iiko-server-input" placeholder="URL сервера (напр. saya.iiko.it)">
-        <input type="password" class="input-field" id="api-password-input" placeholder="Пароль (для iikoWeb)">
-      </div>
+    <div class="emoji">🔌</div>
+    <h2>Подключение к iiko Server</h2>
+    <p>Введите данные вашего сервера iiko (iikoOffice)</p>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <input type="text" class="input-field" id="iiko-server-input" placeholder="URL сервера (напр. saya.iiko.it)">
+      <input type="text" class="input-field" id="api-login-input" placeholder="Логин">
+      <input type="password" class="input-field" id="api-password-input" placeholder="Пароль">
     </div>
     <button class="btn-full btn-black" style="margin-top:12px" onclick="validateApiKey()">Подключить</button>
     <button class="btn-full btn-white" onclick="startDemo()">Пропустить (демо)</button>
@@ -1698,20 +1695,20 @@ function toggleIikoWebFields() {
 }
 
 async function validateApiKey() {
+  const iikoServer = document.getElementById('iiko-server-input').value.trim();
   const login = document.getElementById('api-login-input').value.trim();
-  if (!login) return showToast('Введите API Login');
-  const iikoServer = document.getElementById('iiko-server-input')?.value.trim() || null;
-  const apiPassword = document.getElementById('api-password-input')?.value.trim() || null;
+  const apiPassword = document.getElementById('api-password-input').value.trim();
+  if (!iikoServer) return showToast('Введите URL сервера');
+  if (!login) return showToast('Введите логин');
+  if (!apiPassword) return showToast('Введите пароль');
   const btn = document.querySelector('#onboarding-step2 .btn-black');
   btn.textContent = 'Проверяем...';
   btn.disabled = true;
   try {
-    const payload = { api_login: login };
-    if (iikoServer) payload.iiko_server = iikoServer;
-    if (apiPassword) payload.api_password = apiPassword;
+    const payload = { api_login: login, iiko_server: iikoServer, api_password: apiPassword };
     const resp = await apiPost('/api/setup/validate', payload);
     if (!resp || !resp.valid) {
-      const msg = resp?.error || 'Неверный API Login — проверьте ключ';
+      const msg = resp?.error || 'Не удалось подключиться — проверьте URL, логин и пароль';
       showToast(msg.length > 80 ? msg.slice(0, 80) + '...' : msg);
       btn.textContent = 'Подключить →';
       btn.disabled = false;
@@ -3458,16 +3455,13 @@ const HELP_CONTENT = {
       <p>Сервис работает с <b>iikoServer / iikoWeb</b> по REST API (<code>/resto/api/v2/…</code>) — это формат любых «коробочных» установок iiko, включая хостинг на <code>*.iiko.it</code>.</p>
       <div class="warn">❌ <b>iiko Cloud API</b> (<code>api-ru.iiko.services</code> — Bearer-токен из ЛК iiko.biz) пока НЕ поддерживается. Если у вас интеграция через него — этот сервис не подойдёт.</div>
 
-      <h4>2. Что вводить в поле «API Login»</h4>
-      <p>Это логин API-пользователя из вашего iikoOffice. Не путать с логином самого iikoOffice — заведите отдельного юзера специально для бота.</p>
-
-      <h4>3. Кнопка «⚙️ Свой сервер iikoWeb»</h4>
-      <p>Откройте эту секцию, если у вас:</p>
+      <h4>2. Что вводить</h4>
+      <p>Три поля подряд:</p>
       <ul>
-        <li>iikoServer на своём VDS / железе</li>
-        <li>Хостинг iiko на <code>*.iiko.it</code> (например <code>saya-co.iiko.it</code>)</li>
+        <li><b>URL сервера</b> — адрес вашего iikoOffice / iikoWeb (примеры ниже)</li>
+        <li><b>Логин</b> — логин API-пользователя из iikoOffice (не логин самого iikoOffice — заведите отдельного юзера для бота)</li>
+        <li><b>Пароль</b> — пароль этого API-пользователя</li>
       </ul>
-      <p>Появятся два дополнительных поля: URL сервера и пароль.</p>
 
       <h4>4. URL сервера</h4>
       <p>Адрес вашего iikoOffice / iikoWeb. Примеры:</p>
