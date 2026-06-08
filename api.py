@@ -1549,6 +1549,16 @@ async def debug_cashshifts(token: Optional[str] = Query(None),
             out["conceptions_err"] = f"{type(e).__name__}: {str(e)[:160]}"
     except Exception as e:
         out["branch_revenue_error"] = f"{type(e).__name__}: {e}"
+
+    # Старая логика дашборда (OLAP DishAmountSum по дате открытия) — для сравнения:
+    # если Mini App показывает это число, значит он отдаёт докешированное старое.
+    try:
+        r = await client.olap_report(row["organization_name"], date_from, date_to,
+                                     ["OpenDate.Typed"], ["DishAmountSum"])
+        out["old_olap_gross"] = round(sum(float(x.get("DishAmountSum") or 0)
+                                          for x in r.get("data", [])), 2)
+    except Exception as e:
+        out["old_olap_error"] = f"{type(e).__name__}: {str(e)[:160]}"
     return out
 
 
