@@ -672,7 +672,16 @@ async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
     if target_ids:
         sel = [s for s in sessions if s.get("conceptionId") in target_ids]
     else:
-        sel = sessions  # не смогли сузить → одиночный сервер, берём все
+        # код концепции филиала не определился. Если сервер одиночный (≤1 концепция
+        # в сменах) — все смены его, берём. Если мультифилиальный — НЕЛЬЗЯ брать все
+        # (покажем чужую выручку всей сети), отдаём None → фронт останется на OLAP.
+        distinct = {s.get("conceptionId") for s in sessions if s.get("conceptionId")}
+        if len(distinct) <= 1:
+            sel = sessions
+        else:
+            dbg["ambiguous_multibranch"] = True
+            dbg["selected_sessions"] = 0
+            return None, dbg
     dbg["selected_sessions"] = len(sel)
     rev = client.cashshifts_revenue(sel)
     dbg["revenue"] = rev
