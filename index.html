@@ -1594,7 +1594,9 @@ async function apiGet(path) {
   const headers = {};
   const tg = window.Telegram?.WebApp;
   if (tg?.initData) headers['X-Telegram-Init-Data'] = tg.initData;
-  const resp = await fetch(API_BASE + path, { headers });
+  // cache:'no-store' — иначе Telegram-webview отдаёт устаревший ответ из HTTP-кеша
+  // (после смены логики выручки показывал старую цифру). Не кешируем API-ответы.
+  const resp = await fetch(API_BASE + path, { headers, cache: 'no-store' });
   return resp.json();
 }
 

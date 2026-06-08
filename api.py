@@ -670,11 +670,13 @@ async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
 
 
 @app.get("/api/dashboard/{org_id}")
-async def dashboard(org_id: str, period: str = "today",
+async def dashboard(org_id: str, response: Response, period: str = "today",
                     from_: Optional[str] = Query(None, alias="from"),
                     to: Optional[str] = Query(None),
                     org_ids: Optional[str] = Query(None),
                     user: Dict = Depends(get_current_user)):
+    # webview не должен кешировать выручку (показывал старую цифру после фикса)
+    response.headers["Cache-Control"] = "no-store"
     if _is_demo_user(user) or org_id == "demo-org-1":
         return DEMO_DASHBOARD
 
