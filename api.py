@@ -1434,6 +1434,7 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
     BOT_STATUS_MAP = {
         "draft": "Черновик", "draft_in_iiko": "Создан в iiko", "posted": "Проведена",
         "needs_mapping": "Нужно сопоставление", "iiko_error": "Ошибка iiko", "pending": "В обработке",
+        "ready": "Готова — проверь",
     }
     try:
         bot_invs = get_bot_invoices(limit=1000, organization_id=real_org)
@@ -2603,6 +2604,8 @@ async def invoice_saved_get(invoice_id: int, user: Dict = Depends(get_current_us
 class SavedInvoicePayload(BaseModel):
     items: List[Dict[str, Any]]
     supplier: Optional[str] = None
+    supplier_id: Optional[str] = None
+    organization_id: Optional[str] = None
     date: Optional[str] = None
     total_amount: Optional[float] = None
     vat_amount: Optional[float] = None
@@ -2618,17 +2621,19 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
     if inv.get("telegram_id") != user.get("id"):
         raise HTTPException(status_code=403, detail="Not your invoice")
 
-    # Сохраняем обновлённые поля
+    # Сохраняем обновлённые поля (оператор мог сменить филиал/поставщика/дату)
     update_fields = {"items": json.dumps(payload.items, ensure_ascii=False)}
     if payload.supplier is not None: update_fields["supplier"] = payload.supplier
+    if payload.supplier_id is not None: update_fields["supplier_id"] = payload.supplier_id
+    if payload.organization_id is not None: update_fields["organization_id"] = payload.organization_id
     if payload.date is not None: update_fields["date"] = payload.date
     if payload.total_amount is not None: update_fields["total_amount"] = payload.total_amount
     if payload.vat_amount is not None: update_fields["vat_amount"] = payload.vat_amount
     update_bot_invoice(invoice_id, **update_fields)
 
-    # Готовим и шлём в iiko
-    org_id = inv.get("organization_id")
-    supplier_id = inv.get("supplier_id")
+    # Готовим и шлём в iiko — приоритет у значений из payload (смена филиала/поставщика)
+    org_id = payload.organization_id or inv.get("organization_id")
+    supplier_id = payload.supplier_id or inv.get("supplier_id")
     if not org_id or not supplier_id:
         raise HTTPException(status_code=400, detail="Не указан филиал или поставщик")
     real_org = _get_org_id(org_id, user)
@@ -3351,6 +3356,10 @@ async def _auto_match_items(client, org_id: str,
                 matches = []
             if matches:
                 prod_id = matches[0].get("id")
+                # Аннотируем саму позицию, чтобы сохранённый черновик нёс сопоставление
+                # (редактор показывает «✓ сопоставлено», повторная отправка не теряет id).
+                it["iiko_product_id"] = prod_id
+                it["iiko_product_name"] = matches[0].get("name") or it.get("name")
         if not prod_id:
             unmatched.append(it.get("name", "—"))
             continue
@@ -3636,44 +3645,10 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
         _drop_pending(chat_id)
         return
 
-    # ---- Send to iiko ----
-    try:
-        resp = await client.create_incoming_invoice(
-            org_id=org_id, supplier_id=supplier_id,
-            items=sendable, date=date_str
-        )
-    except Exception as e:
-        logger.warning(f"[create_invoice] {e}")
-        resp = {"ok": False, "error": str(e)}
-
-    if not resp.get("ok"):
-        # Сохраняем локальный черновик чтобы пользователь не потерял работу
-        save_bot_invoice(
-            telegram_id=pending["telegram_id"],
-            telegram_user=pending.get("username") or "",
-            raw_text="[ФОТО]",
-            supplier=supplier_name, branch=rest.get("organization_name", ""),
-            items_json=json.dumps(items, ensure_ascii=False),
-            total_amount=total, date=date_str,
-            vat_amount=vat, supplier_id=supplier_id,
-            organization_id=org_id, dedup_hash=dedup_hash,
-            status="iiko_error",
-        )
-        err = resp.get("error", "unknown")
-        body_txt = (resp.get("body") or "")[:400]
-        body_line = f"\n<code>{body_txt}</code>" if body_txt else ""
-        if "409" in err:
-            headline = "⚠️ Похоже эта накладная уже есть в iiko (конфликт по номеру или содержимому)."
-        else:
-            headline = f"❌ iiko вернул ошибку: <code>{err}</code>"
-        await _tg_edit(chat_id, msg_id,
-            f"{headline}{body_line}\n\n"
-            f"📋 Накладная сохранена локально как черновик.")
-        _drop_pending(chat_id)
-        return
-
-    iiko_doc_id = resp.get("id") or ""
-    iiko_doc_number = resp.get("number") or ""
+    # ---- Сохраняем локальный черновик (review-first: в iiko НЕ создаём) ----
+    # Оператор проверит/исправит филиал, поставщика, дату, позиции в Mini App
+    # и сам нажмёт «Создать черновик в iiko». Так нет дублей/сирот в iiko, и
+    # ошибки сопоставления (филиал/поставщик) исправляются без перепробивки.
     inv_id = save_bot_invoice(
         telegram_id=pending["telegram_id"],
         telegram_user=pending.get("username") or "",
@@ -3682,18 +3657,16 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
         items_json=json.dumps(items, ensure_ascii=False),
         total_amount=total, date=date_str,
         vat_amount=vat, supplier_id=supplier_id,
-        organization_id=org_id,
-        iiko_doc_id=iiko_doc_id, iiko_doc_number=iiko_doc_number,
-        dedup_hash=dedup_hash,
-        status="draft_in_iiko",
+        organization_id=org_id, dedup_hash=dedup_hash,
+        status="ready",
     )
-    num_str = f" #{iiko_doc_number}" if iiko_doc_number else ""
     await _tg_edit(chat_id, msg_id,
-        f"✅ <b>Черновик создан в iiko{num_str}</b>\n\n"
+        f"✅ <b>Накладная готова</b>\n\n"
         f"🏭 Поставщик: {supplier_name}\n"
         f"🏢 Филиал: {rest.get('organization_name','')}\n"
         f"💰 Итого: {_fmt_kzt(total)} ₸\n\n"
-        f"Открой Mini App → Расходы → Накладные → нажми «▶️ Провести» когда проверишь.")
+        f"Открой Mini App → Расходы → Накладные → ✏️ проверь филиал/поставщика "
+        f"и нажми «Создать черновик в iiko».")
     _drop_pending(chat_id)
 
 
