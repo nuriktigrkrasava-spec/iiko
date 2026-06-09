@@ -246,6 +246,23 @@ DEMO_SALES = {
         {"name": "Кейтеринг", "revenue": 720000, "guests": 42, "avg_check": 17143, "top": False},
         {"name": "Стафф", "revenue": 400000, "guests": 180, "avg_check": 2222, "top": False},
     ],
+    "pay_types": [
+        {"name": "Терминал Kaspi", "revenue": 9800000, "account": "Kaspi"},
+        {"name": "КАСПИ онлайн", "revenue": 4200000, "account": "Kaspi"},
+        {"name": "Наличные", "revenue": 5100000, "account": "Наличные"},
+        {"name": "Wolt Онлайн", "revenue": 3300000, "account": "Wolt"},
+        {"name": "Яндекс безнал", "revenue": 2600000, "account": "Яндекс"},
+        {"name": "Glovo Онлайн", "revenue": 1400000, "account": "Glovo"},
+        {"name": "Перевод", "revenue": 1250000, "account": "Перевод"},
+    ],
+    "accounts": [
+        {"name": "Kaspi", "revenue": 14000000},
+        {"name": "Наличные", "revenue": 5100000},
+        {"name": "Wolt", "revenue": 3300000},
+        {"name": "Яндекс", "revenue": 2600000},
+        {"name": "Glovo", "revenue": 1400000},
+        {"name": "Перевод", "revenue": 1250000},
+    ],
     "top_dishes": [
         {"name": "Стейк Рибай", "revenue": 2100000, "count": 420},
         {"name": "Паста с морепродуктами", "revenue": 1800000, "count": 360},
@@ -837,6 +854,46 @@ def _normalize_channel_name(name: str, user: Dict) -> str:
     return name
 
 
+# ── Тип оплаты → счёт (куда ушли деньги) ────────────────────────────────────
+# iiko API связь «тип оплаты → счёт» не отдаёт (accountId в словаре PaymentType
+# пустой), поэтому укрупняем сами по ключевым словам в названии типа оплаты.
+# Порядок важен: первое совпадение выигрывает. Незнакомые типы → «Прочее»
+# (ничего не теряется — сумма по счетам = сумме по типам оплаты = выручке).
+_PAY_ACCOUNT_RULES: List[Tuple[str, str]] = [
+    ("нал",        "Наличные"),
+    ("cash",       "Наличные"),
+    ("kaspi",      "Kaspi"),
+    ("каспи",      "Kaspi"),
+    ("wolt",       "Wolt"),
+    ("волт",       "Wolt"),
+    ("glovo",      "Glovo"),
+    ("глово",      "Glovo"),
+    ("яндекс",     "Яндекс"),
+    ("yandex",     "Яндекс"),
+    ("choco",      "Chocofood"),
+    ("чоко",       "Chocofood"),
+    ("gourmet",    "Gourmet"),
+    ("перевод",    "Перевод"),
+    ("онлайн",     "Онлайн-оплата"),
+    ("epay",       "Онлайн-оплата"),
+    ("терминал",   "Эквайринг (банк)"),
+    ("карт",       "Эквайринг (банк)"),
+    ("балл",       "Бонусы / списания"),
+    ("промокод",   "Бонусы / списания"),
+    ("зп",         "Бонусы / списания"),
+    ("сотрудник",  "Бонусы / списания"),
+]
+
+
+def _pay_account(pay_type: str) -> str:
+    """Укрупнённый счёт для типа оплаты по ключевым словам в названии."""
+    low = (pay_type or "").lower()
+    for kw, account in _PAY_ACCOUNT_RULES:
+        if kw in low:
+            return account
+    return "Прочее"
+
+
 @app.get("/api/sales/{org_id}")
 async def sales(org_id: str, period: str = "today",
                 from_: Optional[str] = Query(None, alias="from"),
@@ -866,9 +923,14 @@ async def sales(org_id: str, period: str = "today",
                 return {"data": []}
         dept = _olap_dept(real_org, info)
         return await asyncio.gather(
-            safe_olap(dept, date_from, date_to, ["OrderType.Name"], ["DishAmountSum", "GuestNum"]),
+            # DishDiscountSumInt (после скидок) — чтобы сумма каналов = выручке кассы.
+            safe_olap(dept, date_from, date_to, ["OrderType.Name"], ["DishDiscountSumInt", "GuestNum"]),
             safe_olap(dept, date_from, date_to, ["DishName"], ["DishAmountSum", "DishCount"]),
             safe_olap(dept, date_from, date_to, ["ProductCategory.Name"], ["DishAmountSum"]),
+            # Выручка по типам оплаты. Мера DishDiscountSumInt = реально оплачено
+            # (после скидок) — сходится с кассой (payOrders) в ноль, в отличие от
+            # DishAmountSum/DishSumInt (до скидок).
+            safe_olap(dept, date_from, date_to, ["PayTypes"], ["DishDiscountSumInt"]),
         )
 
     try:
@@ -876,6 +938,7 @@ async def sales(org_id: str, period: str = "today",
         channels_rows = [r for t in per_org for r in t[0].get("data", [])]
         dishes_rows   = [r for t in per_org for r in t[1].get("data", [])]
         cats_rows     = [r for t in per_org for r in t[2].get("data", [])]
+        pay_rows      = [r for t in per_org for r in t[3].get("data", [])]
 
         # Дедупликация по имени для каналов (несколько филиалов могут вернуть один и тот же канал)
         ch_agg: Dict[str, Dict[str, float]] = {}
@@ -886,7 +949,7 @@ async def sales(org_id: str, period: str = "today",
             name = _normalize_channel_name(name, user)
             if name not in ch_agg:
                 ch_agg[name] = {"revenue": 0.0, "guests": 0}
-            ch_agg[name]["revenue"] += float(row.get("DishAmountSum", 0) or 0)
+            ch_agg[name]["revenue"] += float(row.get("DishDiscountSumInt", 0) or 0)
             ch_agg[name]["guests"]  += int(row.get("GuestNum", 0) or 0)
         channels = [{
             "name": n, "revenue": v["revenue"], "guests": int(v["guests"]),
@@ -923,7 +986,26 @@ async def sales(org_id: str, period: str = "today",
             "color": COLORS[i % len(COLORS)]
         } for i, (name, amount) in enumerate(cats_sorted)]
 
+        # Выручка по типам оплаты + укрупнение в «счета». Обе разбивки сходятся
+        # с кассой (payOrders), т.к. мера DishDiscountSumInt = реально оплачено.
+        pt_agg: Dict[str, float] = {}
+        for row in pay_rows:
+            name = row.get("PayTypes") or row.get("PayTypes.Name") or ""
+            if not name:
+                continue
+            pt_agg[name] = pt_agg.get(name, 0.0) + float(row.get("DishDiscountSumInt", 0) or 0)
+        pay_types = [{"name": n, "revenue": round(v, 2), "account": _pay_account(n)}
+                     for n, v in pt_agg.items() if round(v, 2) != 0]
+        pay_types.sort(key=lambda x: x["revenue"], reverse=True)
+
+        acc_agg: Dict[str, float] = {}
+        for p in pay_types:
+            acc_agg[p["account"]] = acc_agg.get(p["account"], 0.0) + p["revenue"]
+        accounts = [{"name": n, "revenue": round(v, 2)} for n, v in acc_agg.items()]
+        accounts.sort(key=lambda x: x["revenue"], reverse=True)
+
         result = {"channels": channels, "top_dishes": dishes[:10], "categories": categories,
+                  "pay_types": pay_types, "accounts": accounts,
                   "branches_count": len(orgs)}
         _set_cached(key, result)
         return result

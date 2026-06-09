@@ -734,6 +734,24 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           </table>
         </div>
       </div>
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Выручка по типам оплаты</div>
+            <div class="card-subtitle">Сходится с кассой 1:1 · на какой счёт ушли деньги</div>
+          </div>
+        </div>
+        <div class="subtabs" style="margin-bottom:12px">
+          <div class="subtab active" id="pay-view-type" onclick="setPayView('type', this)">Тип оплаты</div>
+          <div class="subtab" id="pay-view-account" onclick="setPayView('account', this)">Счёт</div>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="paytypes-table">
+            <thead><tr><th id="paytypes-col">Тип оплаты</th><th>Выручка</th><th>Доля</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
       <div class="card">
         <div class="card-header">
           <div class="card-title">Топ блюд по выручке</div>
@@ -2055,6 +2073,8 @@ async function loadSales() {
         <td class="num">${formatMoney(c.avg_check)}</td>
       </tr>
     `).join('');
+    state.payData = { pay_types: data.pay_types || [], accounts: data.accounts || [] };
+    renderPayTypes();
   }).catch(console.error);
 
   if (rows && rows.length > 0) {
@@ -2128,7 +2148,41 @@ async function loadSales() {
       </div>
     `).join('');
     renderCategoriesChart(data.categories);
+    state.payData = { pay_types: data.pay_types || [], accounts: data.accounts || [] };
+    renderPayTypes();
   } catch(e) { console.error(e); }
+}
+
+// ── Выручка по типам оплаты / счетам (переключатель) ──
+function setPayView(view, el) {
+  haptic();
+  state.payView = view;
+  document.querySelectorAll('#pay-view-type, #pay-view-account').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  document.getElementById('paytypes-col').textContent = view === 'account' ? 'Счёт' : 'Тип оплаты';
+  renderPayTypes();
+}
+
+function renderPayTypes() {
+  const tbody = document.querySelector('#paytypes-table tbody');
+  if (!tbody) return;
+  const view = state.payView || 'type';
+  const rows = (state.payData?.[view === 'account' ? 'accounts' : 'pay_types']) || [];
+  const total = rows.reduce((s, r) => s + (r.revenue || 0), 0) || 1;
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="3" class="name" style="opacity:.6">Нет данных за период</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const sub = (view === 'type' && r.account)
+      ? `<div class="card-subtitle" style="margin:0">→ ${escHtml(r.account)}</div>` : '';
+    return `
+      <tr>
+        <td class="name">${escHtml(r.name)}${sub}</td>
+        <td class="num">${formatMoney(r.revenue)}</td>
+        <td class="num">${(r.revenue / total * 100).toFixed(1)}%</td>
+      </tr>`;
+  }).join('');
 }
 
 function setSalesPeriod(p, el) {
