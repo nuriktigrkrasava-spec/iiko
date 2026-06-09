@@ -467,6 +467,10 @@ html, body {
 .ie-meta-value { font-size:14px; font-weight:600; color:var(--text); }
 .ie-meta input { background:transparent; border:none; font-size:14px; font-weight:600; color:var(--text); width:100%; padding:0; }
 .ie-meta input:focus { outline:1px solid var(--accent); border-radius:4px; }
+.ie-meta select { background:transparent; border:none; font-size:14px; font-weight:600; color:var(--text); width:100%; padding:0; }
+.ie-meta select:focus { outline:1px solid var(--accent); border-radius:4px; }
+#ie-branch-row, #ie-branch-row + .ie-meta-row { grid-column:1 / -1; }
+.ie-meta .ie-search-results { background:var(--bg); }
 .ie-totals { padding:12px 16px; background:var(--bg-secondary); margin:0 16px 12px; border-radius:12px; }
 .ie-total-line { display:flex; justify-content:space-between; font-size:14px; padding:4px 0; }
 .ie-total-line.big { font-size:18px; font-weight:700; padding-top:8px; border-top:1px solid var(--divider); margin-top:4px; }
@@ -483,9 +487,10 @@ html, body {
 .ie-save-btn { flex:1; padding:14px; background:var(--accent); color:var(--bg); border:none; border-radius:12px; font-weight:700; font-size:16px; cursor:pointer; }
 .ie-save-btn:disabled { opacity:.5; }
 
-.ie-modal-back { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; display:none; align-items:flex-end; justify-content:center; }
+/* Привязка к верху, чтобы экранная клавиатура при поиске не перекрывала поле и результаты */
+.ie-modal-back { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; display:none; align-items:flex-start; justify-content:center; }
 .ie-modal-back.active { display:flex; }
-.ie-modal { background:var(--bg); border-radius:16px 16px 0 0; width:100%; max-width:600px; max-height:90vh; overflow-y:auto; padding:16px; }
+.ie-modal { background:var(--bg); border-radius:0 0 16px 16px; width:100%; max-width:600px; max-height:92vh; overflow-y:auto; padding:calc(8px + env(safe-area-inset-top)) 16px 16px; }
 .ie-modal h3 { margin:0 0 12px; font-size:16px; color:var(--text); }
 .ie-modal-row { margin-bottom:10px; }
 .ie-modal-row label { display:block; font-size:11px; color:var(--text-secondary); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
@@ -1293,9 +1298,14 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div id="ie-loading" class="ie-empty">Загрузка...</div>
     <div id="ie-content" style="display:none;">
       <div class="ie-meta">
+        <div class="ie-meta-row" id="ie-branch-row" style="display:none;">
+          <div class="ie-meta-label">Филиал</div>
+          <select id="ie-branch" onchange="ieChangeBranch()"></select>
+        </div>
         <div class="ie-meta-row">
           <div class="ie-meta-label">Поставщик</div>
-          <input type="text" id="ie-supplier" placeholder="—">
+          <input type="text" id="ie-supplier" placeholder="—" oninput="ieSearchSuppliers()" autocomplete="off">
+          <div class="ie-search-results" id="ie-supplier-results"></div>
         </div>
         <div class="ie-meta-row">
           <div class="ie-meta-label">Дата</div>
@@ -2933,6 +2943,7 @@ async function loadExpenses() {
       const badgeClass = (raw) => {
         if (raw === 'posted') return 'badge-green';
         if (raw === 'draft_in_iiko') return 'badge-blue';
+        if (raw === 'ready') return 'badge-orange';
         if (raw === 'needs_mapping') return 'badge-orange';
         if (raw === 'iiko_error') return 'badge-red';
         if (raw === 'draft') return 'badge-gray';
@@ -2950,6 +2961,8 @@ async function loadExpenses() {
           actions = `<button class="btn btn-green" onclick="invoicePost(${inv.bot_id})">▶️ Провести</button>`;
         } else if (raw === 'posted' && inv.bot_id) {
           actions = `<button class="btn btn-orange" onclick="invoiceUnpost(${inv.bot_id})">⏸ Распровести</button>`;
+        } else if (raw === 'ready') {
+          actions = `<button class="btn btn-outline" onclick="openSavedInvoiceEditor(${inv.bot_id})">✏️ Редактировать</button>`;
         } else if (raw === 'needs_mapping' || raw === 'iiko_error') {
           actions = `<button class="btn btn-outline" onclick="openSavedInvoiceEditor(${inv.bot_id})">✏️ Сопоставить и отправить</button>`;
         } else if (!raw) {
@@ -4006,6 +4019,12 @@ const ieState = {
   vatRate: 12,
   editingIndex: null,   // null = не в режиме редактирования; иначе индекс в items
   searchTimer: null,
+  // Редактор сохранённой накладной: смена филиала/поставщика
+  branches: [],         // [{org_id, org_name}]
+  suppliers: [],        // [{id, name}] текущего филиала
+  supplierId: null,
+  supplierName: '',
+  supplierTimer: null,
 };
 
 function ieIsActive() {
@@ -4224,6 +4243,9 @@ async function ieSave() {
 
   // === Режим сохранённой накладной (из вкладки Накладные) ===
   if (ieState.savedBotId) {
+    // Оператор мог сменить филиал/поставщика — передаём их явно
+    payload.supplier_id = ieState.supplierId;
+    payload.organization_id = ieState.searchOrgId;
     btn.textContent = 'Отправляю в iiko...';
     try {
       const resp = await apiPost(`/api/invoice-saved/${ieState.savedBotId}/send`, payload);
@@ -4289,11 +4311,19 @@ async function openSavedInvoiceEditor(botId) {
     ieState.searchOrgId = data.search_org_id || data.organization_id;
     ieState.items = data.items || [];
     ieState.supplier = data.supplier || '';
+    ieState.supplierId = data.supplier_id || null;
+    ieState.supplierName = data.supplier || '';
     ieState.date = data.date || '';
     ieState.vatRate = data.vat_rate || 12;
     document.getElementById('ie-supplier').value = ieState.supplier;
     document.getElementById('ie-date').value = ieState.date;
-    document.getElementById('ie-save-btn').textContent = '💾 Сопоставить и отправить';
+    // ready → ещё не в iiko, кнопка создаёт черновик; needs_mapping/iiko_error → сопоставить
+    document.getElementById('ie-save-btn').textContent =
+      (data.status === 'ready') ? '💾 Создать черновик в iiko' : '💾 Сопоставить и отправить';
+    // Филиал (select) + поставщики текущего филиала
+    await ieLoadBranches(ieState.searchOrgId);
+    await ieLoadSuppliers(ieState.searchOrgId);
+    document.getElementById('ie-supplier-results').innerHTML = '';
     ieRenderItems();
     ieRecalcTotals();
     document.getElementById('ie-loading').style.display = 'none';
@@ -4302,6 +4332,70 @@ async function openSavedInvoiceEditor(botId) {
   } catch (e) {
     document.getElementById('ie-loading').textContent = '❌ Не удалось загрузить.';
   }
+}
+
+// ---- Филиал (select) ----
+async function ieLoadBranches(currentOrgId) {
+  const row = document.getElementById('ie-branch-row');
+  const sel = document.getElementById('ie-branch');
+  try {
+    const data = (state.restaurants && state.restaurants.length)
+      ? state.restaurants : await apiGet('/api/restaurants');
+    ieState.branches = (data || []).map(r => ({
+      org_id: r.organization_id,
+      org_name: r.organization_name || 'Филиал',
+    })).filter(b => b.org_id);
+  } catch (e) { ieState.branches = []; }
+  if (ieState.branches.length <= 1) { row.style.display = 'none'; return; }
+  sel.innerHTML = ieState.branches.map(b =>
+    `<option value="${ieEscape(b.org_id)}">${ieEscape(b.org_name)}</option>`).join('');
+  sel.value = currentOrgId || ieState.branches[0].org_id;
+  row.style.display = 'flex';
+}
+
+function ieChangeBranch() {
+  const sel = document.getElementById('ie-branch');
+  ieState.searchOrgId = sel.value;
+  // Сменился филиал — сбрасываем выбранного поставщика и перезагружаем список
+  ieState.supplierId = null;
+  ieState.supplierName = '';
+  document.getElementById('ie-supplier').value = '';
+  document.getElementById('ie-supplier-results').innerHTML = '';
+  ieLoadSuppliers(ieState.searchOrgId);
+}
+
+// ---- Поставщик (поиск по названию, фильтр на клиенте) ----
+async function ieLoadSuppliers(orgId) {
+  if (!orgId) { ieState.suppliers = []; return; }
+  try {
+    const data = await apiGet(`/api/suppliers/${orgId}`);
+    ieState.suppliers = data.suppliers || [];
+  } catch (e) { ieState.suppliers = []; }
+}
+
+function ieSearchSuppliers() {
+  clearTimeout(ieState.supplierTimer);
+  ieState.supplierTimer = setTimeout(() => {
+    const q = document.getElementById('ie-supplier').value.trim().toLowerCase();
+    const results = document.getElementById('ie-supplier-results');
+    // Запись свободного имени (на случай если выбора не было)
+    ieState.supplierName = document.getElementById('ie-supplier').value.trim();
+    if (q.length < 1 || !ieState.suppliers.length) { results.innerHTML = ''; return; }
+    const matches = ieState.suppliers
+      .filter(s => (s.name || '').toLowerCase().includes(q)).slice(0, 20);
+    if (!matches.length) { results.innerHTML = ''; return; }
+    results.innerHTML = matches.map(s => `
+      <div class="ie-search-result" onclick='iePickSupplier(${JSON.stringify({id:s.id, name:s.name}).replace(/'/g, "&#39;")})'>
+        <div class="ie-search-name">${ieEscape(s.name || '—')}</div>
+      </div>`).join('');
+  }, 200);
+}
+
+function iePickSupplier(s) {
+  ieState.supplierId = s.id;
+  ieState.supplierName = s.name || '';
+  document.getElementById('ie-supplier').value = s.name || '';
+  document.getElementById('ie-supplier-results').innerHTML = '';
 }
 
 function ieCloseSavedEditor() {
