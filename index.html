@@ -1662,6 +1662,50 @@ function cacheKeyFor(period, customRange) {
   const branches = (state.selectedBranches || []).slice().sort().join(',') || 'single';
   return `${base}:${branches}`;
 }
+// Метка чипа «Даты»: один день → «📅 05.06»; диапазон → «📅 05.06–20.06»; иначе «📅 Даты»
+function formatPeriodChipLabel() {
+  const r = state.customRange;
+  if (state.period !== 'custom' || !r?.from || !r?.to) return '📅 Даты';
+  const fmt = s => s.slice(8, 10) + '.' + s.slice(5, 7);
+  return r.from === r.to ? `📅 ${fmt(r.from)}` : `📅 ${fmt(r.from)}–${fmt(r.to)}`;
+}
+
+// Перерисовать подсветку чипов и текст «Даты» сразу для ОБЕИХ панелей (main + sales).
+// Обе панели всегда в DOM, поэтому переключение вкладок берёт состояние отсюда.
+function renderDateFilters() {
+  const label = formatPeriodChipLabel();
+  const presetOf = chip => {
+    const m = /set(?:Sales)?Period\('([^']+)'/.exec(chip.getAttribute('onclick') || '');
+    return m ? m[1] : null;
+  };
+  ['main-date-filters', 'sales-date-filters'].forEach(barId => {
+    const bar = document.getElementById(barId);
+    if (!bar) return;
+    bar.querySelectorAll('.date-chip').forEach(chip => {
+      if (chip.id === 'main-date-chip' || chip.id === 'sales-date-chip') {
+        chip.textContent = label;
+        chip.classList.toggle('active', state.period === 'custom');
+      } else {
+        chip.classList.toggle('active', state.period !== 'custom' && presetOf(chip) === state.period);
+      }
+    });
+  });
+}
+
+// Единственная точка записи периода. Держит пары main/sales в синхроне,
+// перерисовывает обе панели и перезагружает данные обеих вкладок.
+function applyGlobalPeriod(period, customRange) {
+  state.period = period;
+  state.salesPeriod = period;
+  state.customRange = customRange || null;
+  state.salesCustomRange = customRange || null;
+  delete state.olapCache[cacheKeyFor(period, state.customRange)];
+  renderDateFilters();
+  loadDashboard();
+  loadSales();
+  if (state.salesTab === 'cancels') renderCancels().catch(console.error);
+  if (state.salesTab === 'cart') renderCart().catch(console.error);
+}
 function getCurrentRestaurantTitle() {
   if (state.selectedBranches && state.selectedBranches.length > 1) {
     if (state.selectedBranches.length === state.restaurants.length) return 'Все филиалы';
