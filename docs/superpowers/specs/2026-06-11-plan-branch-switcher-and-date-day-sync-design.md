@@ -58,20 +58,31 @@ Telegram Mini App аналитики ресторанов. Фронт — оди
 
 ## Часть B — Выбор дня/периода + синхрон (Главная / Продажи)
 
-### Синхрон даты — единый стейт (выбранный подход)
+### Синхрон даты — единый источник правды через центральный сеттер (выбранный подход)
 
-Свести период к одному источнику правды на обе вкладки:
+Цель: дата/период едины для Главной и Продаж — изменил на одной, отразилось на другой.
 
-- Оставляем `state.period` + `state.customRange`.
-- **Удаляем** `state.salesPeriod` и `state.salesCustomRange`.
-- `setPeriod()` и `setSalesPeriod()` пишут в одни и те же `state.period`/`state.customRange`,
-  перерисовывают подсветку чипов **обеих** панелей (`#main-date-filters` и `#sales-date-filters`)
-  и перезагружают активную вкладку.
-- При переключении вкладки (Главная↔Продажи) подсветка чипов и текст чипа «Даты»
-  берутся из общего стейта (общая функция перерисовки фильтров).
-- `cacheKeyFor(period, customRange)` уже завязан на общий период — менять не нужно.
+Реализация (с минимальным радиусом правок): поля `state.salesPeriod`/`state.salesCustomRange`
+читаются в ~10 местах (cancels, companions, fetchOlap, кэш). Чтобы не выпиливать их из всех
+мест (риск пропустить), держим **обе пары полей в жёсткой синхронизации через один сеттер**:
 
-Отклонённый вариант: «зеркалить два стейта» (копировать при изменении) — больше кода и хрупко.
+- Новая функция `applyGlobalPeriod(period, customRange)` — единственная точка записи периода.
+  Пишет одновременно: `state.period = state.salesPeriod = period` и
+  `state.customRange = state.salesCustomRange = customRange`. После этого они всегда равны →
+  любой существующий read-site остаётся корректным без правок.
+- `applyGlobalPeriod` также перерисовывает подсветку чипов **обеих** панелей
+  (`#main-date-filters` и `#sales-date-filters`) и текст обоих чипов «Даты» из стейта
+  (отдельная функция `renderDateFilters()`), затем перезагружает данные обеих вкладок
+  (`loadDashboard()` всегда; `loadSales()` + sales-подвкладки).
+- `setPeriod(p, el)` и `setSalesPeriod(p, el)` делегируют в `applyGlobalPeriod(p, null)`.
+- `applyDateRange()` делегирует в `applyGlobalPeriod('custom', range)`.
+- Обе панели фильтров всегда в DOM (видимость переключается экранами), поэтому
+  обновление подсветки сразу для обеих панелей делает переключение вкладок корректным
+  без отдельного ресинка в `switchTab`.
+- `cacheKeyFor`/`buildPeriodQuery` не меняем.
+
+Отклонённый вариант: физически удалить `salesPeriod`/`salesCustomRange` и переписать все
+read-sites — функционально то же, но больший радиус и риск пропустить место.
 
 ### Модалка дат — тумблер «День / Период»
 
@@ -95,13 +106,13 @@ Telegram Mini App аналитики ресторанов. Фронт — оди
 ## Влияние на код (ориентир, не финальный список правок)
 
 `index.html`:
-- `state`: добавить `planOrgId`; удалить `salesPeriod`/`salesCustomRange`.
-- `setSalesPeriod` → писать в общий период; общая функция перерисовки фильтров обеих панелей.
+- `state`: добавить `planOrgId`.
+- `applyGlobalPeriod(period, customRange)` + `renderDateFilters()` — единая запись/перерисовка.
+- `setPeriod` / `setSalesPeriod` / `applyDateRange` → делегируют в `applyGlobalPeriod`.
 - `openDateRangeModal` / `applyDateRange` → поддержка режима «День/Период».
 - HTML `#date-range-modal` → тумблер + одиночный date-input.
 - `loadPlan` → `state.planOrgId`; рендер чипа филиала + sheet выбора (гейт по tg id).
 - Сброс `planOrgId` в `selectRestaurant` / `applyBranches`.
-- Переключение табов → ресинк подсветки фильтров из общего стейта.
 
 `api.py`: без изменений.
 
