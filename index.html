@@ -1281,6 +1281,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           <input type="text" class="input-field" id="plan-url-input" placeholder="https://docs.google.com/spreadsheets/..." style="margin-bottom:8px">
           <button class="btn-full btn-black" onclick="savePlanLink()">Сохранить</button>
         </div>
+        <div id="plan-branch-bar" style="display:none;margin-bottom:12px"></div>
         <div id="plan-status" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px"></div>
         <div id="plan-table-wrap"></div>
       </div>
@@ -1447,6 +1448,15 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <button class="btn-full btn-primary" onclick="applyBranches()">Применить</button>
       <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="closeBranchesModalDirect()">Отмена</button>
     </div>
+  </div>
+</div>
+
+<!-- Plan branch modal (single-select, только шеф) -->
+<div class="modal-overlay" id="plan-branch-modal" onclick="closePlanBranchModal(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">Филиал плана</div>
+    <div id="plan-branch-list" style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;"></div>
+    <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;margin-top:12px;" onclick="closePlanBranchModalDirect()">Отмена</button>
   </div>
 </div>
 
@@ -3387,11 +3397,48 @@ function setCompSubtab(view, el) {
   if (view === 'plan' && !_planLoaded) loadPlan();
 }
 
+// Чип выбора филиала в «Плане» — только шефу и только при >1 филиала.
+function renderPlanBranchBar() {
+  const bar = document.getElementById('plan-branch-bar');
+  if (!bar) return;
+  const show = getMyTgId() === PLAN_BRANCH_SWITCHER_TG_ID && state.restaurants.length > 1;
+  if (!show) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  const curId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant?.organization_id;
+  const cur = state.restaurants.find(r => r.organization_id === curId);
+  const name = cur ? cur.organization_name : 'Филиал';
+  bar.style.display = 'block';
+  bar.innerHTML = `<div class="rest-chip active" style="display:inline-block" onclick="openPlanBranchModal()">🏢 ${escHtml(name)} ▾</div>`;
+}
+function openPlanBranchModal() {
+  haptic();
+  const curId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant?.organization_id;
+  const list = document.getElementById('plan-branch-list');
+  list.innerHTML = state.restaurants.map(r => `
+    <div class="rest-chip ${r.organization_id === curId ? 'active' : ''}" style="text-align:left"
+         onclick='selectPlanBranch(${JSON.stringify(r.organization_id)})'>${escHtml(r.organization_name)}</div>
+  `).join('');
+  document.getElementById('plan-branch-modal').classList.add('active');
+}
+function closePlanBranchModal(e) {
+  if (e.target === document.getElementById('plan-branch-modal')) closePlanBranchModalDirect();
+}
+function closePlanBranchModalDirect() {
+  document.getElementById('plan-branch-modal').classList.remove('active');
+}
+function selectPlanBranch(orgId) {
+  haptic();
+  state.planOrgId = orgId;
+  closePlanBranchModalDirect();
+  _planLoaded = false;
+  loadPlan();
+}
+
 async function loadPlan() {
   if (!state.restaurant) return;
   const orgId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant.organization_id;
   const status = document.getElementById('plan-status');
   const wrap = document.getElementById('plan-table-wrap');
+  renderPlanBranchBar();
   status.textContent = 'Загрузка...';
   wrap.innerHTML = '';
   try {
