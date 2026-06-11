@@ -2057,16 +2057,7 @@ async function loadDashboard() {
 
 function setPeriod(p, el) {
   haptic();
-  state.period = p;
-  if (p !== 'custom') {
-    state.customRange = null;
-    const dateChip = document.getElementById('main-date-chip');
-    if (dateChip) dateChip.textContent = '📅 Даты';
-  }
-  delete state.olapCache[cacheKeyFor(p, state.customRange)];
-  document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadDashboard();
+  applyGlobalPeriod(p, null);
 }
 
 function renderRevenueChart(chartData) {
@@ -2241,19 +2232,7 @@ function renderPayTypes() {
 
 function setSalesPeriod(p, el) {
   haptic();
-  state.salesPeriod = p;
-  if (p !== 'custom') {
-    state.salesCustomRange = null;
-    const dateChip = document.getElementById('sales-date-chip');
-    if (dateChip) dateChip.textContent = '📅 Даты';
-  }
-  delete state.olapCache[cacheKeyFor(p, state.salesCustomRange)];
-  document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadSales();
-  // Обновляем активную подвкладку
-  if (state.salesTab === 'cancels') renderCancels().catch(console.error);
-  if (state.salesTab === 'cart') renderCart().catch(console.error);
+  applyGlobalPeriod(p, null);
 }
 
 // ============ DATE RANGE MODAL ============
