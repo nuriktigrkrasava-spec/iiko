@@ -74,6 +74,23 @@ payload = {"reportType": "DELIVERIES", "buildSummary": "false",
 # HourOpen вида "18:00"; день недели = datetime.strptime(OpenDate.Typed[:10], "%Y-%m-%d").weekday() (0=Пн)
 ```
 
+### Рецепт 3 — во сколько заказывает конкретный клиент (телефон × час)
+```python
+payload = {"reportType": "DELIVERIES", "buildSummary": "false",
+  "groupByRowFields": ["Delivery.CustomerPhone", "HourOpen"],
+  "aggregateFields": ["UniqOrderId.OrdersCount"],
+  "filters": {"OpenDate.Typed": c._date_filter("2026-01-01", "2026-06-12"),
+              "Department": {"filterType": "IncludeValues", "values": [dept]}}}
+# Обработка ответа:
+#   by[phone] = {"o": сумма заказов, "h": {час: кол-во}}
+#   РЕАЛЬНЫЕ клиенты = 5 <= o <= 500  (отсекаем одноразовых <5 и агрегаторов >500)
+#   "чаще всего в" = час с максимальным кол-вом (mode); сортировка by по o desc → топ-клиенты
+#   PII: телефон НЕ показываем — выводим как «Клиент N».
+# Пример вывода (филиал Алиева, 2026, 202 реальных клиента):
+#   Клиент 1 — 62 заказа | чаще всего в 17:00 | 17:00×10, 20:00×9, 14:00×8 ...
+#   Клиент 2 — 36 заказов | чаще всего в 14:00 (обеденный)
+```
+
 ## 4. Справочник OLAP-полей (iikoWeb v2 /api/v2/reports/olap)
 - **reportType:** `DELIVERIES` (доставки, есть телефон клиента) | `SALES` (все продажи).
 - **groupByRowFields:** `Delivery.CustomerPhone`, `DishName`, `HourOpen` ("HH:00"), `OpenDate.Typed` ("YYYY-MM-DD"), `OrderType.Name`, `ProductCategory.Name`, `WaiterName`.
