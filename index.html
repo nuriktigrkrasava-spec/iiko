@@ -1466,6 +1466,7 @@ const state = {
   salesPeriod: 'today',
   customRange: null,       // {from, to} | null — выбранный диапазон на главной
   salesCustomRange: null,  // {from, to} | null — выбранный диапазон в Продажах
+  planOrgId: null,         // выбранный филиал в суб-вкладке «План» (только шеф); null = первый активный
   selectedBranches: null,  // null = single (use state.restaurant); string[] = multi
   salesTab: 'general',
   expenseTab: 'foodcost',
@@ -1977,6 +1978,7 @@ function hideIikoError() {
 function selectRestaurant(rest) {
   state.restaurant = rest;
   state.selectedBranches = null;
+  state.planOrgId = null;
   localStorage.removeItem('selected_branches');
   state.olapCache = {};
   localStorage.setItem('last_restaurant_id', rest.organization_id);
@@ -2329,6 +2331,7 @@ function applyBranches() {
     return;
   }
   state.selectedBranches = checked;
+  state.planOrgId = null;
   localStorage.setItem('selected_branches', JSON.stringify(checked));
   state.olapCache = {};
   renderRestSelector();
@@ -3386,7 +3389,7 @@ function setCompSubtab(view, el) {
 
 async function loadPlan() {
   if (!state.restaurant) return;
-  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const orgId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant.organization_id;
   const status = document.getElementById('plan-status');
   const wrap = document.getElementById('plan-table-wrap');
   status.textContent = 'Загрузка...';
