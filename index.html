@@ -2815,65 +2815,40 @@ async function loadHeatmap() {
       byDay[c.d] = (byDay[c.d] || 0) + c.orders;
     });
 
-    // Строка пика: самый загруженный час и день
+    // Когда чаще всего заказывают: топ-час и топ-день
     const topHour = Object.entries(byHour).sort((a, b) => b[1] - a[1])[0];
     const topDay = Object.entries(byDay).sort((a, b) => b[1] - a[1])[0];
-    peakEl.innerHTML = `🔥 Больше всего заказов: <span style="color:#34C759">${topHour[0]}:00</span>, день — <span style="color:#34C759">${days[topDay[0]]}</span>`;
+    peakEl.innerHTML = `⏰ Чаще всего заказывают в <span style="color:#34C759">${topHour[0]}:00</span> · день — <span style="color:#34C759">${days[topDay[0]]}</span>`;
 
-    // Матрица день×час + диапазон рабочих часов
-    const m = {};
-    let maxV = 0, hMin = 23, hMax = 0;
-    cells.forEach(c => {
-      (m[c.d] = m[c.d] || {});
-      m[c.d][c.h] = (m[c.d][c.h] || 0) + c.orders;
-      if (m[c.d][c.h] > maxV) maxV = m[c.d][c.h];
-      if (c.h < hMin) hMin = c.h;
-      if (c.h > hMax) hMax = c.h;
-    });
-    const hours = [];
-    for (let h = hMin; h <= hMax; h++) hours.push(h);
-
-    // Цвет клетки: чем больше заказов — тем насыщеннее зелёный
-    const cellColor = v => {
-      if (!v) return 'var(--bg-secondary)';
-      const a = 0.18 + 0.82 * (v / maxV);
-      return `rgba(52,199,89,${a.toFixed(2)})`;
-    };
-
-    const cols = `26px repeat(${hours.length}, 1fr)`;
-    let html = '<div id="hm-cap" style="font-size:12px;color:var(--text-secondary);min-height:16px;margin-bottom:10px">👆 Нажми на клетку — покажу число заказов</div>';
-    html += `<div style="display:grid;grid-template-columns:${cols};gap:2px;align-items:center">`;
-    // Шапка с часами (подписываем через один, чтобы не тесно)
-    html += '<div></div>';
-    hours.forEach(h => {
-      const lbl = (h % 2 === 0) ? h : '';
-      html += `<div style="font-size:9px;color:var(--text-secondary);text-align:center">${lbl}</div>`;
-    });
-    // Строки по дням Пн–Вс
+    // ── Таблица: по дням недели ──
+    const dayMax = Math.max(1, ...Array.from({ length: 7 }, (_, d) => byDay[d] || 0));
+    let html = '<div class="card" style="margin-bottom:12px;padding:12px">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">📅 По дням недели</div>';
+    html += '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;text-align:center">';
     for (let d = 0; d < 7; d++) {
-      html += `<div style="font-size:11px;color:var(--text-secondary)">${days[d]}</div>`;
-      hours.forEach(h => {
-        const v = (m[d] && m[d][h]) || 0;
-        html += `<div class="hm-cell" data-d="${d}" data-h="${h}" data-v="${v}" title="${days[d]} ${h}:00 — ${v}" style="aspect-ratio:1;border-radius:3px;background:${cellColor(v)};cursor:pointer"></div>`;
-      });
+      const v = byDay[d] || 0;
+      const isMax = v === dayMax && v > 0;
+      html += `<div><div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">${days[d]}</div>` +
+        `<div style="font-weight:700;font-size:14px;color:${isMax ? '#34C759' : 'var(--text)'}">${v.toLocaleString('ru')}</div></div>`;
     }
+    html += '</div></div>';
+
+    // ── Таблица: когда чаще всего заказывают (по часам, с мини-барами) ──
+    const hoursSorted = Object.entries(byHour).map(([h, v]) => [+h, v]).sort((a, b) => b[1] - a[1]);
+    const hourMax = hoursSorted.length ? hoursSorted[0][1] : 1;
+    html += '<div class="card" style="padding:12px">';
+    html += '<div style="font-size:13px;font-weight:600;margin-bottom:10px">⏰ Когда чаще всего заказывают</div>';
+    hoursSorted.slice(0, 10).forEach(([h, v]) => {
+      const w = Math.round(v / hourMax * 100);
+      html += `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">` +
+        `<div style="width:48px;font-size:13px;color:var(--text-secondary)">${String(h).padStart(2, '0')}:00</div>` +
+        `<div style="flex:1;background:var(--bg-secondary);border-radius:6px;height:18px;overflow:hidden">` +
+        `<div style="width:${w}%;height:100%;background:#34C759;border-radius:6px"></div></div>` +
+        `<div style="width:56px;text-align:right;font-weight:600;font-size:13px">${v.toLocaleString('ru')}</div></div>`;
+    });
     html += '</div>';
-    // Легенда
-    const swatches = [0.18, 0.45, 0.7, 1].map(a =>
-      `<span style="width:13px;height:13px;border-radius:2px;background:rgba(52,199,89,${a});display:inline-block"></span>`).join('');
-    html += `<div style="display:flex;align-items:center;gap:6px;justify-content:flex-end;margin-top:12px;font-size:11px;color:var(--text-secondary)">меньше ${swatches} больше</div>`;
 
     grid.innerHTML = html;
-
-    // Тап по клетке → подпись с числом
-    grid.querySelectorAll('.hm-cell').forEach(el => el.addEventListener('click', () => {
-      haptic();
-      const d = +el.dataset.d, h = +el.dataset.h, v = +el.dataset.v;
-      document.getElementById('hm-cap').innerHTML =
-        `${days[d]}, ${h}:00–${h + 1}:00 — <b style="color:var(--text)">${v}</b> заказ.`;
-      grid.querySelectorAll('.hm-cell').forEach(c => c.style.outline = '');
-      el.style.outline = '2px solid var(--text)';
-    }));
   } catch (e) { console.error(e); grid.innerHTML = '<div style="color:var(--text-secondary);font-size:13px">Ошибка загрузки</div>'; }
 }
 
