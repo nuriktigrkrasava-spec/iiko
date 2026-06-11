@@ -1251,20 +1251,34 @@ class IikoWebClient:
                     return {"ok": False,
                             "error": f"HTTP {resp.status_code}",
                             "body": resp.text[:500]}
-                # Ответ обычно XML вида <documentValidationResult> с id созданного документа
+                # Ответ — XML <documentValidationResult>: <valid> + (на успехе) documentId.
+                doc_id, num_out, valid_txt, err_txt = "", doc_num, "", ""
                 try:
                     rroot = ET.fromstring(resp.text)
-                    doc_id = ""
-                    num_out = doc_num
                     for el in rroot.iter():
                         tag = el.tag.split("}", 1)[-1]
-                        if tag in ("documentId", "id") and el.text:
-                            doc_id = el.text.strip()
-                        if tag == "documentNumber" and el.text:
-                            num_out = el.text.strip()
-                    return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
+                        txt = (el.text or "").strip()
+                        if tag in ("documentId", "id") and txt:
+                            doc_id = txt
+                        elif tag == "documentNumber" and txt:
+                            num_out = txt
+                        elif tag == "valid" and txt:
+                            valid_txt = txt
+                        elif tag in ("errorMessage", "error", "message") and txt:
+                            err_txt = txt
                 except Exception:
-                    return {"ok": True, "id": "", "number": doc_num, "raw": resp.text[:500]}
+                    pass
+                # ДИАГНОСТИКА (временно): у всех draft_in_iiko doc_id пустой — не знаем
+                # точную форму успешного ответа iikoServer. Логируем тело, чтобы увидеть,
+                # где лежит documentId и есть ли valid. Поведение НЕ меняем (ok:True),
+                # чтобы не сломать создание, пока не разберём реальный ответ.
+                if not doc_id or valid_txt.lower() == "false":
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"iikoWeb incomingInvoice 200 без documentId: valid={valid_txt!r} "
+                        f"err={err_txt!r} body={resp.text[:800]}"
+                    )
+                return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
