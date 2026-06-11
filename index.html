@@ -1660,6 +1660,11 @@ function getActiveOrgIds() {
   if (state.selectedBranches && state.selectedBranches.length) return state.selectedBranches;
   return state.restaurant ? [state.restaurant.organization_id] : [];
 }
+// Telegram id, которому показываем переключатель филиалов в «Плане». См. spec 2026-06-11.
+const PLAN_BRANCH_SWITCHER_TG_ID = 355897224;
+function getMyTgId() {
+  return window.Telegram?.WebApp?.initDataUnsafe?.user?.id || null;
+}
 function withOrgIds(url) {
   const p = getOrgIdsParam();
   if (!p) return url;
