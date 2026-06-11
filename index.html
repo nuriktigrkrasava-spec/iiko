@@ -1281,6 +1281,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           <input type="text" class="input-field" id="plan-url-input" placeholder="https://docs.google.com/spreadsheets/..." style="margin-bottom:8px">
           <button class="btn-full btn-black" onclick="savePlanLink()">Сохранить</button>
         </div>
+        <div id="plan-branch-bar" style="display:none;margin-bottom:12px"></div>
         <div id="plan-status" style="font-size:13px;color:var(--text-secondary);margin-bottom:12px"></div>
         <div id="plan-table-wrap"></div>
       </div>
@@ -1411,12 +1412,22 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 <!-- Date range modal -->
 <div class="modal-overlay" id="date-range-modal" onclick="closeDateRangeModal(event)">
   <div class="modal-sheet">
-    <div class="modal-title">Выбор периода</div>
-    <div style="display:flex;flex-direction:column;gap:12px;">
+    <div class="modal-title">Выбор даты</div>
+    <div class="date-mode-tabs" style="display:flex;gap:8px;margin-bottom:14px;">
+      <div class="date-chip active" id="dr-mode-day" onclick="setDateMode('day')" style="flex:1;text-align:center;">День</div>
+      <div class="date-chip" id="dr-mode-range" onclick="setDateMode('range')" style="flex:1;text-align:center;">Период</div>
+    </div>
+    <div id="dr-day-wrap" style="display:flex;flex-direction:column;gap:8px;">
+      <label style="font-size:13px;color:var(--text-secondary);">Дата</label>
+      <input type="date" class="input-field" id="dr-day" style="color:var(--text);background:var(--bg-secondary);">
+    </div>
+    <div id="dr-range-wrap" style="display:none;flex-direction:column;gap:8px;">
       <label style="font-size:13px;color:var(--text-secondary);">С</label>
       <input type="date" class="input-field" id="dr-from" style="color:var(--text);background:var(--bg-secondary);">
       <label style="font-size:13px;color:var(--text-secondary);">По</label>
       <input type="date" class="input-field" id="dr-to" style="color:var(--text);background:var(--bg-secondary);">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">
       <button class="btn-full btn-primary" onclick="applyDateRange()">Применить</button>
       <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="closeDateRangeModalDirect()">Отмена</button>
     </div>
@@ -1440,6 +1451,15 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   </div>
 </div>
 
+<!-- Plan branch modal (single-select, только шеф) -->
+<div class="modal-overlay" id="plan-branch-modal" onclick="closePlanBranchModal(event)">
+  <div class="modal-sheet">
+    <div class="modal-title">Филиал плана</div>
+    <div id="plan-branch-list" style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;"></div>
+    <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;margin-top:12px;" onclick="closePlanBranchModalDirect()">Отмена</button>
+  </div>
+</div>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -1456,6 +1476,7 @@ const state = {
   salesPeriod: 'today',
   customRange: null,       // {from, to} | null — выбранный диапазон на главной
   salesCustomRange: null,  // {from, to} | null — выбранный диапазон в Продажах
+  planOrgId: null,         // выбранный филиал в суб-вкладке «План» (только шеф); null = первый активный
   selectedBranches: null,  // null = single (use state.restaurant); string[] = multi
   salesTab: 'general',
   expenseTab: 'foodcost',
@@ -1650,6 +1671,11 @@ function getActiveOrgIds() {
   if (state.selectedBranches && state.selectedBranches.length) return state.selectedBranches;
   return state.restaurant ? [state.restaurant.organization_id] : [];
 }
+// Telegram id, которому показываем переключатель филиалов в «Плане». См. spec 2026-06-11.
+const PLAN_BRANCH_SWITCHER_TG_ID = 355897224;
+function getMyTgId() {
+  return window.Telegram?.WebApp?.initDataUnsafe?.user?.id || null;
+}
 function withOrgIds(url) {
   const p = getOrgIdsParam();
   if (!p) return url;
@@ -1661,6 +1687,50 @@ function cacheKeyFor(period, customRange) {
     : period;
   const branches = (state.selectedBranches || []).slice().sort().join(',') || 'single';
   return `${base}:${branches}`;
+}
+// Метка чипа «Даты»: один день → «📅 05.06»; диапазон → «📅 05.06–20.06»; иначе «📅 Даты»
+function formatPeriodChipLabel() {
+  const r = state.customRange;
+  if (state.period !== 'custom' || !r?.from || !r?.to) return '📅 Даты';
+  const fmt = s => s.slice(8, 10) + '.' + s.slice(5, 7);
+  return r.from === r.to ? `📅 ${fmt(r.from)}` : `📅 ${fmt(r.from)}–${fmt(r.to)}`;
+}
+
+// Перерисовать подсветку чипов и текст «Даты» сразу для ОБЕИХ панелей (main + sales).
+// Обе панели всегда в DOM, поэтому переключение вкладок берёт состояние отсюда.
+function renderDateFilters() {
+  const label = formatPeriodChipLabel();
+  const presetOf = chip => {
+    const m = /set(?:Sales)?Period\('([^']+)'/.exec(chip.getAttribute('onclick') || '');
+    return m ? m[1] : null;
+  };
+  ['main-date-filters', 'sales-date-filters'].forEach(barId => {
+    const bar = document.getElementById(barId);
+    if (!bar) return;
+    bar.querySelectorAll('.date-chip').forEach(chip => {
+      if (chip.id === 'main-date-chip' || chip.id === 'sales-date-chip') {
+        chip.textContent = label;
+        chip.classList.toggle('active', state.period === 'custom');
+      } else {
+        chip.classList.toggle('active', state.period !== 'custom' && presetOf(chip) === state.period);
+      }
+    });
+  });
+}
+
+// Единственная точка записи периода. Держит пары main/sales в синхроне,
+// перерисовывает обе панели и перезагружает данные обеих вкладок.
+function applyGlobalPeriod(period, customRange) {
+  state.period = period;
+  state.salesPeriod = period;
+  state.customRange = customRange || null;
+  state.salesCustomRange = customRange || null;
+  delete state.olapCache[cacheKeyFor(period, state.customRange)];
+  renderDateFilters();
+  loadDashboard();
+  loadSales();
+  if (state.salesTab === 'cancels') renderCancels().catch(console.error);
+  if (state.salesTab === 'cart') renderCart().catch(console.error);
 }
 function getCurrentRestaurantTitle() {
   if (state.selectedBranches && state.selectedBranches.length > 1) {
@@ -1918,6 +1988,7 @@ function hideIikoError() {
 function selectRestaurant(rest) {
   state.restaurant = rest;
   state.selectedBranches = null;
+  state.planOrgId = null;
   localStorage.removeItem('selected_branches');
   state.olapCache = {};
   localStorage.setItem('last_restaurant_id', rest.organization_id);
@@ -2013,16 +2084,7 @@ async function loadDashboard() {
 
 function setPeriod(p, el) {
   haptic();
-  state.period = p;
-  if (p !== 'custom') {
-    state.customRange = null;
-    const dateChip = document.getElementById('main-date-chip');
-    if (dateChip) dateChip.textContent = '📅 Даты';
-  }
-  delete state.olapCache[cacheKeyFor(p, state.customRange)];
-  document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadDashboard();
+  applyGlobalPeriod(p, null);
 }
 
 function renderRevenueChart(chartData) {
@@ -2197,31 +2259,30 @@ function renderPayTypes() {
 
 function setSalesPeriod(p, el) {
   haptic();
-  state.salesPeriod = p;
-  if (p !== 'custom') {
-    state.salesCustomRange = null;
-    const dateChip = document.getElementById('sales-date-chip');
-    if (dateChip) dateChip.textContent = '📅 Даты';
-  }
-  delete state.olapCache[cacheKeyFor(p, state.salesCustomRange)];
-  document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-  if (el) el.classList.add('active');
-  loadSales();
-  // Обновляем активную подвкладку
-  if (state.salesTab === 'cancels') renderCancels().catch(console.error);
-  if (state.salesTab === 'cart') renderCart().catch(console.error);
+  applyGlobalPeriod(p, null);
 }
 
 // ============ DATE RANGE MODAL ============
 let _dateModalScope = 'main';
+let _dateMode = 'day'; // 'day' | 'range'
+function setDateMode(mode) {
+  _dateMode = mode;
+  document.getElementById('dr-mode-day').classList.toggle('active', mode === 'day');
+  document.getElementById('dr-mode-range').classList.toggle('active', mode === 'range');
+  document.getElementById('dr-day-wrap').style.display = mode === 'day' ? 'flex' : 'none';
+  document.getElementById('dr-range-wrap').style.display = mode === 'range' ? 'flex' : 'none';
+}
 
 function openDateRangeModal(scope) {
   haptic();
-  _dateModalScope = scope;
-  const cur = scope === 'sales' ? state.salesCustomRange : state.customRange;
+  _dateModalScope = scope; // сохранён для совместимости; период теперь общий
+  const cur = state.customRange;
   const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('dr-from').value = cur?.from || today;
-  document.getElementById('dr-to').value = cur?.to || today;
+  const isDay = !cur || cur.from === cur.to;
+  setDateMode(isDay ? 'day' : 'range');
+  document.getElementById('dr-day').value = (cur && cur.from) || today;
+  document.getElementById('dr-from').value = (cur && cur.from) || today;
+  document.getElementById('dr-to').value = (cur && cur.to) || today;
   document.getElementById('date-range-modal').classList.add('active');
 }
 function closeDateRangeModal(e) {
@@ -2231,32 +2292,19 @@ function closeDateRangeModalDirect() {
   document.getElementById('date-range-modal').classList.remove('active');
 }
 function applyDateRange() {
-  const from = document.getElementById('dr-from').value;
-  const to = document.getElementById('dr-to').value;
-  if (!from || !to) { showToast('Укажи обе даты'); return; }
-  if (from > to) { showToast('Дата "С" должна быть раньше "По"'); return; }
-  closeDateRangeModalDirect();
-  const range = { from, to };
-  const fmt = s => s.slice(8, 10) + '.' + s.slice(5, 7);
-  if (_dateModalScope === 'sales') {
-    state.salesCustomRange = range;
-    state.salesPeriod = 'custom';
-    document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-    const chip = document.getElementById('sales-date-chip');
-    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
-    delete state.olapCache[cacheKeyFor('custom', range)];
-    loadSales();
-    if (state.salesTab === 'cancels') renderCancels().catch(console.error);
-    if (state.salesTab === 'cart') renderCart().catch(console.error);
+  let from, to;
+  if (_dateMode === 'day') {
+    const d = document.getElementById('dr-day').value;
+    if (!d) { showToast('Укажи дату'); return; }
+    from = to = d;
   } else {
-    state.customRange = range;
-    state.period = 'custom';
-    document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-    const chip = document.getElementById('main-date-chip');
-    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
-    delete state.olapCache[cacheKeyFor('custom', range)];
-    loadDashboard();
+    from = document.getElementById('dr-from').value;
+    to = document.getElementById('dr-to').value;
+    if (!from || !to) { showToast('Укажи обе даты'); return; }
+    if (from > to) { showToast('Дата "С" должна быть раньше "По"'); return; }
   }
+  closeDateRangeModalDirect();
+  applyGlobalPeriod('custom', { from, to });
 }
 
 // ============ BRANCHES MODAL ============
@@ -2293,6 +2341,7 @@ function applyBranches() {
     return;
   }
   state.selectedBranches = checked;
+  state.planOrgId = null;
   localStorage.setItem('selected_branches', JSON.stringify(checked));
   state.olapCache = {};
   renderRestSelector();
@@ -3348,11 +3397,48 @@ function setCompSubtab(view, el) {
   if (view === 'plan' && !_planLoaded) loadPlan();
 }
 
+// Чип выбора филиала в «Плане» — только шефу и только при >1 филиала.
+function renderPlanBranchBar() {
+  const bar = document.getElementById('plan-branch-bar');
+  if (!bar) return;
+  const show = getMyTgId() === PLAN_BRANCH_SWITCHER_TG_ID && state.restaurants.length > 1;
+  if (!show) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  const curId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant?.organization_id;
+  const cur = state.restaurants.find(r => r.organization_id === curId);
+  const name = cur ? cur.organization_name : 'Филиал';
+  bar.style.display = 'block';
+  bar.innerHTML = `<div class="rest-chip active" style="display:inline-block" onclick="openPlanBranchModal()">🏢 ${escHtml(name)} ▾</div>`;
+}
+function openPlanBranchModal() {
+  haptic();
+  const curId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant?.organization_id;
+  const list = document.getElementById('plan-branch-list');
+  list.innerHTML = state.restaurants.map(r => `
+    <div class="rest-chip ${r.organization_id === curId ? 'active' : ''}" style="text-align:left"
+         onclick='selectPlanBranch(${JSON.stringify(r.organization_id)})'>${escHtml(r.organization_name)}</div>
+  `).join('');
+  document.getElementById('plan-branch-modal').classList.add('active');
+}
+function closePlanBranchModal(e) {
+  if (e.target === document.getElementById('plan-branch-modal')) closePlanBranchModalDirect();
+}
+function closePlanBranchModalDirect() {
+  document.getElementById('plan-branch-modal').classList.remove('active');
+}
+function selectPlanBranch(orgId) {
+  haptic();
+  state.planOrgId = orgId;
+  closePlanBranchModalDirect();
+  _planLoaded = false;
+  loadPlan();
+}
+
 async function loadPlan() {
   if (!state.restaurant) return;
-  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const orgId = state.planOrgId || getActiveOrgIds()[0] || state.restaurant.organization_id;
   const status = document.getElementById('plan-status');
   const wrap = document.getElementById('plan-table-wrap');
+  renderPlanBranchBar();
   status.textContent = 'Загрузка...';
   wrap.innerHTML = '';
   try {
