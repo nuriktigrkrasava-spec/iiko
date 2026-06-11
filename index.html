@@ -551,6 +551,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 .badge-blue { background:#2c7be5; color:#fff; }
 .badge-orange { background:#e89e2a; color:#fff; }
 .badge-red { background:#e25c5c; color:#fff; }
+.badge-purple { background:#8b5cf6; color:#fff; }
 .badge-gray { background:#8a8a8a; color:#fff; }
 </style>
 </head>
@@ -2993,7 +2994,7 @@ async function loadExpenses() {
         if (raw === 'posted') return 'badge-green';
         if (raw === 'draft_in_iiko') return 'badge-blue';
         if (raw === 'ready') return 'badge-orange';
-        if (raw === 'needs_mapping') return 'badge-orange';
+        if (raw === 'needs_mapping') return 'badge-purple';
         if (raw === 'iiko_error') return 'badge-red';
         if (raw === 'draft') return 'badge-gray';
         // Старый поток (накладные из iiko напрямую)

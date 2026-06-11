@@ -1438,8 +1438,12 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
     }
     try:
         bot_invs = get_bot_invoices(limit=1000, organization_id=real_org)
+        # Показываем накладную, если в окно периода попадает ДАТА ДОКУМЕНТА ИЛИ
+        # ДАТА ДОБАВЛЕНИЯ (created_at). Иначе свежепробитая накладная со старой
+        # датой поставщика выпадала из окна День/Неделя, хотя добавлена только что.
         bot_invs = [b for b in bot_invs
-                    if d_from <= ((b.get("date") or b.get("created_at") or "")[:10]) <= d_to]
+                    if (d_from <= (b.get("date") or "")[:10] <= d_to)
+                    or (d_from <= (b.get("created_at") or "")[:10] <= d_to)]
         for b in bot_invs:
             raw_status = b.get("status") or "draft"
             if raw_status == "pending":
