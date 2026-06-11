@@ -1411,12 +1411,22 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 <!-- Date range modal -->
 <div class="modal-overlay" id="date-range-modal" onclick="closeDateRangeModal(event)">
   <div class="modal-sheet">
-    <div class="modal-title">Выбор периода</div>
-    <div style="display:flex;flex-direction:column;gap:12px;">
+    <div class="modal-title">Выбор даты</div>
+    <div class="date-mode-tabs" style="display:flex;gap:8px;margin-bottom:14px;">
+      <div class="date-chip active" id="dr-mode-day" onclick="setDateMode('day')" style="flex:1;text-align:center;">День</div>
+      <div class="date-chip" id="dr-mode-range" onclick="setDateMode('range')" style="flex:1;text-align:center;">Период</div>
+    </div>
+    <div id="dr-day-wrap" style="display:flex;flex-direction:column;gap:8px;">
+      <label style="font-size:13px;color:var(--text-secondary);">Дата</label>
+      <input type="date" class="input-field" id="dr-day" style="color:var(--text);background:var(--bg-secondary);">
+    </div>
+    <div id="dr-range-wrap" style="display:none;flex-direction:column;gap:8px;">
       <label style="font-size:13px;color:var(--text-secondary);">С</label>
       <input type="date" class="input-field" id="dr-from" style="color:var(--text);background:var(--bg-secondary);">
       <label style="font-size:13px;color:var(--text-secondary);">По</label>
       <input type="date" class="input-field" id="dr-to" style="color:var(--text);background:var(--bg-secondary);">
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-top:14px;">
       <button class="btn-full btn-primary" onclick="applyDateRange()">Применить</button>
       <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="closeDateRangeModalDirect()">Отмена</button>
     </div>
@@ -2237,14 +2247,25 @@ function setSalesPeriod(p, el) {
 
 // ============ DATE RANGE MODAL ============
 let _dateModalScope = 'main';
+let _dateMode = 'day'; // 'day' | 'range'
+function setDateMode(mode) {
+  _dateMode = mode;
+  document.getElementById('dr-mode-day').classList.toggle('active', mode === 'day');
+  document.getElementById('dr-mode-range').classList.toggle('active', mode === 'range');
+  document.getElementById('dr-day-wrap').style.display = mode === 'day' ? 'flex' : 'none';
+  document.getElementById('dr-range-wrap').style.display = mode === 'range' ? 'flex' : 'none';
+}
 
 function openDateRangeModal(scope) {
   haptic();
-  _dateModalScope = scope;
-  const cur = scope === 'sales' ? state.salesCustomRange : state.customRange;
+  _dateModalScope = scope; // сохранён для совместимости; период теперь общий
+  const cur = state.customRange;
   const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('dr-from').value = cur?.from || today;
-  document.getElementById('dr-to').value = cur?.to || today;
+  const isDay = !cur || cur.from === cur.to;
+  setDateMode(isDay ? 'day' : 'range');
+  document.getElementById('dr-day').value = (cur && cur.from) || today;
+  document.getElementById('dr-from').value = (cur && cur.from) || today;
+  document.getElementById('dr-to').value = (cur && cur.to) || today;
   document.getElementById('date-range-modal').classList.add('active');
 }
 function closeDateRangeModal(e) {
@@ -2254,32 +2275,19 @@ function closeDateRangeModalDirect() {
   document.getElementById('date-range-modal').classList.remove('active');
 }
 function applyDateRange() {
-  const from = document.getElementById('dr-from').value;
-  const to = document.getElementById('dr-to').value;
-  if (!from || !to) { showToast('Укажи обе даты'); return; }
-  if (from > to) { showToast('Дата "С" должна быть раньше "По"'); return; }
-  closeDateRangeModalDirect();
-  const range = { from, to };
-  const fmt = s => s.slice(8, 10) + '.' + s.slice(5, 7);
-  if (_dateModalScope === 'sales') {
-    state.salesCustomRange = range;
-    state.salesPeriod = 'custom';
-    document.querySelectorAll('#sales-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-    const chip = document.getElementById('sales-date-chip');
-    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
-    delete state.olapCache[cacheKeyFor('custom', range)];
-    loadSales();
-    if (state.salesTab === 'cancels') renderCancels().catch(console.error);
-    if (state.salesTab === 'cart') renderCart().catch(console.error);
+  let from, to;
+  if (_dateMode === 'day') {
+    const d = document.getElementById('dr-day').value;
+    if (!d) { showToast('Укажи дату'); return; }
+    from = to = d;
   } else {
-    state.customRange = range;
-    state.period = 'custom';
-    document.querySelectorAll('#main-date-filters .date-chip').forEach(c => c.classList.remove('active'));
-    const chip = document.getElementById('main-date-chip');
-    if (chip) { chip.textContent = `📅 ${fmt(from)}–${fmt(to)}`; chip.classList.add('active'); }
-    delete state.olapCache[cacheKeyFor('custom', range)];
-    loadDashboard();
+    from = document.getElementById('dr-from').value;
+    to = document.getElementById('dr-to').value;
+    if (!from || !to) { showToast('Укажи обе даты'); return; }
+    if (from > to) { showToast('Дата "С" должна быть раньше "По"'); return; }
   }
+  closeDateRangeModalDirect();
+  applyGlobalPeriod('custom', { from, to });
 }
 
 // ============ BRANCHES MODAL ============
