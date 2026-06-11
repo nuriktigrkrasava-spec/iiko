@@ -1307,6 +1307,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <div class="ie-meta-row">
           <div class="ie-meta-label">Поставщик</div>
           <input type="text" id="ie-supplier" placeholder="—" oninput="ieSearchSuppliers()" autocomplete="off">
+          <button type="button" onclick="ieClearSupplier()" style="margin-top:6px;padding:6px 12px;font-size:13px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--card-border);border-radius:8px;cursor:pointer">✕ Очистить</button>
           <div class="ie-search-results" id="ie-supplier-results"></div>
         </div>
         <div class="ie-meta-row">
@@ -1334,6 +1335,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="ie-modal-row">
       <label>Название</label>
       <input type="text" id="ie-edit-name" oninput="ieSearchProducts()">
+      <button type="button" onclick="ieClearProductSearch()" style="margin-top:6px;padding:6px 12px;font-size:13px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--card-border);border-radius:8px;cursor:pointer">✕ Очистить и искать заново</button>
       <div class="ie-search-results" id="ie-search-results"></div>
     </div>
     <div class="ie-modal-row-2">
@@ -1343,7 +1345,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
       <div class="ie-modal-row">
         <label>Ед.</label>
-        <input type="text" id="ie-edit-unit" placeholder="кг/шт/л">
+        <input type="text" id="ie-edit-unit" placeholder="кг/шт/л" oninput="ieRecalcModal()">
       </div>
     </div>
     <div class="ie-modal-row-2">
@@ -4250,12 +4252,41 @@ function ieCloseModal() {
   document.getElementById('ie-modal-back').classList.remove('active');
 }
 
+function ieUnitToBase(unit) {
+  // Коэффициент к базовой единице товара (кг/л): граммы и мл = 1/1000.
+  const u = (unit || '').trim().toLowerCase();
+  if (['г', 'гр', 'грамм', 'грамма', 'граммов', 'g', 'gr'].includes(u)) return 0.001;
+  if (['мл', 'ml'].includes(u)) return 0.001;
+  return 1;
+}
+function ieLineTotal(qty, price, unit) {
+  // Сумма с учётом единицы: 500 г при цене за кг = 0.5 × цена (а не 500 × цена).
+  return (Number(qty) || 0) * ieUnitToBase(unit) * (Number(price) || 0);
+}
+
 function ieRecalcModal() {
   const qty = Number(document.getElementById('ie-edit-qty').value) || 0;
   const price = Number(document.getElementById('ie-edit-price').value) || 0;
+  const unit = document.getElementById('ie-edit-unit').value;
   if (qty && price) {
-    document.getElementById('ie-edit-total').value = (qty * price).toFixed(2);
+    document.getElementById('ie-edit-total').value = ieLineTotal(qty, price, unit).toFixed(2);
   }
+}
+
+function ieClearProductSearch() {
+  const el = document.getElementById('ie-edit-name');
+  el.value = '';
+  document.getElementById('ie-search-results').innerHTML = '';
+  ieState._pickedProduct = null;
+  el.focus();
+}
+function ieClearSupplier() {
+  const el = document.getElementById('ie-supplier');
+  el.value = '';
+  document.getElementById('ie-supplier-results').innerHTML = '';
+  ieState.supplierId = null;
+  ieState.supplierName = '';
+  el.focus();
 }
 
 function ieSearchProducts() {
@@ -4301,7 +4332,7 @@ function ieSaveItem() {
   it.quantity = Number(document.getElementById('ie-edit-qty').value) || 0;
   it.unit = document.getElementById('ie-edit-unit').value.trim();
   it.price_per_unit = Number(document.getElementById('ie-edit-price').value) || 0;
-  it.total = Number(document.getElementById('ie-edit-total').value) || (it.quantity * it.price_per_unit);
+  it.total = Number(document.getElementById('ie-edit-total').value) || ieLineTotal(it.quantity, it.price_per_unit, it.unit);
   if (ieState._pickedProduct) {
     it.iiko_product_id = ieState._pickedProduct.id;
     it.iiko_product_name = ieState._pickedProduct.name;

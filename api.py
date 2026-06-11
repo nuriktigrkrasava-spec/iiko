@@ -134,8 +134,19 @@ def _get_cached(key: str) -> Optional[Any]:
 
 
 def _set_cached(key: str, value: Any):
+    # Перед записью чистим протухшее и держим потолок размера — иначе _cache рос
+    # бесконечно (ключи: user×org×период×эндпоинт) и тёк по памяти до рестарта.
+    now = datetime.now()
+    if len(_cache) > 500:
+        for k in [k for k, t in list(_cache_time.items()) if now - t >= _CACHE_TTL]:
+            _cache.pop(k, None)
+            _cache_time.pop(k, None)
+        if len(_cache) > 500:  # всё ещё много — сносим самые старые
+            for k in sorted(_cache_time, key=_cache_time.get)[:len(_cache) - 500]:
+                _cache.pop(k, None)
+                _cache_time.pop(k, None)
     _cache[key] = value
-    _cache_time[key] = datetime.now()
+    _cache_time[key] = now
 
 
 def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
