@@ -2446,6 +2446,20 @@ function renderClients(data) {
     ${seg(5, 'Выручка с клиентов', formatMoney(s.revenue), 'за период', 'var(--text)',
       `Всего <b>${formatMoney(s.revenue)}</b> от ${n(total)} клиентов за период.`)}
   </div>`;
+  if (data.rfm && data.rfm.segments && data.rfm.segments.length) {
+    html += `<div class="card" style="margin-top:12px">
+      <div class="card-title" style="margin-bottom:4px">RFM-сегменты</div>
+      <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">По давности (R), частоте (F) и сумме заказов · всего ${(data.rfm.total||0).toLocaleString('ru')}</div>
+      <div class="seg-grid">
+        ${data.rfm.segments.map(x => `
+          <div class="seg-card">
+            <div class="seg-label">${x.emoji} ${escHtml(x.label)}</div>
+            <div class="seg-value">${(x.count||0).toLocaleString('ru')}</div>
+            <div class="seg-sub">${x.pct}%${x.revenue ? ' · ' + formatMoney(x.revenue) : ''}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  }
   if (data.top_vip && data.top_vip.length) {
     html += `<div class="card" style="margin-top:12px">
       <div class="card-title" style="margin-bottom:8px">Топ клиенты</div>

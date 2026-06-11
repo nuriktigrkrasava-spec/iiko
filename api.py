@@ -2164,6 +2164,62 @@ def _clients_segments(agg: Dict[str, Dict[str, float]]):
     return segments, top_vip
 
 
+def _compute_rfm(agg: Dict[str, Dict[str, float]], today):
+    """agg {phone:{orders,spend,last_date}} → RFM-сегменты.
+    Скоринг R (давность) и F (частота) квинтилями (5 = лучший), сегмент по (R,F)."""
+    custs = [(ph, a) for ph, a in agg.items() if a.get("orders", 0) > 0]
+    if not custs:
+        return None
+
+    def rec_days(a):
+        ld = a.get("last_date") or ""
+        if not ld:
+            return 9999
+        try:
+            return (today - date.fromisoformat(ld[:10])).days
+        except Exception:
+            return 9999
+
+    def quintile(pairs, higher_better):
+        order = sorted(pairs, key=lambda kv: kv[1], reverse=higher_better)
+        L = len(order)
+        return {k: 5 - (i * 5 // L) for i, (k, _) in enumerate(order)}
+
+    rs = quintile([(ph, rec_days(a)) for ph, a in custs], higher_better=False)
+    fs = quintile([(ph, a["orders"]) for ph, a in custs], higher_better=True)
+
+    def seg_of(r, f):
+        if r >= 4 and f >= 4: return "champions"
+        if f >= 4:            return "loyal"
+        if r >= 4:            return "promising"
+        if r <= 2 and f >= 3: return "at_risk"
+        if r <= 1 and f <= 1: return "lost"
+        if r <= 2:            return "hibernating"
+        return "others"
+
+    META = [
+        ("champions", "🏆", "Чемпионы"),
+        ("loyal", "💚", "Лояльные"),
+        ("promising", "🌱", "Перспективные"),
+        ("at_risk", "⚠️", "В зоне риска"),
+        ("hibernating", "😴", "Спящие"),
+        ("lost", "❌", "Потерянные"),
+        ("others", "•", "Прочие"),
+    ]
+    buckets = {k: {"count": 0, "revenue": 0.0} for k, _, _ in META}
+    for ph, a in custs:
+        b = buckets[seg_of(rs[ph], fs[ph])]
+        b["count"] += 1
+        b["revenue"] += a.get("spend", 0.0)
+    total = len(custs)
+    segs = [{"key": k, "emoji": e, "label": lbl,
+             "count": buckets[k]["count"],
+             "pct": round(buckets[k]["count"] / total * 100),
+             "revenue": round(buckets[k]["revenue"])}
+            for k, e, lbl in META if buckets[k]["count"] > 0]
+    return {"total": total, "segments": segs}
+
+
 def _parse_clients_csv(text: str, org_name: str) -> Dict[str, Dict[str, float]]:
     """Из таблицы заказов: заказы и выручка на телефон для филиала → agg."""
     target = _norm_branch(org_name)
@@ -2265,10 +2321,11 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
     async def fetch_one(real: str):
         i = _get_restaurant_info(real, user)
         client = get_client(i["api_login"], i.get("iiko_server"), i.get("api_password"))
-        if not hasattr(client, "olap_clients"):
+        fn = getattr(client, "olap_clients_rfm", None) or getattr(client, "olap_clients", None)
+        if not fn:
             return []
         try:
-            return await client.olap_clients(_olap_dept(real, i), date_from, date_to)
+            return await fn(_olap_dept(real, i), date_from, date_to)
         except Exception as e:
             logger.warning(f"[clients/iiko] {real}: {e}")
             return []
@@ -2281,11 +2338,16 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
             n = int(d.get("UniqOrderId.OrdersCount") or 0)
             if not ph or n <= 0:
                 continue
-            a = agg.setdefault(ph, {"orders": 0, "spend": 0.0})
+            a = agg.setdefault(ph, {"orders": 0, "spend": 0.0, "last_date": ""})
             a["orders"] += n
             a["spend"] += float(d.get("DishDiscountSumInt") or 0)
+            od = (d.get("OpenDate.Typed") or "")[:10]
+            if od and od > a["last_date"]:
+                a["last_date"] = od
     segments, top_vip = _clients_segments(agg)
-    return {"segments": segments, "top_vip": top_vip, "source": "iiko", "year": date_from[:4]}
+    rfm = _compute_rfm(agg, local_now().date())
+    return {"segments": segments, "top_vip": top_vip, "rfm": rfm,
+            "source": "iiko", "year": date_from[:4]}
 
 
 @app.get("/api/olap/{org_id}")
