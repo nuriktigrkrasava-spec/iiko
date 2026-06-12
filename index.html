@@ -1417,6 +1417,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <h1>Смены</h1>
         <div class="date" id="cs-branch-name"></div>
       </div>
+      <button class="help-btn" onclick="openHelp('cashshifts')" aria-label="Помощь">?</button>
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
       <input type="date" id="cs-date" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:8px 10px;font-size:14px;"
@@ -2501,7 +2502,8 @@ async function loadCashshifts() {
   const d = await apiGet(`/api/cashshifts_day/${csOrgId()}?date=${dateEl.value}`).catch(() => null);
   if (!d || !d.shifts) { box.innerHTML = '<div class="card"><div class="card-subtitle">⚠️ Не удалось загрузить</div></div>'; return; }
   if (!d.shifts.length) { box.innerHTML = '<div class="card"><div class="card-subtitle">Смен за эту дату нет</div></div>'; return; }
-  box.innerHTML = d.shifts.map(s => {
+  state._csShifts = d.shifts;
+  box.innerHTML = d.shifts.map((s, i) => {
     const diff = +s.cash_diff || 0;
     const counted = s.counted !== false;
     const bad = (counted && Math.abs(diff) > 0.01) || (s.edits || []).length;
@@ -2509,7 +2511,10 @@ async function loadCashshifts() {
     return `<div class="card" style="margin-top:12px;border-left:4px solid ${border};">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div class="card-title">Смена №${s.number} · касса ${s.cash_reg}</div>
-        <div style="font-size:12px;color:var(--text-secondary);">${s.open}–${s.close} · ${s.status === 'ACCEPTED' ? '✅ принята' : '⏳ не принята'}</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <div style="font-size:12px;color:var(--text-secondary);">${s.open}–${s.close} · ${s.status === 'ACCEPTED' ? '✅ принята' : '⏳ не принята'}</div>
+          <button class="excel-btn" onclick="showZReport(${i})">📄 Z-отчёт</button>
+        </div>
       </div>
       <div class="card-subtitle">${escHtml(s.cashier || '')}</div>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;font-size:14px;">
@@ -2533,6 +2538,34 @@ async function loadCashshifts() {
       </div>` : ''}
     </div>`;
   }).join('');
+}
+
+function showZReport(i) {
+  const s = (state._csShifts || [])[i];
+  if (!s) return;
+  const date = document.getElementById('cs-date').value.split('-').reverse().join('.');
+  const L = [];
+  L.push(`Z-ОТЧЁТ · ${state.restaurant?.organization_name || ''}`);
+  L.push(`Смена №${s.number} · касса ${s.cash_reg} · ${date}`);
+  L.push(`Кассир: ${s.cashier} · ${s.open}–${s.close}`);
+  L.push('—'.repeat(28));
+  (s.pay_breakdown || []).forEach(p => L.push(`${p.name}: ${formatMoney(p.sum)}`));
+  L.push('—'.repeat(28));
+  L.push(`ИТОГО: ${formatMoney(s.total)}`);
+  L.push(`Внесения: ${formatMoney(s.pay_in)} · Изъятия: ${formatMoney(s.pay_out)}`);
+  L.push(s.counted === false ? 'Пересчёт кассы: не вводился'
+                             : `Расхождение: ${formatMoney(s.cash_diff)}`);
+  L.push(`Статус: ${s.status === 'ACCEPTED' ? 'принята в офисе' : 'не принята'}`);
+  if ((s.edits || []).length) {
+    L.push(`Исправленные платежи: ${s.edits.length}`);
+    s.edits.forEach(e => L.push(`  ${e.time} ${e.type}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}`));
+  }
+  const text = L.join('\n');
+  document.getElementById('help-title').textContent = `Z-отчёт · смена №${s.number}`;
+  document.getElementById('help-body').innerHTML =
+    `<pre style="font-size:13px;white-space:pre-wrap;line-height:1.5;">${escHtml(text)}</pre>
+     <button class="excel-btn" style="width:100%;margin-top:8px;" onclick="navigator.clipboard.writeText(${JSON.stringify('')} + this.dataset.t).then(()=>this.textContent='✅ Скопировано')" data-t="${escHtml(text)}">📋 Скопировать</button>`;
+  document.getElementById('help-modal').classList.add('active');
 }
 
 async function loadShiftPaytypes() {
@@ -3825,6 +3858,42 @@ function setCompChannel(ch) {
 // Контент подсказок по topic. Сейчас активен только 'register'.
 // Чтобы добавить '?' на другие вкладки — добавь новый topic сюда и кнопку <button class="help-btn" onclick="openHelp('X')">?</button> в шапку нужного экрана.
 const HELP_CONTENT = {
+  cashshifts: {
+    title: 'Вкладка «Смены»',
+    body: `
+      <h4>Зачем нужна</h4>
+      <p>Заменяет ежедневную сверку кассовых смен глазами: бот сам забирает смены из iiko, сравнивает и подсвечивает проблемы. Ночью в 00:05 сводка по всем точкам приходит в Telegram — если всё зелёное, вкладку можно не открывать.</p>
+
+      <h4>Цвет карточки смены</h4>
+      <ul>
+        <li>🟢 <b>Зелёная</b> — всё чисто: расхождений нет, платежи никто не исправлял</li>
+        <li>🟠 <b>Оранжевая</b> — «пересчёт не вводился»: кассир не ввёл фактическую наличность при закрытии, поэтому недостачу посчитать невозможно. Это не ошибка смены, а пропущенный шаг на кассе</li>
+        <li>🔴 <b>Красная</b> — реальная проблема: введённый пересчёт не сходится (недостача/излишек) или офис исправлял ошибочные платежи кассира</li>
+      </ul>
+
+      <h4>Статусы</h4>
+      <ul>
+        <li><b>✅ принята</b> — смена принята в iiko Office (сверена бухгалтером)</li>
+        <li><b>⏳ не принята</b> — офис ещё не сверил смену</li>
+        <li><b>Расхожд.</b> — разница между деньгами по данным iiko и фактом в ящике</li>
+        <li><b>Исправленные платежи</b> — кассир пробил не тот тип оплаты, офис поправил (видно время и сумму)</li>
+      </ul>
+
+      <h4>Зарплата</h4>
+      <ul>
+        <li>Часы тянутся из явок iiko за выбранную дату</li>
+        <li><b>⚠️ оранжевые часы</b> — больше 16 ч/смену: явки в iiko задвоены или не закрыты, проверьте их в iiko Office</li>
+        <li>Тап по <b>ставке</b> — задать ₸/час; тап по <b>итогу</b> — вписать сумму вручную (помечается ✏️)</li>
+        <li>Записать зарплату в iiko через API нельзя (сервер запрещает) — цифры переносятся в iiko вручную</li>
+      </ul>
+
+      <h4>Как пользоваться каждый день</h4>
+      <p>1. Ночью пришла сводка в Telegram → всё ✅ — ничего не делать.<br>
+      2. Есть ❌ → открыть вкладку, выбрать дату → смотреть красные карточки: кто кассир, что исправлено, какая недостача.<br>
+      3. Кнопка «📄 Z-отчёт» на карточке — полный отчёт смены, можно скопировать и отправить.</p>
+    `
+  },
+
   register: {
     title: 'Как подключить iiko',
     body: `
