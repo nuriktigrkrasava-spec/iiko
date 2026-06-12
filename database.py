@@ -613,3 +613,32 @@ def get_rating_history(org_id: str, platform: str, days: int = 30):
                         (org_id, platform, f"-{days} days")).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ==== Ставки для расчёта зарплаты (вкладка «Смены») ====
+
+def init_salary_db():
+    conn = get_db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS salary_rates (
+        employee_id TEXT PRIMARY KEY,
+        rate REAL NOT NULL DEFAULT 0
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_salary_rates() -> dict:
+    conn = get_db()
+    rows = conn.execute("SELECT employee_id, rate FROM salary_rates").fetchall()
+    conn.close()
+    return {r["employee_id"]: r["rate"] for r in rows}
+
+
+def set_salary_rate(employee_id: str, rate: float):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO salary_rates(employee_id, rate) VALUES(?,?)",
+                 (employee_id, rate))
+    conn.commit()
+    conn.close()

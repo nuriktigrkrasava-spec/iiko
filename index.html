@@ -1402,6 +1402,49 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <svg viewBox="0 0 24 24"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline><polyline points="17 6 23 6 23 12"></polyline></svg>
     <span>Год/год</span>
   </div>
+  <div class="nav-item" onclick="switchTab('cashshifts')">
+    <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="13" rx="2"></rect><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"></path><line x1="2" y1="13" x2="22" y2="13"></line></svg>
+    <span>Смены</span>
+  </div>
+</div>
+
+
+<!-- Cashshifts: сверка смен и зарплата -->
+<div class="screen" id="screen-cashshifts">
+  <div class="header">
+    <div class="header-top">
+      <div>
+        <h1>Смены</h1>
+        <div class="date" id="cs-branch-name"></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+      <input type="date" id="cs-date" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:8px 10px;font-size:14px;"
+             onchange="loadCashshifts()">
+      <span style="font-size:12px;color:var(--text-secondary);">смены и расхождения за день</span>
+    </div>
+  </div>
+  <div class="scroll-container">
+    <div id="cs-shifts"><div class="card"><div class="card-subtitle">Выберите дату</div></div></div>
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Зарплата · часы из iiko</div>
+          <div class="card-subtitle">тап по ставке — изменить; итог = часы × ставка</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin:8px 0;">
+        <input type="date" id="sal-from" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:6px 8px;font-size:13px;" onchange="loadSalary()">
+        <input type="date" id="sal-to" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:6px 8px;font-size:13px;" onchange="loadSalary()">
+      </div>
+      <div class="table-container">
+        <table class="data-table" id="salary-table">
+          <thead><tr><th>Сотрудник</th><th style="text-align:right">Часы</th><th style="text-align:right">Ставка</th><th style="text-align:right">Итого</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Settings Modal -->
@@ -1772,6 +1815,7 @@ function switchTab(tab) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
   document.getElementById('screen-' + tab).classList.add('active');
+  if (tab === 'cashshifts') { loadCashshifts(); loadSalary(); }
   const navItems = document.querySelectorAll('.nav-item');
   const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4 };
   if (navItems[tabMap[tab]]) navItems[tabMap[tab]].classList.add('active');
@@ -2445,6 +2489,70 @@ async function loadReviews() {
       </div>`).join('');
     document.getElementById('reviews-list-card').style.display = 'block';
   }
+}
+
+
+function csOrgId() { return getActiveOrgIds()[0] || state.restaurant.organization_id; }
+
+async function loadCashshifts() {
+  if (!state.restaurant) return;
+  document.getElementById('cs-branch-name').textContent = state.restaurant.organization_name || '';
+  const dateEl = document.getElementById('cs-date');
+  if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+  const box = document.getElementById('cs-shifts');
+  box.innerHTML = '<div class="card"><div class="card-subtitle">Загрузка смен…</div></div>';
+  const d = await apiGet(`/api/cashshifts_day/${csOrgId()}?date=${dateEl.value}`).catch(() => null);
+  if (!d || !d.shifts) { box.innerHTML = '<div class="card"><div class="card-subtitle">⚠️ Не удалось загрузить</div></div>'; return; }
+  if (!d.shifts.length) { box.innerHTML = '<div class="card"><div class="card-subtitle">Смен за эту дату нет</div></div>'; return; }
+  box.innerHTML = d.shifts.map(s => {
+    const diff = +s.cash_diff || 0;
+    const bad = Math.abs(diff) > 0.01 || (s.edits || []).length;
+    return `<div class="card" style="margin-top:12px;border-left:4px solid ${bad ? '#e5484d' : 'var(--green)'};">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title">Смена №${s.number} · касса ${s.cash_reg}</div>
+        <div style="font-size:12px;color:var(--text-secondary);">${s.open}–${s.close} · ${s.status === 'ACCEPTED' ? '✅ принята' : '⏳ не принята'}</div>
+      </div>
+      <div class="card-subtitle">${escHtml(s.cashier || '')}</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;font-size:14px;">
+        <div>Нал<br><b>${formatMoney(s.cash)}</b></div>
+        <div>Карта<br><b>${formatMoney(s.card)}</b></div>
+        <div>Итого<br><b>${formatMoney(s.total)}</b></div>
+        <div style="color:var(--text-secondary)">Внесения<br>${formatMoney(s.pay_in)}</div>
+        <div style="color:var(--text-secondary)">Изъятия<br>${formatMoney(s.pay_out)}</div>
+        <div>Расхожд.<br><b style="color:${Math.abs(diff) > 0.01 ? '#e5484d' : 'var(--green)'}">${formatMoney(diff)}</b></div>
+      </div>
+      ${(s.edits || []).length ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider);">
+        <div style="font-size:13px;font-weight:600;color:#e5484d;">Исправленные платежи (${s.edits.length}):</div>
+        ${s.edits.map(e => `<div style="font-size:13px;color:var(--text-secondary);">• ${e.time} ${e.type}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}${e.account_changed ? ' (тип оплаты изменён)' : ''}</div>`).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function loadSalary() {
+  if (!state.restaurant) return;
+  const f = document.getElementById('sal-from'), t = document.getElementById('sal-to');
+  const now = new Date();
+  if (!f.value) f.value = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
+  if (!t.value) t.value = now.toISOString().slice(0, 10);
+  const tbody = document.querySelector('#salary-table tbody');
+  tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
+  const d = await apiGet(`/api/salary/${csOrgId()}?from=${f.value}&to=${t.value}`).catch(() => null);
+  if (!d || !d.rows) { tbody.innerHTML = '<tr><td colspan="4">⚠️ Ошибка</td></tr>'; return; }
+  tbody.innerHTML = d.rows.map(r => `
+    <tr>
+      <td class="name">${escHtml(r.name)}</td>
+      <td class="num">${r.hours}</td>
+      <td class="num" style="color:var(--blue);cursor:pointer;" onclick="setRate('${r.employee_id}', ${r.rate})">${r.rate || '—'}</td>
+      <td class="num">${formatMoney(r.total)}</td>
+    </tr>`).join('') || '<tr><td colspan="4">Нет явок за период</td></tr>';
+}
+
+async function setRate(employeeId, current) {
+  const v = prompt('Ставка, ₸/час:', current || '');
+  if (v === null) return;
+  await apiPost('/api/salary/rate', { employee_id: employeeId, rate: +v || 0 });
+  loadSalary();
 }
 
 async function loadClients() {

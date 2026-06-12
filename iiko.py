@@ -836,6 +836,54 @@ class IikoWebClient:
             raw = resp.json()
             return raw if isinstance(raw, list) else raw.get("data", raw.get("sessions", []))
 
+    async def get_cashshift_payments(self, session_id: str) -> Dict[str, Any]:
+        """Платежи кассовой смены: безнал по записям, original vs actual/edited
+        (следы исправлений типов оплат при принятии смены в офисе)."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v2/cashshifts/payments/list/{session_id}",
+                params={"key": token, "hideAccepted": "false"},
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    async def get_employees_map(self) -> Dict[str, str]:
+        """id → имя сотрудника (XML /api/employees)."""
+        import xml.etree.ElementTree as ET
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/employees",
+                                    params={"key": token})
+            resp.raise_for_status()
+        out: Dict[str, str] = {}
+        for e in ET.fromstring(resp.text).findall("employee"):
+            eid = e.findtext("id")
+            full = " ".join(x for x in (e.findtext("lastName"), e.findtext("firstName"))
+                            if x) or (e.findtext("name") or "")
+            if eid:
+                out[eid] = full.strip()
+        return out
+
+    async def get_attendance(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """Явки сотрудников за период (XML), для расчёта часов и зарплаты."""
+        import xml.etree.ElementTree as ET
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/employees/attendance",
+                                    params={"key": token, "from": date_from[:10],
+                                            "to": date_to[:10]})
+            resp.raise_for_status()
+        out = []
+        for a in ET.fromstring(resp.text).findall("attendance"):
+            out.append({
+                "employeeId": a.findtext("employeeId"),
+                "dateFrom": a.findtext("dateFrom"),
+                "dateTo": a.findtext("dateTo"),
+                "departmentName": a.findtext("departmentName") or "",
+            })
+        return out
+
     @staticmethod
     def cashshifts_revenue(sessions: List[Dict[str, Any]]) -> float:
         """Сумма выручки по сменам = Σ payOrders (как в кассе)."""

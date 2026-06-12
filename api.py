@@ -505,10 +505,13 @@ class ExportSendPayload(BaseModel):
 @app.on_event("startup")
 async def startup():
     init_db()
-    from database import init_reviews_db
+    from database import init_reviews_db, init_salary_db
     init_reviews_db()
+    init_salary_db()
     # Фоновый планировщик воскресного отчёта ген.директору
     asyncio.create_task(_weekly_report_scheduler())
+    # Ночная сводка кассовых смен (00:05)
+    asyncio.create_task(_daily_shifts_scheduler())
 
 
 @app.get("/")
@@ -4193,3 +4196,202 @@ async def set_review_brand(payload: ReviewBrandIn, user: Dict = Depends(get_curr
     """Название бренда для поиска точек на площадках отзывов (для любых клиентов)."""
     set_app_state(f"review_brand:{user.get('id', 0)}", payload.brand.strip()[:60])
     return {"ok": True}
+
+
+# ==== Вкладка «Смены»: сверка кассовых смен и зарплата ====
+
+async def _branch_sessions(client, dept: str, date_from: str, date_to: str) -> List[Dict[str, Any]]:
+    """Кассовые смены ОДНОГО филиала (та же цепочка, что в branch_shift_revenue)."""
+    sessions, codes = await asyncio.gather(
+        client.get_cashshifts(date_from, date_to),
+        client.olap_report(dept, date_from, date_to, ["Conception.Code"], ["DishAmountSum"]),
+    )
+    code_set = {str(x.get("Conception.Code")) for x in codes.get("data", [])
+                if x.get("Conception.Code") is not None}
+    target_ids: set = set()
+    if code_set:
+        try:
+            concs = await client.get_conceptions()
+            target_ids = {c["id"] for c in concs if c.get("code") in code_set and c.get("id")}
+        except Exception:
+            pass
+    if target_ids:
+        return [s for s in sessions if s.get("conceptionId") in target_ids]
+    distinct = {s.get("conceptionId") for s in sessions if s.get("conceptionId")}
+    return sessions if len(distinct) <= 1 else []
+
+
+def _payment_edits(payments: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Платежи, исправленные при принятии смены (тип/сумма original → edited)."""
+    out = []
+    for rec in payments.get("cashlessRecords", []) or []:
+        orig_sum = rec.get("originalSum")
+        act_sum = rec.get("actualSum")
+        if orig_sum != act_sum or rec.get("originalPayAccountId") != rec.get("editedPayAccountId"):
+            info = rec.get("info") or {}
+            out.append({"sum_was": orig_sum, "sum_now": act_sum,
+                        "type": info.get("type", ""), "time": (info.get("creationDate") or "")[11:16],
+                        "account_changed": rec.get("originalPayAccountId") != rec.get("editedPayAccountId")})
+    return out
+
+
+@app.get("/api/cashshifts_day/{org_id}")
+async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_current_user)):
+    """Смены филиала за дату: суммы, расхождения, исправленные платежи, кассиры."""
+    if _is_demo_user(user):
+        return {"date": date, "shifts": [
+            {"number": 12, "cash_reg": 1, "cashier": "Виктория Ким", "open": "10:02", "close": "23:48",
+             "cash": 55970, "card": 276508, "credit": 8973, "total": 341451,
+             "pay_in": 50706, "pay_out": 42665, "cash_diff": -8500, "status": "UNACCEPTED",
+             "edits": [{"sum_was": 1090, "sum_now": 1090, "type": "CARD", "time": "22:37", "account_changed": True}]},
+        ]}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_cashshifts"):
+        raise HTTPException(status_code=400, detail="Кассовые смены доступны только на самохостед iiko")
+    cache_key = f"cashshifts_day:{real_org}:{date}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+    dept = _olap_dept(real_org, info)
+    sessions, employees = await asyncio.gather(
+        _branch_sessions(client, dept, date, date),
+        client.get_employees_map(),
+    )
+    shifts = []
+    for s in sessions:
+        edits: List[Dict[str, Any]] = []
+        try:
+            payments = await client.get_cashshift_payments(s["id"])
+            edits = _payment_edits(payments)
+        except Exception as e:
+            logger.warning(f"[cashshifts_day] payments {s.get('id')}: {e}")
+        shifts.append({
+            "number": s.get("sessionNumber"), "cash_reg": s.get("cashRegNumber"),
+            "cashier": employees.get(s.get("responsibleUserId") or "", "—"),
+            "open": (s.get("openDate") or "")[11:16], "close": (s.get("closeDate") or "")[11:16],
+            "cash": s.get("salesCash"), "card": s.get("salesCard"), "credit": s.get("salesCredit"),
+            "total": s.get("payOrders"), "pay_in": s.get("payIn"), "pay_out": s.get("payOut"),
+            "cash_diff": s.get("cashDiff"), "status": s.get("sessionStatus"),
+            "edits": edits,
+        })
+    resp = {"date": date, "shifts": shifts}
+    _set_cached(cache_key, resp)
+    return resp
+
+
+@app.get("/api/salary/{org_id}")
+async def salary(org_id: str, response: Response,
+                 from_: str = Query(..., alias="from"), to: str = Query(...),
+                 user: Dict = Depends(get_current_user)):
+    """Часы сотрудников филиала из явок iiko × ставка (хранится у нас)."""
+    if _is_demo_user(user):
+        return {"rows": [
+            {"employee_id": "d1", "name": "Виктория Ким", "hours": 142.5, "rate": 900, "total": 128250},
+            {"employee_id": "d2", "name": "Артём Волков", "hours": 156.0, "rate": 800, "total": 124800},
+        ]}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_attendance"):
+        raise HTTPException(status_code=400, detail="Явки доступны только на самохостед iiko")
+    from database import get_salary_rates
+    attendance, employees = await asyncio.gather(
+        client.get_attendance(from_, to),
+        client.get_employees_map(),
+    )
+    org_name = info.get("org_name", "")
+    hours: Dict[str, float] = {}
+    for a in attendance:
+        if org_name and a["departmentName"] != org_name:
+            continue
+        try:
+            df = datetime.fromisoformat(a["dateFrom"])
+            dt_ = datetime.fromisoformat(a["dateTo"])
+            hours[a["employeeId"]] = hours.get(a["employeeId"], 0) + (dt_ - df).total_seconds() / 3600
+        except Exception:
+            continue
+    rates = get_salary_rates()
+    rows = []
+    for eid, h in sorted(hours.items(), key=lambda x: -x[1]):
+        rate = rates.get(eid, 0)
+        rows.append({"employee_id": eid, "name": employees.get(eid, eid[:8]),
+                     "hours": round(h, 1), "rate": rate, "total": round(h * rate)})
+    return {"rows": rows}
+
+
+class SalaryRateIn(BaseModel):
+    employee_id: str
+    rate: float
+
+
+@app.post("/api/salary/rate")
+async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
+    from database import set_salary_rate
+    set_salary_rate(payload.employee_id, payload.rate)
+    return {"ok": True}
+
+
+async def _send_daily_shifts_report() -> bool:
+    """Сводка по сменам всех филиалов за вчера — владельцам в Telegram."""
+    from database import get_all_restaurants
+    rests = get_all_restaurants()
+    if not rests:
+        return False
+    yesterday = (local_now() - timedelta(days=1)).date().isoformat()
+    by_owner: Dict[int, list] = {}
+    for r in rests:
+        by_owner.setdefault(r["telegram_id"], []).append(r)
+    for tg_id, owner_rests in by_owner.items():
+        lines = [f"🌙 <b>Кассовые смены за {yesterday}</b>"]
+        problems = 0
+        for r in owner_rests:
+            try:
+                info = {"api_login": r["api_login"], "iiko_server": r.get("iiko_server"),
+                        "api_password": r.get("api_password"), "org_name": r.get("organization_name", "")}
+                # get_all_restaurants уже возвращает расшифрованные пароли
+                client = get_client(info["api_login"], info.get("iiko_server"),
+                                    info.get("api_password"))
+                if not hasattr(client, "get_cashshifts"):
+                    continue
+                dept = r.get("organization_name", "")
+                sessions = await _branch_sessions(client, dept, yesterday, yesterday)
+                for s in sessions:
+                    diff = float(s.get("cashDiff") or 0)
+                    total = float(s.get("payOrders") or 0)
+                    name = (r.get("organization_name") or "")[:28]
+                    if abs(diff) > 0.01:
+                        problems += 1
+                        lines.append(f"❌ {name}: смена №{s.get('sessionNumber')} — "
+                                     f"итого {format_money(total)}, расхождение {format_money(diff)}")
+                    else:
+                        lines.append(f"✅ {name}: №{s.get('sessionNumber')} — {format_money(total)}")
+            except Exception as e:
+                logger.warning(f"[daily_shifts] {r.get('organization_name')}: {e}")
+        if len(lines) > 1:
+            lines.insert(1, f"Проблемных смен: {problems}" if problems else "Все смены без расхождений 👌")
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as c:
+                    await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                 json={"chat_id": tg_id, "text": "\n".join(lines[:60]),
+                                       "parse_mode": "HTML"})
+            except Exception as e:
+                logger.warning(f"[daily_shifts] send {tg_id}: {e}")
+    return True
+
+
+async def _daily_shifts_scheduler():
+    """Каждую ночь после 00:05 — сводка смен за прошедший день."""
+    while True:
+        try:
+            now = local_now()
+            if now.hour == 0 and now.minute >= 5 or now.hour >= 1:
+                today_str = now.date().isoformat()
+                if get_app_state("daily_shifts_last_sent") != today_str:
+                    if await _send_daily_shifts_report():
+                        set_app_state("daily_shifts_last_sent", today_str)
+                        logger.info(f"[daily_shifts] отправлена за {today_str}")
+        except Exception as e:
+            logger.warning(f"[daily_shifts] цикл: {e}")
+        await asyncio.sleep(600)
