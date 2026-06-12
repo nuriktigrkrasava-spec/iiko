@@ -1186,6 +1186,47 @@ class IikoWebClient:
         except Exception:
             return []
 
+    async def get_measure_units_map(self) -> Dict[str, str]:
+        """id → название единицы измерения (кг/шт/л...), кэш 30 мин."""
+        self._ensure_caches()
+        cached = getattr(self, "_units_cache", None)
+        if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
+            return cached[1]
+        token = await self._ensure_token()
+        units: Dict[str, str] = {}
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/v2/entities/list",
+                    params={"key": token, "rootType": "MeasureUnit", "includeDeleted": "false"})
+                if resp.status_code == 200:
+                    units = {x["id"]: x.get("name", "") for x in resp.json() if x.get("id")}
+        except Exception:
+            pass
+        self._units_cache = (datetime.now(), units)
+        return units
+
+    async def get_stores(self, org_name: str = "") -> List[Dict[str, Any]]:
+        """Склады; если передано имя филиала — только его склады (по parentId
+        через corporation/departments), иначе все."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/corporation/stores",
+                                    params={"key": token})
+            items = self._xml_to_list_of_dicts(resp.text, "corporateItemDto") or                     self._xml_to_list_of_dicts(resp.text, "store")
+            stores = [{"id": it.get("id", ""), "name": it.get("name", ""),
+                       "parentId": it.get("parentId", "")} for it in items if it.get("id")]
+            if org_name:
+                resp = await client.get(f"{self.base_url}/api/corporation/departments",
+                                        params={"key": token})
+                deps = self._xml_to_list_of_dicts(resp.text, "corporateItemDto") or                        self._xml_to_list_of_dicts(resp.text, "department")
+                dep_ids = {d.get("id") for d in deps if (d.get("name") or "").strip() == org_name.strip()}
+                if dep_ids:
+                    own = [s for s in stores if s["parentId"] in dep_ids]
+                    if own:
+                        return own
+        return stores
+
     async def _get_default_store(self, org_id: str) -> Optional[str]:
         """Берёт первый склад из corporation/stores (нужно для incomingInvoice)."""
         self._ensure_caches()
@@ -1281,13 +1322,14 @@ class IikoWebClient:
 
     async def create_incoming_invoice(self, org_id: str, supplier_id: str,
                                        items: List[Dict[str, Any]], date: str,
-                                       document_number: Optional[str] = None) -> Dict[str, Any]:
+                                       document_number: Optional[str] = None,
+                                       store_id: Optional[str] = None) -> Dict[str, Any]:
         """Создаёт входящую накладную в iikoServer 9.x как ЧЕРНОВИК (status=NEW).
         Endpoint: POST /resto/api/documents/import/incomingInvoice (тело — XML).
 
         items[] — список словарей с productId, amount, price, sum (как в Cloud-варианте).
         """
-        store_id = await self._get_default_store(org_id)
+        store_id = store_id or await self._get_default_store(org_id)
         if not store_id:
             return {"ok": False, "error": "Не найден склад (defaultStore) — настрой в iikoOffice"}
 

@@ -1329,6 +1329,10 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           <div class="ie-meta-label">Дата</div>
           <input type="date" id="ie-date">
         </div>
+        <div class="ie-meta-row" id="ie-store-row" style="display:none;">
+          <div class="ie-meta-label">Склад</div>
+          <select id="ie-store"></select>
+        </div>
       </div>
       <div class="ie-totals">
         <div class="ie-total-line"><span>Без НДС</span><span id="ie-base-total">0 ₸</span></div>
@@ -4640,6 +4644,21 @@ function ieSaveItem() {
   ieCloseModal();
 }
 
+async function ieLoadStores() {
+  const row = document.getElementById('ie-store-row');
+  const sel = document.getElementById('ie-store');
+  const orgId = ieState.searchOrgId || (state.restaurant && state.restaurant.organization_id);
+  if (!orgId) { row.style.display = 'none'; return; }
+  try {
+    const d = await apiGet(`/api/stores/${orgId}`);
+    const stores = d.stores || [];
+    if (!stores.length) { row.style.display = 'none'; return; }
+    sel.innerHTML = stores.map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('');
+    if (ieState.storeId) sel.value = ieState.storeId;
+    row.style.display = 'block';
+  } catch (e) { row.style.display = 'none'; }
+}
+
 async function ieSave() {
   const btn = document.getElementById('ie-save-btn');
   btn.disabled = true;
@@ -4659,6 +4678,10 @@ async function ieSave() {
     // Оператор мог сменить филиал/поставщика — передаём их явно
     payload.supplier_id = ieState.supplierId;
     payload.organization_id = ieState.searchOrgId;
+    const storeSel = document.getElementById('ie-store');
+    if (storeSel && document.getElementById('ie-store-row').style.display !== 'none' && storeSel.value) {
+      payload.store_id = storeSel.value;
+    }
     btn.textContent = 'Отправляю в iiko...';
     try {
       const resp = await apiPost(`/api/invoice-saved/${ieState.savedBotId}/send`, payload);
@@ -4733,8 +4756,9 @@ async function openSavedInvoiceEditor(botId) {
     // ready → ещё не в iiko, кнопка создаёт черновик; needs_mapping/iiko_error → сопоставить
     document.getElementById('ie-save-btn').textContent =
       (data.status === 'ready') ? '💾 Создать черновик в iiko' : '💾 Сопоставить и отправить';
-    // Филиал (select) + поставщики текущего филиала
+    // Филиал (select) + поставщики текущего филиала + склады
     await ieLoadBranches(ieState.searchOrgId);
+    ieLoadStores();
     await ieLoadSuppliers(ieState.searchOrgId);
     document.getElementById('ie-supplier-results').innerHTML = '';
     ieRenderItems();
@@ -4775,6 +4799,7 @@ function ieChangeBranch() {
   document.getElementById('ie-supplier').value = '';
   document.getElementById('ie-supplier-results').innerHTML = '';
   ieLoadSuppliers(ieState.searchOrgId);
+  ieLoadStores();  // склады нового филиала
 }
 
 // ---- Поставщик (поиск по названию, фильтр на клиенте) ----

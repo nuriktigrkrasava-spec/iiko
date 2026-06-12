@@ -2632,11 +2632,44 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
     except Exception as e:
         logger.warning(f"[nomenclature_search] {e}")
         products = []
+    # mainUnit в iikoServer — UUID единицы; переводим в название (кг/шт/л),
+    # иначе в редакторе в поле единицы вставлялась «каша символов».
+    units_map: Dict[str, str] = {}
+    if hasattr(client, "get_measure_units_map"):
+        try:
+            units_map = await client.get_measure_units_map()
+        except Exception:
+            pass
+
+    def _unit_name(u):
+        if isinstance(u, dict):
+            u = u.get("name") or u.get("id") or ""
+        u = str(u or "")
+        return units_map.get(u, "" if re.fullmatch(r"[0-9a-f-]{36}", u) else u)
+
     return {"products": [
         {"id": p.get("id"), "name": p.get("name"), "num": p.get("num"),
-         "code": p.get("code"), "unit": p.get("unit") or p.get("mainUnit")}
+         "code": p.get("code"), "unit": _unit_name(p.get("unit") or p.get("mainUnit"))}
         for p in products
     ]}
+
+
+@app.get("/api/stores/{org_id}")
+async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
+    """Склады филиала из iiko (для выбора склада накладной в редакторе)."""
+    if _is_demo_user(user) or org_id == "demo-org-1":
+        return {"stores": [{"id": "d1", "name": "Основной склад"}]}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_stores"):
+        return {"stores": []}
+    try:
+        stores = await client.get_stores(info.get("org_name", ""))
+    except Exception as e:
+        logger.warning(f"[stores_list] {e}")
+        stores = []
+    return {"stores": [{"id": s["id"], "name": s["name"]} for s in stores]}
 
 
 @app.get("/api/suppliers/{org_id}")
@@ -2692,6 +2725,7 @@ class SavedInvoicePayload(BaseModel):
     date: Optional[str] = None
     total_amount: Optional[float] = None
     vat_amount: Optional[float] = None
+    store_id: Optional[str] = None  # склад накладной (выбор в редакторе)
 
 
 @app.post("/api/invoice-saved/{invoice_id}/send")
@@ -2744,7 +2778,8 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
     try:
         resp = await client.create_incoming_invoice(
             org_id=real_org, supplier_id=supplier_id,
-            items=sendable, date=date_str
+            items=sendable, date=date_str,
+            store_id=payload.store_id
         )
     except Exception as e:
         update_bot_invoice(invoice_id, status="iiko_error")
