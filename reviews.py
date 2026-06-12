@@ -70,18 +70,23 @@ def _street_match(street: str, number: str, hint_words: List[str],
                   candidate_addr: str, candidate_name: str = "") -> bool:
     """Совпадает ли адрес кандидата с улицей/номером/подсказками филиала."""
     cand = _norm(candidate_addr)
-    st = _norm(street)
-    # совпадение по улице: одна строка содержит стем другой (первые 6+ символов)
-    stem = st[:max(6, len(st) - 2)] if len(st) >= 6 else st
-    street_ok = bool(stem) and stem in cand
     num_ok = not number or bool(re.search(rf"(?<!\d){re.escape(number)}(?!\d)", cand))
-    if street_ok and num_ok:
-        return True
-    # запасной вариант: подсказка из скобок транслитом в названии (Чубары → chubary)
+    # улица: пробуем целиком и самое длинное слово («Г.Алиева» → «алиева»,
+    # совпадает с «проспект Гейдара Алиева»)
+    words = re.findall(r"[А-Яа-яЁёІіҢңҒғҮүҰұҚқӨөӘәA-Za-z]{4,}", street) or [street]
+    stems = [street] + sorted(words, key=len, reverse=True)
+    for s in stems:
+        st = _norm(s)
+        stem = st[:max(6, len(st) - 2)] if len(st) >= 6 else st
+        if stem and stem in cand and num_ok:
+            return True
+    # запасной вариант: подсказка из скобок транслитом в названии (Чубары → chubary,
+    # EXPO → expo)
     name_l = (candidate_name or "").lower()
-    for w in hint_words + [street]:
-        tr = _translit(w)
-        if len(tr) >= 5 and tr in name_l:
+    for w in hint_words + words:
+        wl = w.lower()
+        tr = _translit(wl)
+        if (len(tr) >= 4 and tr in name_l) or (len(wl) >= 4 and wl in name_l):
             return True
     return False
 
@@ -101,7 +106,7 @@ async def _get_2gis_catalog_key(client: httpx.AsyncClient) -> str:
     return _catalog_key_cache["key"]
 
 
-async def discover_2gis(org_name: str) -> Optional[Dict[str, Any]]:
+async def discover_2gis(org_name: str, brand: str = BRAND_QUERY) -> Optional[Dict[str, Any]]:
     """Найти филиал в 2ГИС по названию бренда и адресу → {external_id, title}."""
     city, street, number, hints = parse_org_name(org_name)
     coords = CITY_COORDS.get(city)
@@ -111,7 +116,8 @@ async def discover_2gis(org_name: str) -> Optional[Dict[str, Any]]:
     async with httpx.AsyncClient(timeout=20.0) as c:
         key = await _get_2gis_catalog_key(c)
         # два прохода: по бренду, затем по бренду+улице (для редких адресов)
-        for query in (BRAND_QUERY, f"{BRAND_QUERY} {street}"):
+        brand_token = brand.split()[0].lower()
+        for query in (brand, f"{brand} {street}"):
             r = await c.get("https://catalog.api.2gis.com/3.0/items",
                             params={"q": query, "location": f"{lon},{lat}",
                                     "key": key, "page_size": 12,
@@ -119,7 +125,7 @@ async def discover_2gis(org_name: str) -> Optional[Dict[str, Any]]:
                             headers=UA)
             items = r.json().get("result", {}).get("items", [])
             for it in items:
-                if "saya" not in it.get("name", "").lower():
+                if brand_token not in it.get("name", "").lower():
                     continue
                 if _street_match(street, number, hints,
                                  it.get("address_name", ""), it.get("name", "")):
@@ -150,8 +156,9 @@ async def fetch_2gis(branch_id: str) -> Optional[Dict[str, Any]]:
             "reviews": reviews}
 
 
-async def discover_wolt(org_name: str) -> Optional[Dict[str, Any]]:
+async def discover_wolt(org_name: str, brand: str = BRAND_QUERY) -> Optional[Dict[str, Any]]:
     """Найти точку в Wolt → {external_id: slug, title}."""
+    brand_token = brand.split()[0].lower()
     city, street, number, hints = parse_org_name(org_name)
     coords = CITY_COORDS.get(city)
     if not coords:
@@ -159,7 +166,7 @@ async def discover_wolt(org_name: str) -> Optional[Dict[str, Any]]:
     lat, lon = coords
     async with httpx.AsyncClient(timeout=20.0) as c:
         r = await c.post("https://consumer-api.wolt.com/v1/pages/search",
-                         json={"q": "saya", "target": "venues", "lat": lat, "lon": lon},
+                         json={"q": brand_token, "target": "venues", "lat": lat, "lon": lon},
                          headers={**UA, "Content-Type": "application/json"})
         if r.status_code != 200:
             return None
@@ -168,7 +175,7 @@ async def discover_wolt(org_name: str) -> Optional[Dict[str, Any]]:
     for sec in d.get("sections", []):
         for it in sec.get("items", []):
             v = it.get("venue")
-            if v and "saya" in (v.get("name", "") + v.get("slug", "")).lower():
+            if v and brand_token in (v.get("name", "") + v.get("slug", "")).lower():
                 venues.append(v)
     for v in venues:
         if _street_match(street, number, hints, v.get("address", ""),
@@ -177,15 +184,16 @@ async def discover_wolt(org_name: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def fetch_wolt(slug: str, city: str = "") -> Optional[Dict[str, Any]]:
+async def fetch_wolt(slug: str, city: str = "", brand: str = BRAND_QUERY) -> Optional[Dict[str, Any]]:
     """Рейтинг точки Wolt (шкала 10) через публичную выдачу поиска по слагу."""
+    brand_token = brand.split()[0].lower()
     cities = ([city] if city in CITY_COORDS else list(CITY_COORDS))
     async with httpx.AsyncClient(timeout=20.0) as c:
         # у Wolt нет публичной карточки по слагу без токена — ищем заново и фильтруем
         for ct in cities:
             lat, lon = CITY_COORDS[ct]
             r = await c.post("https://consumer-api.wolt.com/v1/pages/search",
-                             json={"q": "saya", "target": "venues", "lat": lat, "lon": lon},
+                             json={"q": brand_token, "target": "venues", "lat": lat, "lon": lon},
                              headers={**UA, "Content-Type": "application/json"})
             if r.status_code != 200:
                 continue

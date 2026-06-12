@@ -4105,7 +4105,7 @@ if __name__ == "__main__":
 async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
     """Рейтинг и отзывы филиала с 2ГИС и Wolt + динамика за неделю."""
     import reviews as rv
-    from database import (init_reviews_db, get_review_link, set_review_link,
+    from database import (get_review_link, set_review_link,
                           save_rating_snapshot, get_rating_history)
 
     if _is_demo_user(user):
@@ -4124,6 +4124,8 @@ async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     org_name = info.get("org_name", "")
+    # бренд для поиска точек: настройка пользователя, по умолчанию Saya Sushi
+    brand = get_app_state(f"review_brand:{user.get('id', 0)}") or rv.BRAND_QUERY
 
     cache_key = f"reviews:{real_org}"
     cached = _get_cached(cache_key)
@@ -4135,10 +4137,10 @@ async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
     out: Dict[str, Any] = {"platforms": [], "reviews": []}
 
     platforms = [
-        ("2gis", "2ГИС", 5, rv.discover_2gis,
+        ("2gis", "2ГИС", 5, lambda name: rv.discover_2gis(name, brand),
          lambda link: rv.fetch_2gis(link["external_id"])),
-        ("wolt", "Wolt", 10, rv.discover_wolt,
-         lambda link: rv.fetch_wolt(link["external_id"], link.get("extra") or "")),
+        ("wolt", "Wolt", 10, lambda name: rv.discover_wolt(name, brand),
+         lambda link: rv.fetch_wolt(link["external_id"], link.get("extra") or "", brand)),
     ]
     for platform, label, scale, discover, fetch in platforms:
         try:
@@ -4180,3 +4182,14 @@ async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
 
     _set_cached(cache_key, out)
     return out
+
+
+class ReviewBrandIn(BaseModel):
+    brand: str
+
+
+@app.post("/api/reviews/brand")
+async def set_review_brand(payload: ReviewBrandIn, user: Dict = Depends(get_current_user)):
+    """Название бренда для поиска точек на площадках отзывов (для любых клиентов)."""
+    set_app_state(f"review_brand:{user.get('id', 0)}", payload.brand.strip()[:60])
+    return {"ok": True}
