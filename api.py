@@ -4256,16 +4256,28 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
     if cached is not None:
         return cached
     dept = _olap_dept(real_org, info)
-    sessions, employees = await asyncio.gather(
+    sessions, employees, paytype_names = await asyncio.gather(
         _branch_sessions(client, dept, date, date),
         client.get_employees_map(),
+        client.get_payment_types_map(),
     )
     shifts = []
     for s in sessions:
         edits: List[Dict[str, Any]] = []
+        breakdown: List[Dict[str, Any]] = []
         try:
             payments = await client.get_cashshift_payments(s["id"])
             edits = _payment_edits(payments)
+            # разбивка смены по типам оплат (безнал из платёжных записей + наличные)
+            sums: Dict[str, float] = {}
+            for rec in payments.get("cashlessRecords", []) or []:
+                pt = rec.get("paymentTypeId") or (rec.get("info") or {}).get("paymentTypeId")
+                sums[pt] = sums.get(pt, 0) + float(rec.get("actualSum") or 0)
+            breakdown = [{"name": paytype_names.get(pt, "Безнал"), "sum": round(v)}
+                         for pt, v in sums.items() if v]
+            breakdown.sort(key=lambda x: -x["sum"])
+            if s.get("salesCash"):
+                breakdown.insert(0, {"name": "Наличные", "sum": round(float(s["salesCash"]))})
         except Exception as e:
             logger.warning(f"[cashshifts_day] payments {s.get('id')}: {e}")
         shifts.append({
@@ -4280,6 +4292,7 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
             "counted": bool((s.get("cashRemain") or 0) != 0
                             or abs(float(s.get("cashDiff") or 0)) < 0.01),
             "edits": edits,
+            "pay_breakdown": breakdown,
         })
     resp = {"date": date, "shifts": shifts}
     _set_cached(cache_key, resp)

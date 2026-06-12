@@ -836,6 +836,16 @@ class IikoWebClient:
             raw = resp.json()
             return raw if isinstance(raw, list) else raw.get("data", raw.get("sessions", []))
 
+    async def get_payment_types_map(self) -> Dict[str, str]:
+        """id → название типа оплаты (entities/list PaymentType)."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/v2/entities/list",
+                                    params={"key": token, "rootType": "PaymentType",
+                                            "includeDeleted": "false"})
+            resp.raise_for_status()
+            return {x["id"]: x.get("name", "") for x in resp.json() if x.get("id")}
+
     async def get_cashshift_payments(self, session_id: str) -> Dict[str, Any]:
         """Платежи кассовой смены: безнал по записям, original vs actual/edited
         (следы исправлений типов оплат при принятии смены в офисе)."""
