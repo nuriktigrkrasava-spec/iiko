@@ -1358,16 +1358,17 @@ class IikoWebClient:
                             err_txt = txt
                 except Exception:
                     pass
-                # ДИАГНОСТИКА (временно): у всех draft_in_iiko doc_id пустой — не знаем
-                # точную форму успешного ответа iikoServer. Логируем тело, чтобы увидеть,
-                # где лежит documentId и есть ли valid. Поведение НЕ меняем (ok:True),
-                # чтобы не сломать создание, пока не разберём реальный ответ.
-                if not doc_id or valid_txt.lower() == "false":
+                # Успешный ответ iikoServer: <valid>true</valid> + documentNumber,
+                # documentId в ответе НЕ приходит (подтверждено логами 2026-06-12) —
+                # это норма, накладная создана. Ошибка — только valid=false.
+                if valid_txt.lower() == "false" or err_txt:
                     import logging
                     logging.getLogger(__name__).warning(
-                        f"iikoWeb incomingInvoice 200 без documentId: valid={valid_txt!r} "
+                        f"iikoWeb incomingInvoice отклонена: valid={valid_txt!r} "
                         f"err={err_txt!r} body={resp.text[:800]}"
                     )
+                    return {"ok": False, "error": err_txt or "документ не прошёл валидацию",
+                            "body": resp.text[:500]}
                 return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
         except Exception as e:
             return {"ok": False, "error": str(e)}

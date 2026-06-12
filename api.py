@@ -3421,16 +3421,40 @@ def _compute_dedup_hash(supplier: str, date_str: str, total: float,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+# Нормализация единиц измерения: варианты написания → каноническая форма
+_UNIT_ALIASES = {
+    "кг": "кг", "kg": "кг", "килограмм": "кг",
+    "г": "г", "гр": "г", "грамм": "г", "g": "г",
+    "л": "л", "литр": "л", "l": "л",
+    "мл": "мл", "ml": "мл",
+    "шт": "шт", "штук": "шт", "штука": "шт", "pcs": "шт", "порц": "шт",
+    "уп": "уп", "упак": "уп", "упаковка": "уп", "пач": "уп", "пачка": "уп",
+    "ящ": "ящ", "ящик": "ящ", "кор": "ящ", "коробка": "ящ",
+    "бут": "бут", "бутылка": "бут", "бан": "бан", "банка": "бан",
+}
+# Безопасные автоконверсии: (из, в) → множитель количества
+_UNIT_CONVERT = {("г", "кг"): 0.001, ("кг", "г"): 1000.0,
+                 ("мл", "л"): 0.001, ("л", "мл"): 1000.0}
+
+
+def _norm_unit(u: str) -> str:
+    return _UNIT_ALIASES.get((u or "").strip().lower().rstrip("."), (u or "").strip().lower())
+
+
 async def _auto_match_items(client, org_id: str,
-                             items: List[Dict[str, Any]]) -> Tuple[List[Dict], List[str]]:
+                             items: List[Dict[str, Any]]
+                             ) -> Tuple[List[Dict], List[str], List[str]]:
     """Сопоставляет позиции с номенклатурой iiko по имени.
-    Возвращает (sendable_items, unmatched_names).
+    Возвращает (sendable_items, unmatched_names, unit_warnings).
     sendable_items — формат для create_incoming_invoice (product, amount, price, sum).
+    Единицы: гр↔кг и мл↔л конвертируются автоматически (с пересчётом цены);
+    несовместимые (уп vs кг и т.п.) не трогаем, но честно предупреждаем.
     """
-    sendable, unmatched = [], []
+    sendable, unmatched, unit_warnings = [], [], []
     for it in (items or []):
         # Если уже сопоставлено в редакторе — используем
         prod_id = it.get("iiko_product_id")
+        prod_unit = it.get("iiko_unit") or ""
         if not prod_id:
             try:
                 matches = await client.search_nomenclature(org_id, it.get("name", ""), limit=1)
@@ -3439,15 +3463,32 @@ async def _auto_match_items(client, org_id: str,
                 matches = []
             if matches:
                 prod_id = matches[0].get("id")
+                prod_unit = matches[0].get("unit") or ""
                 # Аннотируем саму позицию, чтобы сохранённый черновик нёс сопоставление
                 # (редактор показывает «✓ сопоставлено», повторная отправка не теряет id).
                 it["iiko_product_id"] = prod_id
                 it["iiko_product_name"] = matches[0].get("name") or it.get("name")
+                it["iiko_unit"] = prod_unit
         if not prod_id:
             unmatched.append(it.get("name", "—"))
             continue
         qty = float(it.get("quantity") or 0)
         price = float(it.get("price_per_unit") or 0)
+
+        inv_u = _norm_unit(it.get("unit") or "")
+        iiko_u = _norm_unit(prod_unit)
+        if inv_u and iiko_u and inv_u != iiko_u:
+            factor = _UNIT_CONVERT.get((inv_u, iiko_u))
+            if factor:
+                # автоконверсия: 500 г → 0.5 кг, цена за единицу пересчитывается
+                qty = qty * factor
+                price = price / factor if factor else price
+                it["unit_converted"] = f"{it.get('unit')}→{prod_unit}"
+            else:
+                unit_warnings.append(
+                    f"{it.get('name', '—')}: в накладной «{it.get('unit')}», "
+                    f"в iiko товар в «{prod_unit}»")
+
         total = float(it.get("total") or (qty * price))
         sendable.append({
             "productId": prod_id,
@@ -3455,7 +3496,7 @@ async def _auto_match_items(client, org_id: str,
             "price": price,
             "sum": total,
         })
-    return sendable, unmatched
+    return sendable, unmatched, unit_warnings
 
 
 def _suppliers_kb(suppliers: List[Dict[str, Any]], page: int = 0) -> dict:
@@ -3704,7 +3745,7 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
 
     # ---- Auto-match items to iiko nomenclature ----
     await _tg_edit(chat_id, msg_id, "🔎 Сопоставляю позиции с номенклатурой iiko...")
-    sendable, unmatched = await _auto_match_items(client, org_id, items)
+    sendable, unmatched, unit_warnings = await _auto_match_items(client, org_id, items)
 
     if unmatched:
         # Сохраняем как локальный черновик, просим открыть редактор для маппинга
@@ -3747,8 +3788,13 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
         f"✅ <b>Накладная готова</b>\n\n"
         f"🏭 Поставщик: {supplier_name}\n"
         f"🏢 Филиал: {rest.get('organization_name','')}\n"
-        f"💰 Итого: {_fmt_kzt(total)} ₸\n\n"
-        f"Открой Mini App → Расходы → Накладные → ✏️ проверь филиал/поставщика "
+        f"💰 Итого: {_fmt_kzt(total)} ₸\n"
+        + (("\n⚠️ <b>Проверь единицы измерения:</b>\n"
+            + "\n".join(f"• {html.escape(w)}" for w in unit_warnings[:8])
+            + ("\n  … и ещё " + str(len(unit_warnings) - 8) if len(unit_warnings) > 8 else "")
+            + "\nКоличество могло распознаться не в той единице — поправь в редакторе.\n")
+           if unit_warnings else "")
+        + f"\nОткрой Mini App → Расходы → Накладные → ✏️ проверь филиал/поставщика "
         f"и нажми «Создать черновик в iiko».")
     _drop_pending(chat_id)
 
