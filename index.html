@@ -1420,7 +1420,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
       <input type="date" id="cs-date" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:8px 10px;font-size:14px;"
-             onchange="loadCashshifts()">
+             onchange="loadCashshifts(); loadSalary();">
       <span style="font-size:12px;color:var(--text-secondary);">смены и расхождения за день</span>
     </div>
   </div>
@@ -1430,13 +1430,10 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card-header">
         <div>
           <div class="card-title">Зарплата · часы из iiko</div>
-          <div class="card-subtitle">тап по ставке — изменить; итог = часы × ставка</div>
+          <div class="card-subtitle">за выбранную дату · тап по ставке или итогу — изменить</div>
         </div>
       </div>
-      <div style="display:flex;gap:8px;margin:8px 0;">
-        <input type="date" id="sal-from" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:6px 8px;font-size:13px;" onchange="loadSalary()">
-        <input type="date" id="sal-to" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:6px 8px;font-size:13px;" onchange="loadSalary()">
-      </div>
+
       <div class="table-container">
         <table class="data-table" id="salary-table">
           <thead><tr><th>Сотрудник</th><th style="text-align:right">Часы</th><th style="text-align:right">Ставка</th><th style="text-align:right">Итого</th></tr></thead>
@@ -2506,8 +2503,10 @@ async function loadCashshifts() {
   if (!d.shifts.length) { box.innerHTML = '<div class="card"><div class="card-subtitle">Смен за эту дату нет</div></div>'; return; }
   box.innerHTML = d.shifts.map(s => {
     const diff = +s.cash_diff || 0;
-    const bad = Math.abs(diff) > 0.01 || (s.edits || []).length;
-    return `<div class="card" style="margin-top:12px;border-left:4px solid ${bad ? '#e5484d' : 'var(--green)'};">
+    const counted = s.counted !== false;
+    const bad = (counted && Math.abs(diff) > 0.01) || (s.edits || []).length;
+    const border = bad ? '#e5484d' : (counted ? 'var(--green)' : '#ff9f0a');
+    return `<div class="card" style="margin-top:12px;border-left:4px solid ${border};">
       <div style="display:flex;justify-content:space-between;align-items:center;">
         <div class="card-title">Смена №${s.number} · касса ${s.cash_reg}</div>
         <div style="font-size:12px;color:var(--text-secondary);">${s.open}–${s.close} · ${s.status === 'ACCEPTED' ? '✅ принята' : '⏳ не принята'}</div>
@@ -2519,7 +2518,9 @@ async function loadCashshifts() {
         <div>Итого<br><b>${formatMoney(s.total)}</b></div>
         <div style="color:var(--text-secondary)">Внесения<br>${formatMoney(s.pay_in)}</div>
         <div style="color:var(--text-secondary)">Изъятия<br>${formatMoney(s.pay_out)}</div>
-        <div>Расхожд.<br><b style="color:${Math.abs(diff) > 0.01 ? '#e5484d' : 'var(--green)'}">${formatMoney(diff)}</b></div>
+        <div>Расхожд.<br>${counted
+          ? `<b style="color:${Math.abs(diff) > 0.01 ? '#e5484d' : 'var(--green)'}">${formatMoney(diff)}</b>`
+          : `<b style="color:#ff9f0a;font-size:12px;">пересчёт не вводился</b>`}</div>
       </div>
       ${(s.edits || []).length ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider);">
         <div style="font-size:13px;font-weight:600;color:#e5484d;">Исправленные платежи (${s.edits.length}):</div>
@@ -2531,13 +2532,12 @@ async function loadCashshifts() {
 
 async function loadSalary() {
   if (!state.restaurant) return;
-  const f = document.getElementById('sal-from'), t = document.getElementById('sal-to');
-  const now = new Date();
-  if (!f.value) f.value = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-  if (!t.value) t.value = now.toISOString().slice(0, 10);
+  const dateEl = document.getElementById('cs-date');
+  if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+  const day = dateEl.value;  // единая дата со сменами
   const tbody = document.querySelector('#salary-table tbody');
   tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
-  const d = await apiGet(`/api/salary/${csOrgId()}?from=${f.value}&to=${t.value}`).catch(() => null);
+  const d = await apiGet(`/api/salary/${csOrgId()}?from=${day}&to=${day}`).catch(() => null);
   if (!d || !d.rows) { tbody.innerHTML = '<tr><td colspan="4">⚠️ Ошибка</td></tr>'; return; }
   state._salaryPeriodKey = d.period_key;
   tbody.innerHTML = d.rows.map(r => `

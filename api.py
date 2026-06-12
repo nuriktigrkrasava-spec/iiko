@@ -4275,6 +4275,10 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
             "cash": s.get("salesCash"), "card": s.get("salesCard"), "credit": s.get("salesCredit"),
             "total": s.get("payOrders"), "pay_in": s.get("payIn"), "pay_out": s.get("payOut"),
             "cash_diff": s.get("cashDiff"), "status": s.get("sessionStatus"),
+            # пересчёт кассы вводился? (остаток 0 при ненулевом расхождении =
+            # кассир не вводил фактическую наличность — это не ошибка смены)
+            "counted": bool((s.get("cashRemain") or 0) != 0
+                            or abs(float(s.get("cashDiff") or 0)) < 0.01),
             "edits": edits,
         })
     resp = {"date": date, "shifts": shifts}
