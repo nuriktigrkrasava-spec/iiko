@@ -1426,6 +1426,13 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     </div>
   </div>
   <div class="scroll-container">
+    <div class="card" id="cs-pending-card" style="display:none;cursor:pointer;" onclick="togglePending()">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div class="card-title" id="cs-pending-title">⏳ Непринятые смены</div>
+        <div style="font-size:13px;color:var(--text-secondary);" id="cs-pending-arrow">▼</div>
+      </div>
+      <div id="cs-pending-list" style="display:none;margin-top:10px;border-top:1px solid var(--divider);padding-top:6px;"></div>
+    </div>
     <div id="cs-shifts"><div class="card"><div class="card-subtitle">Выберите дату</div></div></div>
     <div class="card" style="margin-top:16px;">
       <div class="card-header">
@@ -1813,7 +1820,7 @@ function switchTab(tab) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
   document.getElementById('screen-' + tab).classList.add('active');
-  if (tab === 'cashshifts') { loadCashshifts(); loadSalary(); }
+  if (tab === 'cashshifts') { loadCashshifts(); loadSalary(); loadPendingShifts(); }
   const navItems = document.querySelectorAll('.nav-item');
   const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4 };
   if (navItems[tabMap[tab]]) navItems[tabMap[tab]].classList.add('active');
@@ -2538,6 +2545,34 @@ async function loadCashshifts() {
       </div>` : ''}
     </div>`;
   }).join('');
+}
+
+async function loadPendingShifts() {
+  if (!state.restaurant) return;
+  const card = document.getElementById('cs-pending-card');
+  const d = await apiGet(`/api/cashshifts_pending/${csOrgId()}?days=30`).catch(() => null);
+  if (!d || !d.count) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  document.getElementById('cs-pending-title').textContent =
+    `⏳ Непринятых смен за 30 дней: ${d.count}`;
+  document.getElementById('cs-pending-list').innerHTML = d.items.map(it => `
+    <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--divider);font-size:14px;"
+         onclick="event.stopPropagation();openShiftDate('${it.date}')">
+      <span style="color:var(--blue)">${it.date.split('-').reverse().join('.')}</span>
+      <span style="color:var(--text-secondary)">смена №${it.number}${it.open_now ? ' · 🔓 ещё открыта' : ''}</span>
+    </div>`).join('');
+}
+
+function togglePending() {
+  const list = document.getElementById('cs-pending-list');
+  const open = list.style.display !== 'none';
+  list.style.display = open ? 'none' : 'block';
+  document.getElementById('cs-pending-arrow').textContent = open ? '▼' : '▲';
+}
+
+function openShiftDate(date) {
+  document.getElementById('cs-date').value = date;
+  loadCashshifts(); loadSalary();
 }
 
 function showZReport(i) {

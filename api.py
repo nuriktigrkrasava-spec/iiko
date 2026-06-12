@@ -4448,3 +4448,39 @@ async def _daily_shifts_scheduler():
         except Exception as e:
             logger.warning(f"[daily_shifts] цикл: {e}")
         await asyncio.sleep(600)
+
+
+@app.get("/api/cashshifts_pending/{org_id}")
+async def cashshifts_pending(org_id: str, days: int = 30,
+                             user: Dict = Depends(get_current_user)):
+    """Непринятые/незакрытые смены филиала за последние N дней (для счётчика)."""
+    if _is_demo_user(user):
+        return {"count": 3, "items": [
+            {"date": "2026-06-10", "number": 41, "status": "UNACCEPTED", "open_now": False},
+            {"date": "2026-06-09", "number": 40, "status": "UNACCEPTED", "open_now": False},
+            {"date": "2026-06-08", "number": 39, "status": "OPEN", "open_now": True},
+        ]}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_cashshifts"):
+        raise HTTPException(status_code=400, detail="Только для самохостед iiko")
+    cache_key = f"cs_pending:{real_org}:{days}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+    date_to = local_now().date().isoformat()
+    date_from = (local_now() - timedelta(days=days)).date().isoformat()
+    sessions = await _branch_sessions(client, _olap_dept(real_org, info), date_from, date_to)
+    items = []
+    for s in sessions:
+        if s.get("sessionStatus") == "ACCEPTED":
+            continue
+        items.append({"date": (s.get("openDate") or "")[:10],
+                      "number": s.get("sessionNumber"),
+                      "status": s.get("sessionStatus"),
+                      "open_now": not s.get("closeDate")})
+    items.sort(key=lambda x: x["date"], reverse=True)
+    resp = {"count": len(items), "items": items}
+    _set_cached(cache_key, resp)
+    return resp
