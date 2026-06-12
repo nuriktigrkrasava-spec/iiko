@@ -505,9 +505,10 @@ class ExportSendPayload(BaseModel):
 @app.on_event("startup")
 async def startup():
     init_db()
-    from database import init_reviews_db, init_salary_db
+    from database import init_reviews_db, init_salary_db, init_salary_overrides_db
     init_reviews_db()
     init_salary_db()
+    init_salary_overrides_db()
     # Фоновый планировщик воскресного отчёта ген.директору
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
@@ -4302,23 +4303,44 @@ async def salary(org_id: str, response: Response,
         client.get_employees_map(),
     )
     org_name = info.get("org_name", "")
-    hours: Dict[str, float] = {}
+    # Явки в iiko бывают задвоены (несколько ролей одновременно) — объединяем
+    # пересекающиеся интервалы каждого сотрудника, чтобы часы не удваивались.
+    intervals: Dict[str, list] = {}
     for a in attendance:
         if org_name and a["departmentName"] != org_name:
             continue
         try:
             df = datetime.fromisoformat(a["dateFrom"])
             dt_ = datetime.fromisoformat(a["dateTo"])
-            hours[a["employeeId"]] = hours.get(a["employeeId"], 0) + (dt_ - df).total_seconds() / 3600
+            if dt_ > df:
+                intervals.setdefault(a["employeeId"], []).append((df, dt_))
         except Exception:
             continue
+    from database import get_salary_overrides
+    period_key = f"{real_org}:{from_}:{to}"
+    overrides = get_salary_overrides(period_key)
     rates = get_salary_rates()
     rows = []
-    for eid, h in sorted(hours.items(), key=lambda x: -x[1]):
+    for eid, ivs in intervals.items():
+        ivs.sort()
+        merged = [list(ivs[0])]
+        for df, dt_ in ivs[1:]:
+            if df <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], dt_)
+            else:
+                merged.append([df, dt_])
+        h = sum((b - a).total_seconds() for a, b in merged) / 3600
+        days = len({a.date() for a, b in merged})
         rate = rates.get(eid, 0)
+        ov = overrides.get(eid)
         rows.append({"employee_id": eid, "name": employees.get(eid, eid[:8]),
-                     "hours": round(h, 1), "rate": rate, "total": round(h * rate)})
-    return {"rows": rows}
+                     "hours": round(h, 1), "days": days,
+                     "suspicious": days > 0 and h / days > 16,
+                     "rate": rate,
+                     "total": round(ov) if ov is not None else round(h * rate),
+                     "overridden": ov is not None})
+    rows.sort(key=lambda x: -x["hours"])
+    return {"rows": rows, "period_key": period_key}
 
 
 class SalaryRateIn(BaseModel):
@@ -4326,10 +4348,24 @@ class SalaryRateIn(BaseModel):
     rate: float
 
 
+class SalaryOverrideIn(BaseModel):
+    employee_id: str
+    period_key: str
+    amount: Optional[float] = None  # None = убрать ручную правку
+
+
 @app.post("/api/salary/rate")
 async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
     from database import set_salary_rate
     set_salary_rate(payload.employee_id, payload.rate)
+    return {"ok": True}
+
+
+@app.post("/api/salary/override")
+async def salary_override(payload: SalaryOverrideIn, user: Dict = Depends(get_current_user)):
+    """Ручная правка итоговой зарплаты за период (None — вернуть авторасчёт)."""
+    from database import set_salary_override
+    set_salary_override(payload.employee_id, payload.period_key, payload.amount)
     return {"ok": True}
 
 

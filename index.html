@@ -2539,13 +2539,22 @@ async function loadSalary() {
   tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
   const d = await apiGet(`/api/salary/${csOrgId()}?from=${f.value}&to=${t.value}`).catch(() => null);
   if (!d || !d.rows) { tbody.innerHTML = '<tr><td colspan="4">⚠️ Ошибка</td></tr>'; return; }
+  state._salaryPeriodKey = d.period_key;
   tbody.innerHTML = d.rows.map(r => `
     <tr>
-      <td class="name">${escHtml(r.name)}</td>
-      <td class="num">${r.hours}</td>
+      <td class="name">${escHtml(r.name)}<div style="font-size:11px;color:var(--text-secondary)">${r.days} смен</div></td>
+      <td class="num" style="${r.suspicious ? 'color:#ff9f0a;font-weight:600;' : ''}">${r.hours}${r.suspicious ? ' ⚠️' : ''}</td>
       <td class="num" style="color:var(--blue);cursor:pointer;" onclick="setRate('${r.employee_id}', ${r.rate})">${r.rate || '—'}</td>
-      <td class="num">${formatMoney(r.total)}</td>
+      <td class="num" style="color:var(--blue);cursor:pointer;" onclick="setSalaryTotal('${r.employee_id}', ${r.total})">${formatMoney(r.total)}${r.overridden ? ' ✏️' : ''}</td>
     </tr>`).join('') || '<tr><td colspan="4">Нет явок за период</td></tr>';
+}
+
+async function setSalaryTotal(employeeId, current) {
+  const v = prompt('Итоговая зарплата за период, ₸ (пусто — вернуть авторасчёт):', current || '');
+  if (v === null) return;
+  await apiPost('/api/salary/override', { employee_id: employeeId,
+    period_key: state._salaryPeriodKey, amount: v.trim() === '' ? null : +v });
+  loadSalary();
 }
 
 async function setRate(employeeId, current) {

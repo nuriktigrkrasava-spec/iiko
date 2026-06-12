@@ -642,3 +642,37 @@ def set_salary_rate(employee_id: str, rate: float):
                  (employee_id, rate))
     conn.commit()
     conn.close()
+
+
+def init_salary_overrides_db():
+    conn = get_db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS salary_overrides (
+        employee_id TEXT NOT NULL,
+        period_key TEXT NOT NULL,
+        amount REAL NOT NULL,
+        PRIMARY KEY(employee_id, period_key)
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_salary_overrides(period_key: str) -> dict:
+    conn = get_db()
+    rows = conn.execute("SELECT employee_id, amount FROM salary_overrides WHERE period_key=?",
+                        (period_key,)).fetchall()
+    conn.close()
+    return {r["employee_id"]: r["amount"] for r in rows}
+
+
+def set_salary_override(employee_id: str, period_key: str, amount):
+    conn = get_db()
+    if amount is None:
+        conn.execute("DELETE FROM salary_overrides WHERE employee_id=? AND period_key=?",
+                     (employee_id, period_key))
+    else:
+        conn.execute("INSERT OR REPLACE INTO salary_overrides(employee_id, period_key, amount) "
+                     "VALUES(?,?,?)", (employee_id, period_key, amount))
+    conn.commit()
+    conn.close()
