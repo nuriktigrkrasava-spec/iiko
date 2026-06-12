@@ -718,6 +718,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="tab" onclick="setSalesTab('abc', this)">ABC</div>
     <div class="tab" onclick="setSalesTab('cancels', this)">Отмены</div>
     <div class="tab" onclick="setSalesTab('cart', this)">Корзина</div>
+    <div class="tab" onclick="setSalesTab('reviews', this)">⭐ Отзывы</div>
   </div>
   <div class="scroll-container" id="sales-scroll">
     <div class="demo-banner" id="sales-demo" style="display:none">
@@ -865,6 +866,21 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card">
         <div class="card-title" style="margin-bottom:12px;">Топ пар — покупают вместе</div>
         <div id="cart-pairs"></div>
+      </div>
+    </div>
+    <div id="sales-reviews" style="display:none">
+      <div id="reviews-platforms" class="summary-row" style="margin-top:16px;"></div>
+      <div class="card" id="reviews-list-card" style="display:none">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Свежие отзывы · 2ГИС</div>
+            <div class="card-subtitle" id="reviews-branch-title"></div>
+          </div>
+        </div>
+        <div id="reviews-list"></div>
+      </div>
+      <div class="card" id="reviews-empty" style="display:none">
+        <div class="card-subtitle">Точка не найдена на площадках отзывов</div>
       </div>
     </div>
   </div>
@@ -2360,9 +2376,10 @@ async function setSalesTab(tab, el) {
   state.salesTab = tab;
   document.querySelectorAll('#sales-tabs .tab').forEach(t => t.classList.remove('active'));
   if (el) el.classList.add('active');
-  ['general', 'clients', 'abc', 'cancels', 'cart'].forEach(t => {
+  ['general', 'clients', 'abc', 'cancels', 'cart', 'reviews'].forEach(t => {
     document.getElementById('sales-' + t).style.display = t === tab ? 'block' : 'none';
   });
+  if (tab === 'reviews') loadReviews();
   // Если salesData ещё не загружен — ждём
   if (tab === 'abc' && (!state.salesData?.top_dishes?.length)) {
     await loadSales();
@@ -2382,6 +2399,53 @@ function setClientsSource(src, el) {
   document.getElementById('cli-src-table').classList.toggle('active', src === 'table');
   document.getElementById('clients-link-card').style.display = src === 'table' ? 'block' : 'none';
   loadClients();
+}
+
+async function loadReviews() {
+  if (!state.restaurant) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  const plats = document.getElementById('reviews-platforms');
+  plats.innerHTML = '<div class="summary-card"><div class="summary-label">Загрузка…</div><div class="summary-value">⭐</div></div>';
+  document.getElementById('reviews-list-card').style.display = 'none';
+  document.getElementById('reviews-empty').style.display = 'none';
+
+  const data = await apiGet(`/api/reviews/${orgId}`).catch(() => null);
+  if (!data || !data.platforms || !data.platforms.length) {
+    plats.innerHTML = '';
+    document.getElementById('reviews-empty').style.display = 'block';
+    return;
+  }
+  plats.innerHTML = data.platforms.map(p => {
+    let trend = '';
+    if (p.delta != null && p.delta !== 0) {
+      const up = p.delta > 0;
+      trend = `<span style="color:${up ? 'var(--green)' : 'var(--red, #e5484d)'};font-size:13px;font-weight:600;">
+        ${up ? '↗' : '↘'} ${up ? '+' : ''}${p.delta}</span>`;
+    } else if (p.delta === 0) {
+      trend = `<span style="color:var(--text-secondary);font-size:13px;">→ без изменений</span>`;
+    }
+    return `<div class="summary-card">
+      <div class="summary-label">${p.label}</div>
+      <div class="summary-value">${p.rating}<span style="font-size:13px;color:var(--text-secondary);"> / ${p.scale}</span></div>
+      <div style="margin-top:4px;">${trend}</div>
+      ${p.reviews_count != null ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${p.reviews_count} отзывов</div>` : ''}
+    </div>`;
+  }).join('');
+
+  if (data.reviews && data.reviews.length) {
+    const g = data.platforms.find(p => p.platform === '2gis');
+    document.getElementById('reviews-branch-title').textContent = g?.title || '';
+    document.getElementById('reviews-list').innerHTML = data.reviews.map(r => `
+      <div style="padding:12px 0;border-bottom:1px solid var(--divider);">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+          <span style="font-weight:600;">${'★'.repeat(r.rating || 0)}${'☆'.repeat(Math.max(0, 5 - (r.rating || 0)))}
+            <span style="color:var(--text-secondary);font-weight:400;font-size:13px;"> ${escHtml(r.author || '')}</span></span>
+          <span style="color:var(--text-secondary);font-size:13px;">${r.date ? r.date.split('-').reverse().join('.') : ''}</span>
+        </div>
+        <div style="font-size:14px;line-height:1.45;">${escHtml(r.text || '')}</div>
+      </div>`).join('');
+    document.getElementById('reviews-list-card').style.display = 'block';
+  }
 }
 
 async function loadClients() {

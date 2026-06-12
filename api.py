@@ -505,6 +505,8 @@ class ExportSendPayload(BaseModel):
 @app.on_event("startup")
 async def startup():
     init_db()
+    from database import init_reviews_db
+    init_reviews_db()
     # Фоновый планировщик воскресного отчёта ген.директору
     asyncio.create_task(_weekly_report_scheduler())
 
@@ -4095,3 +4097,86 @@ async def telegram_webhook(request: Request):
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# ==== Отзывы с внешних площадок (2ГИС, Wolt) ====
+
+@app.get("/api/reviews/{org_id}")
+async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
+    """Рейтинг и отзывы филиала с 2ГИС и Wolt + динамика за неделю."""
+    import reviews as rv
+    from database import (init_reviews_db, get_review_link, set_review_link,
+                          save_rating_snapshot, get_rating_history)
+
+    if _is_demo_user(user):
+        return {"platforms": [
+            {"platform": "2gis", "label": "2ГИС", "rating": 4.6, "scale": 5,
+             "reviews_count": 1234, "delta": 0.1, "title": "Demo"},
+            {"platform": "wolt", "label": "Wolt", "rating": 8.8, "scale": 10,
+             "reviews_count": None, "delta": -0.2, "title": "Demo"},
+        ], "reviews": [
+            {"rating": 5, "text": "Очень вкусные роллы, быстро привезли!",
+             "date": "2026-06-10", "author": "Гость"},
+            {"rating": 3, "text": "Долго ждали заказ в зале.",
+             "date": "2026-06-09", "author": "Гость"},
+        ]}
+
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    org_name = info.get("org_name", "")
+
+    cache_key = f"reviews:{real_org}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    today = local_now().strftime("%Y-%m-%d")
+    week_ago = (local_now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    out: Dict[str, Any] = {"platforms": [], "reviews": []}
+
+    platforms = [
+        ("2gis", "2ГИС", 5, rv.discover_2gis,
+         lambda link: rv.fetch_2gis(link["external_id"])),
+        ("wolt", "Wolt", 10, rv.discover_wolt,
+         lambda link: rv.fetch_wolt(link["external_id"], link.get("extra") or "")),
+    ]
+    for platform, label, scale, discover, fetch in platforms:
+        try:
+            link = get_review_link(real_org, platform)
+            if not link and org_name:
+                found = await discover(org_name)
+                if found:
+                    set_review_link(real_org, platform, found["external_id"],
+                                    found.get("title", ""), found.get("extra", ""))
+                    link = get_review_link(real_org, platform)
+            if not link:
+                continue
+            data = await fetch(link)
+            if not data or data.get("rating") is None:
+                continue
+            save_rating_snapshot(real_org, platform, today,
+                                 data["rating"], data.get("reviews_count"))
+            # динамика: сравниваем с самым свежим снапшотом недельной давности
+            # (или самым старым из имеющихся, пока истории меньше недели)
+            hist = [h for h in get_rating_history(real_org, platform, days=30)
+                    if h["date"] < today and h["rating"] is not None]
+            base = None
+            old = [h for h in hist if h["date"] <= week_ago]
+            if old:
+                base = old[-1]
+            elif hist:
+                base = hist[0]
+            delta = round(data["rating"] - base["rating"], 2) if base else None
+            out["platforms"].append({
+                "platform": platform, "label": label, "scale": scale,
+                "rating": data["rating"], "reviews_count": data.get("reviews_count"),
+                "delta": delta, "since": base["date"] if base else None,
+                "title": link.get("title", ""),
+            })
+            if platform == "2gis":
+                out["reviews"] = data.get("reviews", [])
+        except Exception as e:
+            logger.warning(f"[reviews] {platform} {real_org}: {e}")
+
+    _set_cached(cache_key, out)
+    return out

@@ -550,3 +550,66 @@ def set_client_url(organization_id: str, url: str):
     )
     conn.commit()
     conn.close()
+
+
+# ==== Отзывы с внешних площадок (2ГИС, Wolt) ====
+
+def init_reviews_db():
+    conn = get_db()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS review_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        org_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        title TEXT,
+        extra TEXT,
+        UNIQUE(org_id, platform)
+    );
+    CREATE TABLE IF NOT EXISTS rating_snapshots (
+        org_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        date TEXT NOT NULL,
+        rating REAL,
+        reviews_count INTEGER,
+        PRIMARY KEY(org_id, platform, date)
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_review_link(org_id: str, platform: str):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM review_links WHERE org_id=? AND platform=?",
+                       (org_id, platform)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_review_link(org_id: str, platform: str, external_id: str,
+                    title: str = "", extra: str = ""):
+    conn = get_db()
+    conn.execute("""INSERT OR REPLACE INTO review_links(org_id, platform, external_id, title, extra)
+                    VALUES(?,?,?,?,?)""", (org_id, platform, external_id, title, extra))
+    conn.commit()
+    conn.close()
+
+
+def save_rating_snapshot(org_id: str, platform: str, date: str,
+                         rating, reviews_count):
+    conn = get_db()
+    conn.execute("""INSERT OR REPLACE INTO rating_snapshots(org_id, platform, date, rating, reviews_count)
+                    VALUES(?,?,?,?,?)""", (org_id, platform, date, rating, reviews_count))
+    conn.commit()
+    conn.close()
+
+
+def get_rating_history(org_id: str, platform: str, days: int = 30):
+    conn = get_db()
+    rows = conn.execute("""SELECT * FROM rating_snapshots
+                           WHERE org_id=? AND platform=? AND date >= date('now', ?)
+                           ORDER BY date""",
+                        (org_id, platform, f"-{days} days")).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
