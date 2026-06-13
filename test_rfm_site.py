@@ -60,9 +60,22 @@ def test_rfm_segments():
         assert s["action"] and s["example"], s
 
 
+def test_branch_stats():
+    today = date(2026, 6, 13)
+    rows = [
+        {"Delivery.CustomerPhone": "+7 701 000 0001", "OpenDate.Typed": "2026-06-10", "UniqOrderId.OrdersCount": 2, "DishDiscountSumInt": 10000},
+        {"Delivery.CustomerPhone": "+7 701 000 0002", "OpenDate.Typed": "2026-06-09", "UniqOrderId.OrdersCount": 1, "DishDiscountSumInt": 4000},
+    ]
+    st = api._branch_stats(rows, today)
+    assert st["clients"] == 2, st
+    assert st["revenue"] == 14000, st
+    assert st["repeat_pct"] == 50, st      # 1 из 2 клиентов с 2+ заказами
+    assert st["ltv"] == 7000, st
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats):
         print(f"\n>>> {t.__name__}")
         try:
             t()

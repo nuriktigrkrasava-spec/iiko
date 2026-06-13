@@ -2232,6 +2232,17 @@ def _rfm_by_thresholds(agg, today):
     return {"total": total, "segments": segs}
 
 
+def _branch_stats(rows, today):
+    """Сводка по одному филиалу из его сырых строк olap_clients_rfm."""
+    agg = _aggregate_clients(rows, today)
+    total = len(agg)
+    revenue = sum(a["spend_total"] for a in agg.values())
+    repeat = sum(1 for a in agg.values() if a["orders_total"] >= 2)
+    return {"clients": total, "revenue": round(revenue),
+            "repeat_pct": round(repeat / total * 100) if total else 0,
+            "ltv": round(revenue / total) if total else 0}
+
+
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
     """agg {phone: {orders, spend}} → (segments, top_vip)."""
     total = len(agg)
