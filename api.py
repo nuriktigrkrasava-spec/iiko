@@ -550,7 +550,10 @@ async def rfm_site(key: str = ""):
     all_rows, branches = [], []
     for r, rows in pairs:
         all_rows.extend(rows)
-        branches.append({"name": r["organization_name"], **_branch_stats(rows, today)})
+        client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+        prods = await _branch_top_products(client, r["organization_name"], date_from, date_to)
+        branches.append({"name": r["organization_name"], **_branch_stats(rows, today),
+                         "top_products": prods["top"], "bottom_products": prods["bottom"]})
 
     agg = _aggregate_clients(all_rows, today)
     total = len(agg)
@@ -2319,6 +2322,24 @@ def _cohort_retention(rows, today, max_m=4):
     return {"cohorts": out, "max_m": max_m}
 
 
+async def _branch_top_products(client, dept, date_from, date_to, n=5):
+    """Топ-n и анти-топ-n блюд филиала по количеству продаж (DishCount)."""
+    fn = getattr(client, "olap_report", None)
+    if not fn:
+        return {"top": [], "bottom": []}
+    try:
+        res = await fn(dept, date_from, date_to, ["DishName"], ["DishCount"])
+    except Exception:
+        return {"top": [], "bottom": []}
+    rows = [(str(r.get("DishName") or "").strip(), int(r.get("DishCount") or 0))
+            for r in res.get("data", [])]
+    rows = [(nm, c) for nm, c in rows if nm and c > 0]
+    rows.sort(key=lambda x: x[1], reverse=True)
+    top = [{"name": nm, "count": c} for nm, c in rows[:n]]
+    bottom = [{"name": nm, "count": c} for nm, c in rows[-n:][::-1]] if len(rows) > n else []
+    return {"top": top, "bottom": bottom}
+
+
 def _render_rfm_html(report):
     k = report["kpi"]
     nf = lambda v: f"{int(v):,}".replace(",", " ")
@@ -2392,6 +2413,16 @@ def _render_rfm_html(report):
         cohort_html = f'<h2>📈 Удержание когорт (по месяцу 1-го заказа)</h2><table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
     else:
         cohort_html = ""
+    prod_html = ""
+    for b in report["branches"]:
+        if not b.get("top_products"):
+            continue
+        topl = "".join(f"<li>{p['name']} <span class='muted'>· {p['count']}</span></li>" for p in b["top_products"])
+        botl = "".join(f"<li>{p['name']} <span class='muted'>· {p['count']}</span></li>" for p in b.get("bottom_products", []))
+        prod_html += (f"<div class='seg'><div class='seg-h'>{b['name']}</div>"
+                      f"<div class='muted'>👍 Топ-5</div><ol>{topl}</ol>"
+                      + (f"<div class='muted'>👎 Анти-топ-5</div><ol>{botl}</ol>" if botl else "") + "</div>")
+    products_block = f"<h2>🍣 Продукты по филиалам</h2><div class='segs'>{prod_html}</div>" if prod_html else ""
     edu = '''
     <h2>📊 Что ещё считаем (методы)</h2>
 
@@ -2446,6 +2477,7 @@ def _render_rfm_html(report):
   <div class="segs">{seg_cards}</div>
   <h2>🏪 По филиалам Астаны</h2>
   <table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>{branch_rows}</table>
+  {products_block}
   {cohort_html}
   {ideas}
   {edu}

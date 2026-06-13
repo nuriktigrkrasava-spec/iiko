@@ -112,6 +112,26 @@ def test_cohort_retention():
     assert jan["ret"][2] == 0              # M2 (мар) — никто
 
 
+def test_branch_top_products():
+    import asyncio
+    class FakeClient:
+        async def olap_report(self, dept, df, dt, group_by, agg):
+            return {"data": [
+                {"DishName": "Филадельфия", "DishCount": 120},
+                {"DishName": "Калифорния", "DishCount": 90},
+                {"DishName": "Запечённый ролл", "DishCount": 70},
+                {"DishName": "Унаги", "DishCount": 40},
+                {"DishName": "Маки", "DishCount": 30},
+                {"DishName": "Суп мисо", "DishCount": 5},
+                {"DishName": "Соус", "DishCount": 2},
+            ]}
+    out = asyncio.run(api._branch_top_products(FakeClient(), "Астана X", "2026-01-01", "2026-06-13", n=5))
+    assert [x["name"] for x in out["top"]][:2] == ["Филадельфия", "Калифорния"]
+    assert len(out["top"]) == 5
+    assert out["bottom"][0]["name"] == "Соус"        # самый редкий первым
+    assert out["bottom"][0]["count"] == 2
+
+
 def test_render_edu():
     report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
               "rfm":{"total":1,"segments":[]},"branches":[]}
@@ -140,7 +160,7 @@ def test_rfm_route_access():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_render_html, test_render_edu, test_rfm_route_access):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_branch_top_products, test_render_html, test_render_edu, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()
