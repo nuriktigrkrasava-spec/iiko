@@ -95,6 +95,14 @@ def test_render_html():
     assert "приложени" in html                       # миграция в приложение
 
 
+def test_render_edu():
+    report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
+              "rfm":{"total":1,"segments":[]},"branches":[]}
+    html = api._render_rfm_html(report)
+    for s in ("Когортный анализ", "CLV", "+67%", "Прогноз оттока", "Dynamic Yield", "AI Factory"):
+        assert s in html, s
+
+
 def test_rfm_route_access():
     from fastapi.testclient import TestClient
     api.get_all_restaurants = lambda: []     # пустой список → роут не ходит в iiko
@@ -115,7 +123,7 @@ def test_rfm_route_access():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html, test_rfm_route_access):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html, test_render_edu, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()
