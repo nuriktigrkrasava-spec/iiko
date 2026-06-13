@@ -2447,7 +2447,7 @@ def _render_rfm_html(report):
             f'<tr><td>{c["month"]}</td><td>{c["size"]}</td>' +
             "".join(f'<td>{"—" if v is None else str(v)+"%"}</td>' for v in c["ret"]) + "</tr>"
             for c in cohort["cohorts"])
-        cohort_html = f'<h2>📈 Удержание когорт (по месяцу 1-го заказа)</h2><table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
+        cohort_html = f'<table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
     else:
         cohort_html = ""
     prod_html = ""
@@ -2465,7 +2465,7 @@ def _render_rfm_html(report):
         sm = (rb.get("summary") or "").replace("\n", "<br>")
         rt = f" · ⭐ {rb['rating']}" if rb.get("rating") is not None else ""
         rev_html += f"<div class='seg'><div class='seg-h'>{rb['name']}{rt}</div><div>{sm}</div></div>"
-    reviews_block = f"<h2>💬 Отзывы по филиалам (2ГИС)</h2><div class='segs'>{rev_html}</div>" if rev_html else ""
+    reviews_block = f"<div class='segs'>{rev_html}</div>" if rev_html else ""
     edu = '''
     <h2>📊 Что ещё считаем (методы)</h2>
 
@@ -2487,21 +2487,54 @@ def _render_rfm_html(report):
     <p>🍟 <b>McDonald's — Dynamic Yield ($300 млн):</b> рекомендации на драйв-тру под <b>контекст</b> (погода, время, трафик, текущая корзина), а не личную историю. Подтолкнуло Starbucks создать Deep Brew.</p>
     <p>🍗 <b>Yum! (KFC/Taco Bell) — AI Factory:</b> связывает данные касс + цифровых меню + лояльности через AI для персональных промо по всем брендам.</p>
     '''
+    # Пояснения «что это и зачем» для каждой вкладки (показываем над данными)
+    seg_lead = '''
+    <h2>🎯 RFM-сегменты клиентов</h2>
+    <p class="lead"><b>Что считаем.</b> Каждого клиента раскладываем по трём осям:
+    <b>R</b>ecency — как давно был последний заказ, <b>F</b>requency — сколько заказов за 90 дней,
+    <b>M</b>onetary — сколько потратил. По комбинации этих осей клиент попадает в один сегмент.</p>
+    <p class="lead"><b>Зачем.</b> Один и тот же бюджет на маркетинг работает по-разному:
+    Чемпионов нельзя приучать к скидкам, Уснувших — только персональный возврат, Новичков — довести до 3-го заказа.
+    Карточка ниже: <b>число клиентов · доля</b>, выручка сегмента, <span style="color:var(--accent)">→ что делать</span> и пример сообщения.</p>
+    '''
+    branches_lead = '''
+    <h2>🏪 Клиенты по филиалам</h2>
+    <p class="lead"><b>Что в таблице.</b> <b>Клиентов</b> — уникальные телефоны с доставкой за 180 дней ·
+    <b>Выручка</b> — сумма их заказов · <b>Повторных</b> — доля клиентов с 2+ заказами (лояльность точки) ·
+    <b>LTV</b> — выручка ÷ клиентов (сколько в среднем приносит один клиент филиала).</p>
+    <p class="lead">Низкий % повторных при высокой выручке = филиал «живёт» на новичках, удержание проседает.
+    Ниже — <b>топ-5</b> блюд (что продвигать) и <b>анти-топ-5</b> (кандидаты убрать из меню или переработать).</p>
+    '''
+    cohort_lead = '''
+    <h2>📈 Удержание когорт</h2>
+    <p class="lead"><b>Что считаем.</b> Клиентов группируем по месяцу первого заказа (когорта) и смотрим,
+    какой % из них возвращался в следующие месяцы. <b>М0</b> всегда 100% (месяц первого заказа),
+    <b>М1</b> — вернулись через месяц, и т.д. Прочерк — месяц ещё не наступил.</p>
+    <p class="lead"><b>Как читать.</b> Чем медленнее падают числа по строке — тем лучше удержание.
+    Резкий обвал на М1 = теряем новичков сразу после первого заказа → чинить онбординг (−15% на 2-й заказ, напоминание).</p>
+    '''
+    reviews_lead = '''
+    <h2>💬 Отзывы по филиалам (2ГИС)</h2>
+    <p class="lead"><b>Что показываем.</b> Рейтинг филиала из 2ГИС + краткий разбор живых отзывов нейросетью:
+    что чаще всего <b>хвалят</b> (усиливать и продвигать) и чем <b>недовольны</b> (главная причина — чинить в первую очередь).</p>
+    '''
+    edu_lead = '<p class="lead">Кратко о методах, которые стоят за вкладками выше, и как их применяют большие сети.</p>'
+
     branches_panel = (
-        '<h2>🏪 Клиенты по филиалам</h2>'
+        branches_lead +
         '<table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>'
         f'{branch_rows}</table>{products_block}'
     )
     # (id, подпись вкладки, содержимое панели) — первая вкладка активна по умолчанию
     tabs = [
-        ("seg", "🎯 Сегменты", f'<div class="segs">{seg_cards}</div>'),
+        ("seg", "🎯 Сегменты", f'{seg_lead}<div class="segs">{seg_cards}</div>'),
         ("br", "🏪 Филиалы", branches_panel),
     ]
     if cohort_html:
-        tabs.append(("co", "📈 Когорты", cohort_html))
+        tabs.append(("co", "📈 Когорты", cohort_lead + cohort_html))
     if reviews_block:
-        tabs.append(("rv", "💬 Отзывы", reviews_block))
-    tabs.append(("id", "💡 Идеи", ideas + edu))
+        tabs.append(("rv", "💬 Отзывы", reviews_lead + reviews_block))
+    tabs.append(("id", "💡 Идеи", ideas + edu_lead + edu))
 
     radios = "".join(
         f'<input type="radio" name="tab" id="t-{tid}" class="tabin"{" checked" if i == 0 else ""}>'
@@ -2527,15 +2560,16 @@ def _render_rfm_html(report):
   .kpi{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}}
   .kpi .v{{font-size:18px;font-weight:700}} .kpi .l{{color:var(--muted);font-size:11px;margin-top:2px}}
   .tabin{{position:absolute;width:0;height:0;opacity:0;pointer-events:none}}
-  .tabs{{position:sticky;top:0;z-index:4;display:flex;gap:6px;overflow-x:auto;background:var(--bg);
+  .tabs{{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:6px;background:var(--bg);
     padding:10px 0;margin-bottom:10px;border-bottom:1px solid var(--line)}}
-  .tabs::-webkit-scrollbar{{display:none}}
-  .tabs label{{flex:0 0 auto;cursor:pointer;white-space:nowrap;padding:8px 15px;border-radius:999px;
+  .tabs label{{cursor:pointer;white-space:nowrap;padding:8px 15px;border-radius:999px;
     font-size:14px;color:var(--muted);background:var(--card);border:1px solid var(--line);user-select:none;
     transition:.12s}}
   {active_css}{{color:#fff;background:var(--accent);border-color:var(--accent)}}
   .panel{{display:none;animation:fade .16s ease}}
   {show_css}{{display:block}}
+  .lead{{color:var(--muted);font-size:13.5px;margin:6px 0 12px;max-width:680px}}
+  .lead b{{color:var(--fg)}}
   @keyframes fade{{from{{opacity:0;transform:translateY(5px)}}to{{opacity:1;transform:none}}}}
   .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
   .seg{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}}
@@ -2543,7 +2577,8 @@ def _render_rfm_html(report):
   .act{{color:var(--accent);font-size:13px;margin-top:8px}}
   .ex{{color:var(--muted);font-size:12px;font-style:italic;margin-top:3px}}
   .muted{{color:var(--muted)}}
-  table{{width:100%;border-collapse:collapse;margin:6px 0 16px;font-size:14px}}
+  table{{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    width:100%;border-collapse:collapse;margin:6px 0 16px;font-size:14px;white-space:nowrap}}
   th,td{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
   td:nth-child(n+2),th:nth-child(n+2){{text-align:right}}
   h2{{font-size:17px;margin:4px 0 10px}} h3{{font-size:15px;margin:16px 0 6px}}
