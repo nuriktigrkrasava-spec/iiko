@@ -132,6 +132,20 @@ def test_branch_top_products():
     assert out["bottom"][0]["count"] == 2
 
 
+def test_reviews_by_branch():
+    import asyncio, reviews as rv
+    rests = [{"organization_id": "ORG-A", "organization_name": "Астана, ул. Бокейхана 25а"}]
+    rv.discover_2gis = lambda name, brand=None: {"__await__": None}  # не вызовется (link есть)
+    api.get_review_link = lambda org, plat: {"external_id": "br-1"}
+    async def fake_fetch(bid): return {"rating": 4.7, "reviews": [{"text": "Очень вкусная Филадельфия!"}, {"text": "Долго везли"}]}
+    rv.fetch_2gis = fake_fetch
+    async def fake_claude(q, ctx, org): return "👍 Хвалят: Филадельфия\n👎 Недовольны: долгая доставка"
+    api.analyze_with_claude = fake_claude
+    out = asyncio.run(api._reviews_by_branch(rests))
+    assert len(out) == 1 and out[0]["name"].startswith("Астана")
+    assert "Филадельфия" in out[0]["summary"] and out[0]["rating"] == 4.7
+
+
 def test_render_edu():
     report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
               "rfm":{"total":1,"segments":[]},"branches":[]}
@@ -160,7 +174,7 @@ def test_rfm_route_access():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_branch_top_products, test_render_html, test_render_edu, test_rfm_route_access):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_branch_top_products, test_reviews_by_branch, test_render_html, test_render_edu, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()

@@ -37,6 +37,7 @@ from database import (
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
     get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
+    get_review_link, set_review_link,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -546,7 +547,8 @@ async def rfm_site(key: str = ""):
             logger.warning(f"[rfm] {r.get('organization_name')}: {e}")
             return (r, [])
 
-    pairs = await asyncio.gather(*(fetch(r) for r in _astana_restaurants()))
+    rests = _astana_restaurants()
+    pairs = await asyncio.gather(*(fetch(r) for r in rests))
     all_rows, branches = [], []
     for r, rows in pairs:
         all_rows.extend(rows)
@@ -567,6 +569,7 @@ async def rfm_site(key: str = ""):
         "rfm": _rfm_by_thresholds(agg, today),
         "branches": sorted(branches, key=lambda b: -b["revenue"]),
         "cohort": _cohort_retention(all_rows, today),
+        "reviews": await _reviews_by_branch(rests),
     }
     return HTMLResponse(_render_rfm_html(report))
 
@@ -2340,6 +2343,40 @@ async def _branch_top_products(client, dept, date_from, date_to, n=5):
     return {"top": top, "bottom": bottom}
 
 
+async def _reviews_by_branch(rests):
+    """По каждому филиалу: рейтинг 2ГИС + краткий разбор отзывов Claude
+    (что хвалят / чем недовольны). Без отзывов/ошибке — филиал пропускается."""
+    import reviews as rv
+
+    async def one(r):
+        org = r["organization_id"]; name = r["organization_name"]
+        try:
+            link = get_review_link(org, "2gis")
+            if not link and name:
+                found = await rv.discover_2gis(name, rv.BRAND_QUERY)
+                if found:
+                    set_review_link(org, "2gis", found["external_id"],
+                                    found.get("title", ""), found.get("extra", ""))
+                    link = get_review_link(org, "2gis")
+            if not link:
+                return None
+            data = await rv.fetch_2gis(link["external_id"])
+            texts = [x["text"] for x in (data or {}).get("reviews", []) if x.get("text")]
+            if not texts:
+                return None
+            q = ("По этим отзывам одного филиала ответь ровно двумя строками: "
+                 "'👍 Хвалят: <блюдо/за что чаще всего хвалят>' и "
+                 "'👎 Недовольны: <главная причина недовольства>'. Коротко, без воды.")
+            summary = await analyze_with_claude(q, {"reviews": texts, "branch": name}, org)
+            return {"name": name, "rating": (data or {}).get("rating"), "summary": summary}
+        except Exception as e:
+            logger.warning(f"[rfm/reviews] {name}: {e}")
+            return None
+
+    res = await asyncio.gather(*(one(r) for r in rests))
+    return [x for x in res if x]
+
+
 def _render_rfm_html(report):
     k = report["kpi"]
     nf = lambda v: f"{int(v):,}".replace(",", " ")
@@ -2423,6 +2460,12 @@ def _render_rfm_html(report):
                       f"<div class='muted'>👍 Топ-5</div><ol>{topl}</ol>"
                       + (f"<div class='muted'>👎 Анти-топ-5</div><ol>{botl}</ol>" if botl else "") + "</div>")
     products_block = f"<h2>🍣 Продукты по филиалам</h2><div class='segs'>{prod_html}</div>" if prod_html else ""
+    rev_html = ""
+    for rb in report.get("reviews", []):
+        sm = (rb.get("summary") or "").replace("\n", "<br>")
+        rt = f" · ⭐ {rb['rating']}" if rb.get("rating") is not None else ""
+        rev_html += f"<div class='seg'><div class='seg-h'>{rb['name']}{rt}</div><div>{sm}</div></div>"
+    reviews_block = f"<h2>💬 Отзывы по филиалам (2ГИС)</h2><div class='segs'>{rev_html}</div>" if rev_html else ""
     edu = '''
     <h2>📊 Что ещё считаем (методы)</h2>
 
@@ -2479,6 +2522,7 @@ def _render_rfm_html(report):
   <table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>{branch_rows}</table>
   {products_block}
   {cohort_html}
+  {reviews_block}
   {ideas}
   {edu}
 </body></html>'''
