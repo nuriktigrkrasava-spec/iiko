@@ -2487,44 +2487,85 @@ def _render_rfm_html(report):
     <p>🍟 <b>McDonald's — Dynamic Yield ($300 млн):</b> рекомендации на драйв-тру под <b>контекст</b> (погода, время, трафик, текущая корзина), а не личную историю. Подтолкнуло Starbucks создать Deep Brew.</p>
     <p>🍗 <b>Yum! (KFC/Taco Bell) — AI Factory:</b> связывает данные касс + цифровых меню + лояльности через AI для персональных промо по всем брендам.</p>
     '''
+    branches_panel = (
+        '<h2>🏪 Клиенты по филиалам</h2>'
+        '<table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>'
+        f'{branch_rows}</table>{products_block}'
+    )
+    # (id, подпись вкладки, содержимое панели) — первая вкладка активна по умолчанию
+    tabs = [
+        ("seg", "🎯 Сегменты", f'<div class="segs">{seg_cards}</div>'),
+        ("br", "🏪 Филиалы", branches_panel),
+    ]
+    if cohort_html:
+        tabs.append(("co", "📈 Когорты", cohort_html))
+    if reviews_block:
+        tabs.append(("rv", "💬 Отзывы", reviews_block))
+    tabs.append(("id", "💡 Идеи", ideas + edu))
+
+    radios = "".join(
+        f'<input type="radio" name="tab" id="t-{tid}" class="tabin"{" checked" if i == 0 else ""}>'
+        for i, (tid, _l, _b) in enumerate(tabs))
+    nav = "".join(f'<label for="t-{tid}">{lbl}</label>' for tid, lbl, _b in tabs)
+    panels = "".join(f'<section class="panel" id="p-{tid}">{body}</section>'
+                     for tid, _l, body in tabs)
+    show_css = ",".join(f'#t-{tid}:checked~#p-{tid}' for tid, _l, _b in tabs)
+    active_css = ",".join(f'#t-{tid}:checked~.tabs label[for=t-{tid}]' for tid, _l, _b in tabs)
+
     return f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RFM клиентов · Астана</title>
 <style>
-  :root {{ --bg:#0f1115; --card:#1a1d24; --fg:#e8eaed; --muted:#9aa0a6; --accent:#5B9CF6; }}
-  *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--fg);
-    font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:900px;margin:0 auto;line-height:1.5}}
-  h1{{font-size:22px;margin:0 0 2px}} .sub{{color:var(--muted);font-size:13px;margin-bottom:18px}}
-  .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}}
-  .kpi{{background:var(--card);border-radius:12px;padding:12px}} .kpi .v{{font-size:20px;font-weight:600}}
-  .kpi .l{{color:var(--muted);font-size:12px}}
-  .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:22px}}
-  .seg{{background:var(--card);border-radius:12px;padding:12px}} .seg-h{{font-weight:600;margin-bottom:4px}}
-  .seg-n{{font-size:18px}} .act{{color:var(--accent);font-size:13px;margin-top:6px}}
-  .ex{{color:var(--muted);font-size:12px;font-style:italic;margin-top:2px}}
-  .muted{{color:var(--muted)}} table{{width:100%;border-collapse:collapse;margin:8px 0 22px;font-size:14px}}
-  th,td{{text-align:left;padding:7px 8px;border-bottom:1px solid #262a33}} th{{color:var(--muted);font-weight:500}}
+  :root {{ --bg:#0e1014; --card:#171a21; --fg:#e8eaed; --muted:#9aa0a6; --accent:#5B9CF6; --line:#262a33; }}
+  *{{box-sizing:border-box}}
+  body{{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,system-ui,sans-serif;line-height:1.5}}
+  .wrap{{max-width:920px;margin:0 auto;padding:0 16px 40px}}
+  header{{padding:18px 0 10px}}
+  h1{{font-size:20px;margin:0 0 2px}} .sub{{color:var(--muted);font-size:12px;margin-bottom:12px}}
+  .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}}
+  .kpi{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}}
+  .kpi .v{{font-size:18px;font-weight:700}} .kpi .l{{color:var(--muted);font-size:11px;margin-top:2px}}
+  .tabin{{position:absolute;width:0;height:0;opacity:0;pointer-events:none}}
+  .tabs{{position:sticky;top:0;z-index:4;display:flex;gap:6px;overflow-x:auto;background:var(--bg);
+    padding:10px 0;margin-bottom:10px;border-bottom:1px solid var(--line)}}
+  .tabs::-webkit-scrollbar{{display:none}}
+  .tabs label{{flex:0 0 auto;cursor:pointer;white-space:nowrap;padding:8px 15px;border-radius:999px;
+    font-size:14px;color:var(--muted);background:var(--card);border:1px solid var(--line);user-select:none;
+    transition:.12s}}
+  {active_css}{{color:#fff;background:var(--accent);border-color:var(--accent)}}
+  .panel{{display:none;animation:fade .16s ease}}
+  {show_css}{{display:block}}
+  @keyframes fade{{from{{opacity:0;transform:translateY(5px)}}to{{opacity:1;transform:none}}}}
+  .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
+  .seg{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}}
+  .seg-h{{font-weight:600;margin-bottom:6px}} .seg-n{{font-size:20px;font-weight:700}}
+  .act{{color:var(--accent);font-size:13px;margin-top:8px}}
+  .ex{{color:var(--muted);font-size:12px;font-style:italic;margin-top:3px}}
+  .muted{{color:var(--muted)}}
+  table{{width:100%;border-collapse:collapse;margin:6px 0 16px;font-size:14px}}
+  th,td{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
   td:nth-child(n+2),th:nth-child(n+2){{text-align:right}}
-  h2{{font-size:18px;margin:26px 0 8px}} h3{{font-size:15px;margin:18px 0 6px}}
-  ul{{margin:6px 0;padding-left:20px}} li{{margin:3px 0}}
-  .tip{{background:var(--card);border-left:3px solid var(--accent);padding:8px 12px;border-radius:8px;font-size:13px}}
+  h2{{font-size:17px;margin:4px 0 10px}} h3{{font-size:15px;margin:16px 0 6px}}
+  ul,ol{{margin:6px 0;padding-left:20px}} li{{margin:3px 0}}
+  .tip{{background:var(--card);border-left:3px solid var(--accent);padding:10px 12px;border-radius:8px;font-size:13px;margin:8px 0}}
+  @media(max-width:560px){{.kpis{{grid-template-columns:repeat(2,1fr)}}}}
 </style></head><body>
-  <h1>RFM клиентов · филиалы Астаны</h1>
-  <div class="sub">доставка iiko · последние 180 дней · {report["date"]}</div>
-  <div class="kpis">
-    <div class="kpi"><div class="v">{nf(k["clients"])}</div><div class="l">клиентов</div></div>
-    <div class="kpi"><div class="v">{nf(k["revenue"])} ₸</div><div class="l">выручка с клиентов</div></div>
-    <div class="kpi"><div class="v">{nf(k["ltv"])} ₸</div><div class="l">средний LTV</div></div>
-    <div class="kpi"><div class="v">{k["repeat_pct"]}%</div><div class="l">повторных (2+)</div></div>
-  </div>
-  <div class="segs">{seg_cards}</div>
-  <h2>🏪 По филиалам Астаны</h2>
-  <table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>{branch_rows}</table>
-  {products_block}
-  {cohort_html}
-  {reviews_block}
-  {ideas}
-  {edu}
+<div class="wrap">
+  <header>
+    <h1>RFM клиентов · филиалы Астаны</h1>
+    <div class="sub">доставка iiko · последние 180 дней · {report["date"]}</div>
+    <div class="kpis">
+      <div class="kpi"><div class="v">{nf(k["clients"])}</div><div class="l">клиентов</div></div>
+      <div class="kpi"><div class="v">{nf(k["revenue"])} ₸</div><div class="l">выручка с клиентов</div></div>
+      <div class="kpi"><div class="v">{nf(k["ltv"])} ₸</div><div class="l">средний LTV</div></div>
+      <div class="kpi"><div class="v">{k["repeat_pct"]}%</div><div class="l">повторных (2+)</div></div>
+    </div>
+  </header>
+  {radios}
+  <nav class="tabs">{nav}</nav>
+  {panels}
+</div>
 </body></html>'''
 
 
