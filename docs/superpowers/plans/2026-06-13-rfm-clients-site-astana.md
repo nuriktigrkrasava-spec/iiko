@@ -589,8 +589,298 @@ git commit -m "chore(rfm): env RFM_SITE_KEY"
 
 ---
 
+## Task 8: Образовательные блоки (когорты/CLV/отток/кейсы)
+
+Статический контент «чтобы понимать» — добавляем секцию в `_render_rfm_html`. Тексты из заметок (когортный анализ, CLV/LTV, прогноз оттока, McDonald's Dynamic Yield, Yum! AI Factory).
+
+**Files:** Modify `api.py`, `test_rfm_site.py`.
+
+- [ ] **Step 1: Тест** (в runner) — после рендера присутствуют строки.
+
+```python
+def test_render_edu():
+    report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
+              "rfm":{"total":1,"segments":[]},"branches":[]}
+    html = api._render_rfm_html(report)
+    for s in ("Когортный анализ", "CLV", "+67%", "Прогноз оттока", "Dynamic Yield", "AI Factory"):
+        assert s in html, s
+```
+
+- [ ] **Step 2: Запустить — упадёт.**
+
+- [ ] **Step 3: Реализовать** — в `_render_rfm_html` перед закрытием `</body>` (после блока `{ideas}`) добавить переменную `edu` и вставить `{edu}`:
+
+```python
+    edu = '''
+    <h2>📊 Что ещё считаем (методы)</h2>
+
+    <h3>Когортный анализ</h3>
+    <p>Группируем клиентов по месяцу первого заказа и смотрим, как падает удержание со временем — видно, <b>на какой неделе теряем новичков</b>. Делают Sweetgreen, Starbucks. У нас: по iiko строим кривые удержания когорт → чиним онбординг. (см. таблицу когорт выше).</p>
+
+    <h3>CLV / LTV (пожизненная ценность)</h3>
+    <p>Сколько денег принесёт клиент за всё время (средний чек × частота × срок жизни). Задаёт <b>потолок бюджета</b> на удержание и привлечение — особенно для VIP.</p>
+    <ul>
+      <li>✅ Участники лояльности заходят <b>в 2 раза чаще</b> и тратят больше.</li>
+      <li>✅ Повторные клиенты тратят <b>+67%</b> к новым — самый прибыльный сегмент.</li>
+      <li>✅ Привлечь нового дороже, чем удержать; рост CLV прямо повышает прибыль.</li>
+    </ul>
+
+    <h3>Прогноз оттока (Churn)</h3>
+    <p>Предсказываем, <b>кто вот-вот уйдёт</b>, ДО того как ушёл → опережающий win-back. Делают Dunkin, Starbucks (Deep Brew). У нас на старте — это сегменты «В зоне риска» и «Уснувшие» выше (R↓): триггерим их заранее, без сложной ML-модели.</p>
+
+    <h3>Кейсы персонализации</h3>
+    <p>🍟 <b>McDonald's — Dynamic Yield ($300 млн):</b> рекомендации на драйв-тру под <b>контекст</b> (погода, время, трафик, текущая корзина), а не личную историю. Подтолкнуло Starbucks создать Deep Brew.</p>
+    <p>🍗 <b>Yum! (KFC/Taco Bell) — AI Factory:</b> связывает данные касс + цифровых меню + лояльности через AI для персональных промо по всем брендам.</p>
+    '''
+```
+
+и в финальном f-string добавить `{edu}` сразу после `{ideas}`.
+
+- [ ] **Step 4: Запустить — пройдёт. Step 5: Commit** `feat(rfm): образовательные блоки (когорты/CLV/отток/кейсы)`
+
+---
+
+## Task 9: Когортное удержание (реальные данные iiko)
+
+**Files:** Modify `api.py`, `test_rfm_site.py`.
+
+- [ ] **Step 1: Тест** (в runner)
+
+```python
+def test_cohort_retention():
+    today = date(2026, 6, 13)
+    rows = [
+        # клиент 1: первый заказ янв, вернулся фев
+        {"Delivery.CustomerPhone":"+7 700 000 0001","OpenDate.Typed":"2026-01-10","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+        {"Delivery.CustomerPhone":"+7 700 000 0001","OpenDate.Typed":"2026-02-15","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+        # клиент 2: только янв
+        {"Delivery.CustomerPhone":"+7 700 000 0002","OpenDate.Typed":"2026-01-20","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+    ]
+    c = api._cohort_retention(rows, today, max_m=2)
+    jan = next(x for x in c["cohorts"] if x["month"] == "2026-01")
+    assert jan["size"] == 2
+    assert jan["ret"][0] == 100            # M0 — все
+    assert jan["ret"][1] == 50             # M1 (фев) — вернулся 1 из 2
+    assert jan["ret"][2] == 0              # M2 (мар) — никто
+```
+
+- [ ] **Step 2: Запустить — упадёт.**
+
+- [ ] **Step 3: Реализовать в `api.py`**
+
+```python
+def _cohort_retention(rows, today, max_m=4):
+    """По сырым строкам olap_clients_rfm: когорты по месяцу первого заказа и
+    удержание M0..max_m (% когорты с заказом в соответствующем месяце)."""
+    by_phone = {}
+    for d in rows:
+        ph = _norm_phone(d.get("Delivery.CustomerPhone") or "")
+        if not ph or int(d.get("UniqOrderId.OrdersCount") or 0) <= 0:
+            continue
+        m = (d.get("OpenDate.Typed") or "")[:7]
+        if m:
+            by_phone.setdefault(ph, set()).add(m)
+    cohorts = {}
+    for ph, months in by_phone.items():
+        cohorts.setdefault(min(months), []).append(months)
+
+    def month_add(ym, k):
+        y, mo = int(ym[:4]), int(ym[5:7])
+        mo += k; y += (mo - 1) // 12; mo = (mo - 1) % 12 + 1
+        return f"{y:04d}-{mo:02d}"
+
+    cur = today.strftime("%Y-%m")
+    out = []
+    for cm in sorted(cohorts):
+        custs = cohorts[cm]; size = len(custs); ret = []
+        for k in range(max_m + 1):
+            mk = month_add(cm, k)
+            ret.append(None if mk > cur else (round(sum(1 for s in custs if mk in s) / size * 100) if size else 0))
+        out.append({"month": cm, "size": size, "ret": ret})
+    return {"cohorts": out, "max_m": max_m}
+```
+
+- [ ] **Step 4: Реализовать рендер + проводку.**
+  - В `_render_rfm_html`: если `report.get("cohort", {}).get("cohorts")` — добавить секцию-таблицу перед блоком идей:
+    ```python
+    cohort = report.get("cohort") or {"cohorts": [], "max_m": 4}
+    if cohort["cohorts"]:
+        head = "".join(f"<th>М{k}</th>" for k in range(cohort["max_m"] + 1))
+        crows = "".join(
+            f'<tr><td>{c["month"]}</td><td>{c["size"]}</td>' +
+            "".join(f'<td>{"—" if v is None else str(v)+"%"}</td>' for v in c["ret"]) + "</tr>"
+            for c in cohort["cohorts"])
+        cohort_html = f'<h2>📈 Удержание когорт (по месяцу 1-го заказа)</h2><table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
+    else:
+        cohort_html = ""
+    ```
+    и вставить `{cohort_html}` после таблицы филиалов, перед `{ideas}`.
+  - В роуте `/rfm` (Task 6) добавить: `report["cohort"] = _cohort_retention(all_rows, today)`.
+
+- [ ] **Step 5: Запустить весь файл — пройдёт. Step 6: Commit** `feat(rfm): когортное удержание из iiko`
+
+---
+
+## Task 10: Топ-5 / анти-топ-5 блюд по филиалу (реальные данные)
+
+**Files:** Modify `api.py`, `test_rfm_site.py`.
+
+- [ ] **Step 1: Тест чистой сортировки** (в runner) — тестируем хелпер на готовых строках через подменённый клиент.
+
+```python
+def test_branch_top_products():
+    import asyncio
+    class FakeClient:
+        async def olap_report(self, dept, df, dt, group_by, agg):
+            return {"data": [
+                {"DishName": "Филадельфия", "DishCount": 120},
+                {"DishName": "Калифорния", "DishCount": 90},
+                {"DishName": "Запечённый ролл", "DishCount": 70},
+                {"DishName": "Унаги", "DishCount": 40},
+                {"DishName": "Маки", "DishCount": 30},
+                {"DishName": "Суп мисо", "DishCount": 5},
+                {"DishName": "Соус", "DishCount": 2},
+            ]}
+    out = asyncio.run(api._branch_top_products(FakeClient(), "Астана X", "2026-01-01", "2026-06-13", n=5))
+    assert [x["name"] for x in out["top"]][:2] == ["Филадельфия", "Калифорния"]
+    assert len(out["top"]) == 5
+    assert out["bottom"][0]["name"] == "Соус"        # самый редкий первым
+    assert out["bottom"][0]["count"] == 2
+```
+
+- [ ] **Step 2: Запустить — упадёт.**
+
+- [ ] **Step 3: Реализовать в `api.py`** (паттерн olap_report по блюдам — как `api.py:447`)
+
+```python
+async def _branch_top_products(client, dept, date_from, date_to, n=5):
+    """Топ-n и анти-топ-n блюд филиала по количеству продаж (DishCount)."""
+    fn = getattr(client, "olap_report", None)
+    if not fn:
+        return {"top": [], "bottom": []}
+    try:
+        res = await fn(dept, date_from, date_to, ["DishName"], ["DishCount"])
+    except Exception:
+        return {"top": [], "bottom": []}
+    rows = [(str(r.get("DishName") or "").strip(), int(r.get("DishCount") or 0))
+            for r in res.get("data", [])]
+    rows = [(nm, c) for nm, c in rows if nm and c > 0]
+    rows.sort(key=lambda x: x[1], reverse=True)
+    top = [{"name": nm, "count": c} for nm, c in rows[:n]]
+    bottom = [{"name": nm, "count": c} for nm, c in rows[-n:][::-1]] if len(rows) > n else []
+    return {"top": top, "bottom": bottom}
+```
+
+- [ ] **Step 4: Рендер + проводка.**
+  - В роуте `/rfm`: в `fetch(r)` дополнительно тянуть продукты тем же клиентом и класть в branch-запись. Проще — отдельный сбор после получения клиентов: в цикле по `pairs` уже есть `r`; создать клиента ещё раз дёшево, но лучше вернуть его из `fetch`. Минимальное изменение: в роуте, при формировании `branches`, добавить продукты:
+    ```python
+    # внутри сбора branches:
+    client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+    prods = await _branch_top_products(client, r["organization_name"], date_from, date_to)
+    branches.append({"name": r["organization_name"], **_branch_stats(rows, today),
+                     "top_products": prods["top"], "bottom_products": prods["bottom"]})
+    ```
+    (Вызовы по филиалам можно оставить последовательными — это отчётная страница; при желании обернуть в gather.)
+  - В `_render_rfm_html`: после таблицы филиалов вывести по каждому филиалу блок «Топ-5 / Анти-топ-5 блюд»:
+    ```python
+    prod_html = ""
+    for b in report["branches"]:
+        if not b.get("top_products"):
+            continue
+        topl = "".join(f"<li>{p['name']} <span class='muted'>· {p['count']}</span></li>" for p in b["top_products"])
+        botl = "".join(f"<li>{p['name']} <span class='muted'>· {p['count']}</span></li>" for p in b.get("bottom_products", []))
+        prod_html += (f"<div class='seg'><div class='seg-h'>{b['name']}</div>"
+                      f"<div class='muted'>👍 Топ-5</div><ol>{topl}</ol>"
+                      + (f"<div class='muted'>👎 Анти-топ-5</div><ol>{botl}</ol>" if botl else "") + "</div>")
+    products_block = f"<h2>🍣 Продукты по филиалам</h2><div class='segs'>{prod_html}</div>" if prod_html else ""
+    ```
+    вставить `{products_block}` после таблицы филиалов.
+
+- [ ] **Step 5: Запустить — пройдёт. Step 6: Commit** `feat(rfm): топ-5/анти-топ-5 блюд по филиалу`
+
+---
+
+## Task 11: Отзывы по филиалам — что хвалят / чем недовольны (2ГИС + Claude)
+
+**Files:** Modify `api.py`, `test_rfm_site.py`.
+
+- [ ] **Step 1: Тест с моками** (в runner) — без сети: подменяем `reviews.discover_2gis/fetch_2gis`, `get_review_link`, `analyze_with_claude`.
+
+```python
+def test_reviews_by_branch():
+    import asyncio, reviews as rv
+    rests = [{"organization_id": "ORG-A", "organization_name": "Астана, ул. Бокейхана 25а"}]
+    rv.discover_2gis = lambda name, brand=None: {"__await__": None}  # не вызовется (link есть)
+    api.get_review_link = lambda org, plat: {"external_id": "br-1"}
+    async def fake_fetch(bid): return {"rating": 4.7, "reviews": [{"text": "Очень вкусная Филадельфия!"}, {"text": "Долго везли"}]}
+    rv.fetch_2gis = fake_fetch
+    async def fake_claude(q, ctx, org): return "👍 Хвалят: Филадельфия\n👎 Недовольны: долгая доставка"
+    api.analyze_with_claude = fake_claude
+    out = asyncio.run(api._reviews_by_branch(rests))
+    assert len(out) == 1 and out[0]["name"].startswith("Астана")
+    assert "Филадельфия" in out[0]["summary"] and out[0]["rating"] == 4.7
+```
+
+- [ ] **Step 2: Запустить — упадёт.**
+
+- [ ] **Step 3: Реализовать в `api.py`** (паттерн из `branch_reviews`, `api.py:4238`)
+
+```python
+async def _reviews_by_branch(rests):
+    """По каждому филиалу: рейтинг 2ГИС + краткий разбор отзывов Claude
+    (что хвалят / чем недовольны). Без отзывов/ошибке — филиал пропускается."""
+    import reviews as rv
+    from database import get_review_link, set_review_link
+
+    async def one(r):
+        org = r["organization_id"]; name = r["organization_name"]
+        try:
+            link = get_review_link(org, "2gis")
+            if not link and name:
+                found = await rv.discover_2gis(name, rv.BRAND_QUERY)
+                if found:
+                    set_review_link(org, "2gis", found["external_id"],
+                                    found.get("title", ""), found.get("extra", ""))
+                    link = get_review_link(org, "2gis")
+            if not link:
+                return None
+            data = await rv.fetch_2gis(link["external_id"])
+            texts = [x["text"] for x in (data or {}).get("reviews", []) if x.get("text")]
+            if not texts:
+                return None
+            q = ("По этим отзывам одного филиала ответь ровно двумя строками: "
+                 "'👍 Хвалят: <блюдо/за что чаще всего хвалят>' и "
+                 "'👎 Недовольны: <главная причина недовольства>'. Коротко, без воды.")
+            summary = await analyze_with_claude(q, {"reviews": texts, "branch": name}, org)
+            return {"name": name, "rating": (data or {}).get("rating"), "summary": summary}
+        except Exception as e:
+            logger.warning(f"[rfm/reviews] {name}: {e}")
+            return None
+
+    res = await asyncio.gather(*(one(r) for r in rests))
+    return [x for x in res if x]
+```
+
+- [ ] **Step 4: Рендер + проводка.**
+  - В роуте `/rfm`: `report["reviews"] = await _reviews_by_branch(_astana_restaurants())` (можно переиспользовать уже полученный список). 
+  - В `_render_rfm_html`:
+    ```python
+    rev_html = ""
+    for rb in report.get("reviews", []):
+        sm = (rb.get("summary") or "").replace("\n", "<br>")
+        rt = f" · ⭐ {rb['rating']}" if rb.get("rating") is not None else ""
+        rev_html += f"<div class='seg'><div class='seg-h'>{rb['name']}{rt}</div><div>{sm}</div></div>"
+    reviews_block = f"<h2>💬 Отзывы по филиалам (2ГИС)</h2><div class='segs'>{rev_html}</div>" if rev_html else ""
+    ```
+    вставить `{reviews_block}` перед блоком идей.
+
+- [ ] **Step 5: Запустить — пройдёт. Step 6: Commit** `feat(rfm): отзывы по филиалам — что хвалят/чем недовольны (Claude)`
+
+---
+
 ## Self-Review
 
-- **Покрытие спеки:** доступ/токен → Task 6; филиалы Астаны → Task 1; данные+90д → Task 2; сегментация по порогам заметки → Task 3; таблица филиалов → Task 4; страница+идеи (уснувшие VIP, лестница, сегмент→действие, челленджи, миграция) → Task 5; env → Task 7. Приватность (только агрегаты, телефоны не выводятся) — соблюдена: HTML не получает телефоны.
+- **Покрытие спеки + доп. запросы:** доступ/токен → Task 6; филиалы Астаны → Task 1; данные+90д → Task 2; сегментация по порогам заметки → Task 3; таблица филиалов → Task 4; страница+идеи → Task 5; env → Task 7; образовательные блоки (когорты/CLV/отток/кейсы McD/Yum) → Task 8; когортное удержание из iiko → Task 9; топ-5/анти-топ-5 блюд по филиалу → Task 10; отзывы по филиалам (что хвалят/чем недовольны) → Task 11. Приватность: телефоны не выводятся.
+- **Порядок:** Tasks 5/6 создают базовый `_render_rfm_html`/роут; Tasks 8–11 их расширяют (каждая добавляет свою секцию + проводку в роут). Поля `report`: `date,kpi,rfm,branches` (5/6) + `cohort` (9) + `branches[].top_products/bottom_products` (10) + `reviews` (11) — без конфликтов.
 - **Плейсхолдеров нет:** весь код приведён целиком, включая текст идей.
 - **Согласованность:** поля `agg` (`orders_90/spend_90/orders_total/spend_total/last_date`) одинаковы в `_aggregate_clients` (Task 2), `_rfm_by_thresholds` (Task 3), `_branch_stats` (Task 4). `report` (`date/kpi/rfm/branches`) одинаков в роуте (Task 6) и `_render_rfm_html` (Task 5). `RFM_SITE_KEY` — Task 6 определяет, тест Task 6 переопределяет. Сегменты-ключи (`champions/loyal/big_rare/new/at_risk/lost`) совпадают между `_RFM_META`, `seg_of` и тестом Task 3.
