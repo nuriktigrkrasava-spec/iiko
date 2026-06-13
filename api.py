@@ -2137,6 +2137,15 @@ def _norm_phone(s: str) -> Optional[str]:
     return d[-10:] if len(d) >= 10 else None
 
 
+def _astana_restaurants():
+    """Филиалы Астаны (по префиксу имени) из всех ресторанов с расшифрованными кредами."""
+    out = []
+    for r in get_all_restaurants():
+        if (r.get("organization_name") or "").strip().lower().startswith("астана"):
+            out.append(r)
+    return out
+
+
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
     """agg {phone: {orders, spend}} → (segments, top_vip)."""
     total = len(agg)
