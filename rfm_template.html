@@ -16,6 +16,9 @@
   .kpi{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);
     border-radius:16px;padding:18px 20px}
   .kpi .v{font-size:26px;font-weight:700;letter-spacing:-.5px} .kpi .l{color:var(--muted);font-size:13px;margin-top:4px}
+  .kpi .d{font-size:12.5px;font-weight:600;margin-top:8px}
+  .kpi .d span{color:var(--muted);font-weight:400;font-size:11px}
+  .d.up{color:#3fb950} .d.down{color:#f85149} .d.flat{color:var(--muted)}
   .tabin{position:absolute;width:0;height:0;opacity:0;pointer-events:none}
   .tabs{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:8px;background:var(--bg);
     padding:14px 0;margin-bottom:18px;border-bottom:1px solid var(--line)}
@@ -67,10 +70,10 @@
     <div class="when">отчёт на @@DATE@@</div>
   </header>
   <div class="kpis">
-    <div class="kpi"><div class="v">@@CLIENTS@@</div><div class="l">клиентов</div></div>
-    <div class="kpi"><div class="v">@@REVENUE@@ ₸</div><div class="l">выручка с клиентов</div></div>
-    <div class="kpi"><div class="v">@@LTV@@ ₸</div><div class="l">средний LTV</div></div>
-    <div class="kpi"><div class="v">@@REPEAT@@%</div><div class="l">повторных клиентов (2+)</div></div>
+    <div class="kpi"><div class="v">@@CLIENTS@@</div><div class="l">клиентов</div>@@DCLIENTS@@</div>
+    <div class="kpi"><div class="v">@@REVENUE@@ ₸</div><div class="l">выручка с клиентов</div>@@DREVENUE@@</div>
+    <div class="kpi"><div class="v">@@LTV@@ ₸</div><div class="l">средний LTV</div>@@DLTV@@</div>
+    <div class="kpi"><div class="v">@@REPEAT@@%</div><div class="l">повторных клиентов (2+)</div>@@DREPEAT@@</div>
   </div>
   @@RADIOS@@
   <nav class="tabs">@@NAV@@</nav>

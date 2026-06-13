@@ -75,6 +75,20 @@ def test_branch_stats():
     assert st["ltv"] == 7000, st
 
 
+def test_kpi_deltas():
+    today = date(2026, 6, 13)
+    rows = [
+        # последние 90 дней: 2 клиента
+        {"Delivery.CustomerPhone":"+7 701 000 0001","OpenDate.Typed":"2026-05-20","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1000},
+        {"Delivery.CustomerPhone":"+7 701 000 0002","OpenDate.Typed":"2026-05-21","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1000},
+        # предыдущие 90 дней: 1 клиент
+        {"Delivery.CustomerPhone":"+7 701 000 0003","OpenDate.Typed":"2026-02-20","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1000},
+    ]
+    dl = rfm._kpi_deltas(rows, today)
+    assert dl["clients"] == 100, dl       # 2 vs 1 = +100%
+    assert dl["revenue"] == 100, dl       # 2000 vs 1000
+
+
 def test_cohort_retention():
     today = date(2026, 6, 13)
     rows = [
@@ -176,7 +190,7 @@ def test_rfm_route_access():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_branch_top_products, test_reviews_by_branch, test_render_html, test_render_edu, test_rfm_route_access):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_kpi_deltas, test_cohort_retention, test_branch_top_products, test_reviews_by_branch, test_render_html, test_render_edu, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()

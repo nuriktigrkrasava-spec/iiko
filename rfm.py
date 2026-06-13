@@ -134,6 +134,49 @@ def _branch_stats(rows, today):
             "ltv": round(revenue / total) if total else 0}
 
 
+def _window_kpis(rows, lo, hi):
+    """KPI (clients/revenue/ltv/repeat_pct) по строкам с датой заказа в [lo, hi] включительно."""
+    agg = {}
+    for d in rows:
+        od = (d.get("OpenDate.Typed") or "")[:10]
+        if not od or od < lo or od > hi:
+            continue
+        ph = _norm_phone(d.get("Delivery.CustomerPhone") or "")
+        if not ph:
+            continue
+        n = int(d.get("UniqOrderId.OrdersCount") or 0)
+        if n <= 0:
+            continue
+        a = agg.setdefault(ph, {"orders": 0, "spend": 0.0})
+        a["orders"] += n
+        a["spend"] += float(d.get("DishDiscountSumInt") or 0)
+    total = len(agg)
+    revenue = sum(a["spend"] for a in agg.values())
+    repeat = sum(1 for a in agg.values() if a["orders"] >= 2)
+    return {"clients": total, "revenue": round(revenue),
+            "ltv": round(revenue / total) if total else 0,
+            "repeat_pct": round(repeat / total * 100) if total else 0}
+
+
+def _kpi_deltas(rows, today):
+    """Динамика: последние 90 дней против предыдущих 90 (оба окна — из тех же данных).
+    % изменения для clients/revenue/ltv; для repeat_pct — разница в пунктах (pp)."""
+    cur = _window_kpis(rows, (today - timedelta(days=90)).isoformat(), today.isoformat())
+    prev = _window_kpis(rows, (today - timedelta(days=180)).isoformat(),
+                        (today - timedelta(days=91)).isoformat())
+
+    def pct(c, p):
+        return round((c - p) / p * 100) if p else None
+
+    both = cur["clients"] and prev["clients"]
+    return {
+        "clients": pct(cur["clients"], prev["clients"]),
+        "revenue": pct(cur["revenue"], prev["revenue"]),
+        "ltv": pct(cur["ltv"], prev["ltv"]),
+        "repeat_pp": (cur["repeat_pct"] - prev["repeat_pct"]) if both else None,
+    }
+
+
 def _cohort_retention(rows, today, max_m=4):
     """По сырым строкам olap_clients_rfm: когорты по месяцу первого заказа и
     удержание M0..max_m (% когорты с заказом в соответствующем месяце)."""
@@ -253,6 +296,7 @@ async def build_report(today):
                 "ltv": round(revenue / total) if total else 0,
                 "repeat_pct": round(repeat / total * 100) if total else 0},
         "rfm": _rfm_by_thresholds(agg, today),
+        "delta": _kpi_deltas(all_rows, today),
         "branches": sorted(branches, key=lambda b: -b["revenue"]),
         "cohort": _cohort_retention(all_rows, today),
         "reviews": await _reviews_by_branch(rests),
@@ -366,9 +410,20 @@ _REVIEWS_LEAD = '''
 _EDU_LEAD = '<p class="lead">Кратко о методах, которые стоят за вкладками выше, и как их применяют большие сети.</p>'
 
 
+def _delta_badge(pct, pp=False):
+    """↑/↓-бейдж изменения. pct=None → пусто. pp=True → пункты вместо %."""
+    if pct is None:
+        return ""
+    arrow = "↑" if pct > 0 else ("↓" if pct < 0 else "→")
+    cls = "up" if pct > 0 else ("down" if pct < 0 else "flat")
+    unit = " пп" if pp else "%"
+    return f'<div class="d {cls}">{arrow} {abs(pct)}{unit} <span>vs пред. 90д</span></div>'
+
+
 def _render_rfm_html(report):
     """report → самодостаточный HTML по шаблону rfm_template.html."""
     k = report["kpi"]
+    d = report.get("delta") or {}
     nf = lambda v: f"{int(v):,}".replace(",", " ")
 
     seg_cards = "".join(
@@ -447,6 +502,10 @@ def _render_rfm_html(report):
             .replace("@@REVENUE@@", nf(k["revenue"]))
             .replace("@@LTV@@", nf(k["ltv"]))
             .replace("@@REPEAT@@", str(k["repeat_pct"]))
+            .replace("@@DCLIENTS@@", _delta_badge(d.get("clients")))
+            .replace("@@DREVENUE@@", _delta_badge(d.get("revenue")))
+            .replace("@@DLTV@@", _delta_badge(d.get("ltv")))
+            .replace("@@DREPEAT@@", _delta_badge(d.get("repeat_pp"), pp=True))
             .replace("@@RADIOS@@", radios)
             .replace("@@NAV@@", nav)
             .replace("@@PANELS@@", panels))
