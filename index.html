@@ -1315,6 +1315,10 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           <div class="ie-meta-label">Склад</div>
           <select id="ie-store"></select>
         </div>
+        <div class="ie-meta-row">
+          <div class="ie-meta-label">Комментарий</div>
+          <textarea id="ie-comment" rows="2" placeholder="Комментарий для iiko Office (необязательно)" style="width:100%;box-sizing:border-box;padding:10px;font-size:14px;font-family:inherit;background:var(--bg-secondary);color:var(--text);border:1px solid var(--card-border);border-radius:8px;resize:vertical;"></textarea>
+        </div>
       </div>
       <div class="ie-totals">
         <div class="ie-total-line"><span>Без НДС</span><span id="ie-base-total">0 ₸</span></div>
@@ -1347,6 +1351,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="ie-modal-row">
         <label>Ед.</label>
         <input type="text" id="ie-edit-unit" placeholder="кг/шт/л" oninput="ieRecalcModal()">
+        <div id="ie-edit-iiko-unit-hint" style="font-size:12px;color:var(--text-secondary);margin-top:4px;"></div>
       </div>
     </div>
     <div class="ie-modal-row-2">
@@ -4389,6 +4394,7 @@ async function ieInit() {
     ieState.vatRate = data.vat_rate || 12;
     document.getElementById('ie-supplier').value = ieState.supplier;
     document.getElementById('ie-date').value = ieState.date;
+    document.getElementById('ie-comment').value = '';
     ieRenderItems();
     ieRecalcTotals();
     document.getElementById('ie-loading').style.display = 'none';
@@ -4412,7 +4418,7 @@ function ieRenderItems() {
     const price = it.price_per_unit != null ? ieFormatMoney(it.price_per_unit) : '—';
     const total = it.total != null ? ieFormatMoney(it.total) : '—';
     const mapped = it.iiko_product_id
-      ? `<div class="ie-item-mapped">✓ ${ieEscape(it.iiko_product_name || 'сопоставлено')}</div>`
+      ? `<div class="ie-item-mapped">✓ ${ieEscape(it.iiko_product_name || 'сопоставлено')}${it.iiko_unit ? ' · iiko: ' + ieEscape(it.iiko_unit) : ''}</div>`
       : `<div class="ie-item-unmapped">⚠ не сопоставлено</div>`;
     return `
       <div class="ie-item">
@@ -4481,6 +4487,8 @@ function ieOpenItem(idx) {
   document.getElementById('ie-edit-price').value = it.price_per_unit ?? '';
   document.getElementById('ie-edit-total').value = it.total ?? '';
   document.getElementById('ie-search-results').innerHTML = '';
+  ieState._pickedProduct = null;
+  ieShowIikoUnitHint(it.iiko_unit || '', it.unit || '', it.iiko_containers, it._container_keys);
   document.getElementById('ie-modal-back').classList.add('active');
 }
 
@@ -4565,10 +4573,34 @@ function ieSearchProducts() {
 
 function iePickProduct(p) {
   document.getElementById('ie-edit-name').value = p.name || '';
-  if (p.unit) document.getElementById('ie-edit-unit').value = p.unit;
+  const unitEl = document.getElementById('ie-edit-unit');
+  // НЕ затираем введённую оператором единицу — иначе «500 г» превратится в «500 кг».
+  // Если единица пустая, подставим iiko-единицу как дефолт. В iiko количество
+  // всё равно уйдёт в единице товара из iiko (конвертация г↔кг/мл↔л на бэке).
+  if (p.unit && !unitEl.value.trim()) unitEl.value = p.unit;
+  ieShowIikoUnitHint(p.unit || '', unitEl.value.trim(), p.containers, p._container_keys);
   document.getElementById('ie-search-results').innerHTML = '';
-  // Сохраняем сопоставление в state для последующего ieSaveItem
   ieState._pickedProduct = p;
+}
+
+function ieShowIikoUnitHint(iikoUnit, invUnit, containers, debugKeys) {
+  const hint = document.getElementById('ie-edit-iiko-unit-hint');
+  if (!hint) return;
+  const norm = s => (s || '').trim().toLowerCase().replace(/\.$/, '');
+  const mism = iikoUnit && norm(invUnit) && norm(invUnit) !== norm(iikoUnit);
+  const lines = [];
+  if (iikoUnit) {
+    lines.push(mism
+      ? `⚠ В iiko товар в «${iikoUnit}» — количество уйдёт в этой единице`
+      : `Единица в iiko: ${iikoUnit}`);
+  }
+  if (containers && containers.length) {
+    lines.push('Фасовки iiko: ' + containers.map(c => `${c.name} ×${c.factor}`).join(', '));
+  } else if (debugKeys && debugKeys.length) {
+    lines.push('⚙ контейнер-поля iiko: ' + debugKeys.join(', '));  // диагностика структуры
+  }
+  hint.innerHTML = lines.map(ieEscape).join('<br>');
+  hint.style.color = mism ? '#c8860a' : 'var(--text-secondary)';
 }
 
 function ieSaveItem() {
@@ -4583,6 +4615,9 @@ function ieSaveItem() {
   if (ieState._pickedProduct) {
     it.iiko_product_id = ieState._pickedProduct.id;
     it.iiko_product_name = ieState._pickedProduct.name;
+    it.iiko_unit = ieState._pickedProduct.unit || '';
+    it.iiko_containers = ieState._pickedProduct.containers || [];
+    it._container_keys = ieState._pickedProduct._container_keys || [];
     ieState._pickedProduct = null;
   }
   ieState.items[idx] = it;
@@ -4619,6 +4654,7 @@ async function ieSave() {
     date: document.getElementById('ie-date').value,
     total_amount: total,
     vat_amount: vat,
+    comment: (document.getElementById('ie-comment')?.value || '').trim(),
   };
 
   // === Режим сохранённой накладной (из вкладки Накладные) ===
@@ -4636,6 +4672,9 @@ async function ieSave() {
       if (resp.ok) {
         const num = resp.iiko_doc_number ? ` #${resp.iiko_doc_number}` : '';
         showToast(`✅ Создан черновик в iiko${num}`);
+        if (resp.unit_warnings && resp.unit_warnings.length) {
+          showToast(`⚠️ Проверь единицы: ${resp.unit_warnings.slice(0,2).join('; ')}${resp.unit_warnings.length>2?'…':''}`);
+        }
         ieCloseSavedEditor();
         loadExpenses();  // обновим список накладных
       } else if (resp.unmatched && resp.unmatched.length) {
@@ -4701,6 +4740,7 @@ async function openSavedInvoiceEditor(botId) {
     ieState.vatRate = data.vat_rate || 12;
     document.getElementById('ie-supplier').value = ieState.supplier;
     document.getElementById('ie-date').value = ieState.date;
+    document.getElementById('ie-comment').value = data.comment || '';
     // ready → ещё не в iiko, кнопка создаёт черновик; needs_mapping/iiko_error → сопоставить
     document.getElementById('ie-save-btn').textContent =
       (data.status === 'ready') ? '💾 Создать черновик в iiko' : '💾 Сопоставить и отправить';

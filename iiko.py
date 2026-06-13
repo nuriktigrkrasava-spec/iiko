@@ -29,6 +29,38 @@ def _normalize_iiko_url(url: str) -> str:
     return u
 
 
+def parse_containers(p: dict) -> list:
+    """Толерантно достаёт фасовки (контейнеры) товара из ответа iiko:
+    [{'name': <название>, 'factor': <сколько БАЗОВЫХ единиц товара в 1 фасовке>}].
+    Имена полей у разных установок iiko могут отличаться, поэтому пробуем несколько.
+    Если ничего не нашли — для диагностики кладём сырые ключи в _raw (видно на деплое)."""
+    raw = (p.get("containers") or p.get("productContainers")
+           or p.get("packagings") or p.get("measureUnits") or [])
+    out = []
+    if isinstance(raw, list):
+        for c in raw:
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name") or c.get("shortName") or c.get("fullName") or ""
+            factor = (c.get("count") or c.get("fullCount") or c.get("containerWeight")
+                      or c.get("weight") or c.get("amount") or c.get("coefficient")
+                      or c.get("factor") or 0)
+            try:
+                factor = float(factor)
+            except (TypeError, ValueError):
+                factor = 0.0
+            if name and factor:
+                out.append({"name": str(name), "factor": factor})
+    # Диагностика структуры: какие container-подобные ключи реально есть у товара
+    if not out:
+        hints = [k for k in p.keys()
+                 if any(s in k.lower() for s in ("contain", "pack", "unit", "фасов"))]
+        if hints:
+            out = []  # пусто, но ключи покажем через _raw на product-уровне
+            p["_container_keys"] = hints
+    return out
+
+
 def get_client(api_login: str, iiko_server: str = None, api_password: str = None):
     if iiko_server:
         iiko_server = _normalize_iiko_url(iiko_server)
@@ -348,7 +380,8 @@ class IikoClient:
 
     async def create_incoming_invoice(
         self, org_id: str, supplier_id: str, items: List[Dict[str, Any]],
-        date: str, document_number: Optional[str] = None
+        date: str, document_number: Optional[str] = None,
+        store_id: Optional[str] = None, comment: Optional[str] = None
     ) -> Dict[str, Any]:
         """Создать ВХОДЯЩУЮ накладную в iiko (черновик, status=NEW).
         Cloud API: POST /api/1/documents/create/incomingInvoice
@@ -356,6 +389,7 @@ class IikoClient:
         items[] — список словарей с полями:
             product (str, iiko product id), amount (float),
             sum (float, общая сумма по позиции), price (float, цена за единицу)
+        comment — текст в поле «Комментарий» iikoOffice.
         """
         token = await self._ensure_token()
         body = {
@@ -367,6 +401,8 @@ class IikoClient:
         }
         if document_number:
             body["documentNumber"] = document_number
+        if comment:
+            body["comment"] = comment
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 f"{IIKO_CLOUD_BASE}/api/1/documents/create/incomingInvoice",
@@ -1275,15 +1311,21 @@ class IikoWebClient:
                         try:
                             data = resp.json()
                             if isinstance(data, list):
-                                products = [
-                                    {"id": p.get("id"),
-                                     "name": p.get("name"),
-                                     "num": p.get("num"),
-                                     "code": p.get("code"),
-                                     "unit": (p.get("mainUnit") or {}).get("name") if isinstance(p.get("mainUnit"), dict) else p.get("mainUnit")}
-                                    for p in data
-                                    if p.get("id") and p.get("name")
-                                ]
+                                products = []
+                                for p in data:
+                                    if not (p.get("id") and p.get("name")):
+                                        continue
+                                    mu = p.get("mainUnit")
+                                    products.append({
+                                        "id": p.get("id"),
+                                        "name": p.get("name"),
+                                        "num": p.get("num"),
+                                        "code": p.get("code"),
+                                        "unit": mu.get("name") if isinstance(mu, dict) else mu,
+                                        "containers": parse_containers(p),
+                                        # диагностика структуры фасовок (видно на деплое)
+                                        "_container_keys": p.get("_container_keys") or [],
+                                    })
                         except Exception:
                             pass
                     # Fallback: XML на /api/products
@@ -1324,11 +1366,13 @@ class IikoWebClient:
     async def create_incoming_invoice(self, org_id: str, supplier_id: str,
                                        items: List[Dict[str, Any]], date: str,
                                        document_number: Optional[str] = None,
-                                       store_id: Optional[str] = None) -> Dict[str, Any]:
+                                       store_id: Optional[str] = None,
+                                       comment: Optional[str] = None) -> Dict[str, Any]:
         """Создаёт входящую накладную в iikoServer 9.x как ЧЕРНОВИК (status=NEW).
         Endpoint: POST /resto/api/documents/import/incomingInvoice (тело — XML).
 
         items[] — список словарей с productId, amount, price, sum (как в Cloud-варианте).
+        comment — текст комментария оператора, попадает в поле «Комментарий» iikoOffice.
         """
         store_id = store_id or await self._get_default_store(org_id)
         if not store_id:
@@ -1346,6 +1390,8 @@ class IikoWebClient:
         ET.SubElement(root, "supplier").text = str(supplier_id)
         ET.SubElement(root, "defaultStore").text = str(store_id)
         ET.SubElement(root, "status").text = "NEW"
+        if comment:
+            ET.SubElement(root, "comment").text = str(comment)
         items_el = ET.SubElement(root, "items")
         for idx, it in enumerate(items or [], start=1):
             ie = ET.SubElement(items_el, "item")

@@ -2682,7 +2682,9 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
 
     return {"products": [
         {"id": p.get("id"), "name": p.get("name"), "num": p.get("num"),
-         "code": p.get("code"), "unit": _unit_name(p.get("unit") or p.get("mainUnit"))}
+         "code": p.get("code"), "unit": _unit_name(p.get("unit") or p.get("mainUnit")),
+         "containers": p.get("containers") or [],
+         "_container_keys": p.get("_container_keys") or []}
         for p in products
     ]}
 
@@ -2745,6 +2747,7 @@ async def invoice_saved_get(invoice_id: int, user: Dict = Depends(get_current_us
         "vat_amount": inv.get("vat_amount", 0),
         "vat_rate": 12.0,
         "currency": "KZT",
+        "comment": inv.get("comment") or "",
         "search_org_id": inv.get("organization_id"),
         "status": inv.get("status"),
     }
@@ -2759,6 +2762,7 @@ class SavedInvoicePayload(BaseModel):
     total_amount: Optional[float] = None
     vat_amount: Optional[float] = None
     store_id: Optional[str] = None  # склад накладной (выбор в редакторе)
+    comment: Optional[str] = None   # комментарий оператора → поле «Комментарий» в iikoOffice
 
 
 @app.post("/api/invoice-saved/{invoice_id}/send")
@@ -2779,6 +2783,7 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
     if payload.date is not None: update_fields["date"] = payload.date
     if payload.total_amount is not None: update_fields["total_amount"] = payload.total_amount
     if payload.vat_amount is not None: update_fields["vat_amount"] = payload.vat_amount
+    if payload.comment is not None: update_fields["comment"] = payload.comment
     update_bot_invoice(invoice_id, **update_fields)
 
     # Готовим и шлём в iiko — приоритет у значений из payload (смена филиала/поставщика)
@@ -2790,17 +2795,20 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
 
-    # Собираем sendable items — только те у кого есть iiko_product_id
-    sendable, unmatched = [], []
+    # Собираем sendable items — только те у кого есть iiko_product_id.
+    # Единицы: количество уходит в iiko в ЕДИНИЦЕ ТОВАРА из самой iiko (iiko_unit).
+    # Известные пары (г↔кг, мл↔л) конвертируем с пересчётом цены; неизвестное
+    # расхождение единиц не молчим — предупреждаем оператора (unit_warnings).
+    sendable, unmatched, unit_warnings = [], [], []
     for it in payload.items:
         prod_id = it.get("iiko_product_id")
         if not prod_id:
             unmatched.append(it.get("name", "—"))
             continue
-        qty = float(it.get("quantity") or 0)
-        price = float(it.get("price_per_unit") or 0)
-        total = float(it.get("total") or (qty * price))
-        sendable.append({"productId": prod_id, "amount": qty, "price": price, "sum": total})
+        amount, price, total, warning = _reconcile_amount(it)
+        if warning:
+            unit_warnings.append(warning)
+        sendable.append({"productId": prod_id, "amount": amount, "price": price, "sum": total})
 
     if unmatched:
         update_bot_invoice(invoice_id, status="needs_mapping")
@@ -2813,7 +2821,7 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         resp = await client.create_incoming_invoice(
             org_id=real_org, supplier_id=supplier_id,
             items=sendable, date=date_str,
-            store_id=payload.store_id
+            store_id=payload.store_id, comment=payload.comment
         )
     except Exception as e:
         update_bot_invoice(invoice_id, status="iiko_error")
@@ -2834,7 +2842,8 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         iiko_doc_number=resp.get("number") or "",
         status="draft_in_iiko")
     _invalidate_cache("invoices", real_org)  # иначе список отдаёт старый 'ready' и нет кнопки «Провести»
-    return {"ok": True, "iiko_doc_id": resp.get("id"), "iiko_doc_number": resp.get("number")}
+    return {"ok": True, "iiko_doc_id": resp.get("id"), "iiko_doc_number": resp.get("number"),
+            "unit_warnings": unit_warnings}
 
 
 @app.post("/api/invoices/{invoice_id}/post")
@@ -3521,6 +3530,34 @@ _UNIT_CONVERT = {("г", "кг"): 0.001, ("кг", "г"): 1000.0,
 
 def _norm_unit(u: str) -> str:
     return _UNIT_ALIASES.get((u or "").strip().lower().rstrip("."), (u or "").strip().lower())
+
+
+def _reconcile_amount(it: Dict[str, Any]) -> Tuple[float, float, float, Optional[str]]:
+    """Готовит позицию для iiko в ЕДИНИЦЕ ТОВАРА из iiko (it['iiko_unit']).
+    Возвращает (amount, price, sum, warning):
+      • amount — количество, переведённое в единицу товара iiko (г→кг, мл→л);
+      • sum    — итог строки (его видит и подтверждает оператор, ieLineTotal);
+      • price  — выводится из суммы (sum/amount), чтобы amount×price==sum всегда,
+                 независимо от того, за какую единицу была введена цена;
+      • warning — если единицы расходятся и пара неизвестна (количество не трогаем,
+                 оператор проверит черновик в iiko Office).
+    """
+    qty = float(it.get("quantity") or 0)
+    price_in = float(it.get("price_per_unit") or 0)
+    total = float(it.get("total") or (qty * price_in))
+    warning = None
+    amount = qty
+    inv_u = _norm_unit(it.get("unit") or "")
+    iiko_u = _norm_unit(it.get("iiko_unit") or "")
+    if inv_u and iiko_u and inv_u != iiko_u:
+        factor = _UNIT_CONVERT.get((inv_u, iiko_u))
+        if factor:
+            amount = qty * factor
+        else:
+            warning = (f"{it.get('name', '—')}: в накладной «{it.get('unit')}», "
+                       f"в iiko «{it.get('iiko_unit')}»")
+    price_out = (total / amount) if amount else price_in
+    return amount, price_out, total, warning
 
 
 async def _auto_match_items(client, org_id: str,

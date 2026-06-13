@@ -142,6 +142,7 @@ def init_db():
         ("dedup_hash", "TEXT"),
         ("photo_paths", "TEXT"),
         ("updated_at", "TEXT"),
+        ("comment", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE bot_invoices ADD COLUMN {col} {definition}")
@@ -399,6 +400,7 @@ def update_bot_invoice(invoice_id: int, **fields) -> None:
         "supplier", "branch", "items", "total_amount", "date",
         "vat_amount", "supplier_id", "organization_id",
         "iiko_doc_id", "iiko_doc_number", "dedup_hash", "photo_paths", "status",
+        "comment",
     }
     safe = {k: v for k, v in fields.items() if k in allowed}
     if not safe:
