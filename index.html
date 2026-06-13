@@ -494,7 +494,7 @@ html, body {
 .ie-modal h3 { margin:0 0 12px; font-size:16px; color:var(--text); }
 .ie-modal-row { margin-bottom:10px; }
 .ie-modal-row label { display:block; font-size:11px; color:var(--text-secondary); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
-.ie-modal-row input { width:100%; padding:10px; border:1px solid var(--divider); border-radius:8px; background:var(--bg-secondary); color:var(--text); font-size:14px; box-sizing:border-box; }
+.ie-modal-row input, .ie-modal-row select { width:100%; padding:10px; border:1px solid var(--divider); border-radius:8px; background:var(--bg-secondary); color:var(--text); font-size:14px; box-sizing:border-box; }
 .ie-modal-row-2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .ie-search-results { max-height:200px; overflow-y:auto; border:1px solid var(--divider); border-radius:8px; margin-top:6px; }
 .ie-search-results:empty { display:none; }
@@ -1350,7 +1350,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
       <div class="ie-modal-row">
         <label>Ед.</label>
-        <input type="text" id="ie-edit-unit" placeholder="кг/шт/л" oninput="ieRecalcModal()">
+        <select id="ie-edit-unit" onchange="ieRecalcModal();ieOnUnitChange()"></select>
         <div id="ie-edit-iiko-unit-hint" style="font-size:12px;color:var(--text-secondary);margin-top:4px;"></div>
       </div>
     </div>
@@ -3211,8 +3211,8 @@ async function loadExpenses() {
       const badgeClass = (raw) => {
         if (raw === 'posted') return 'badge-green';
         if (raw === 'draft_in_iiko') return 'badge-blue';
-        if (raw === 'ready') return 'badge-orange';
-        if (raw === 'needs_mapping') return 'badge-purple';
+        if (raw === 'ready') return 'badge-purple';
+        if (raw === 'needs_mapping') return 'badge-orange';
         if (raw === 'iiko_error') return 'badge-red';
         if (raw === 'draft') return 'badge-gray';
         // Старый поток (накладные из iiko напрямую)
@@ -4483,12 +4483,11 @@ function ieOpenItem(idx) {
   const it = ieState.items[idx] || {};
   document.getElementById('ie-edit-name').value = it.name || '';
   document.getElementById('ie-edit-qty').value = it.quantity ?? '';
-  document.getElementById('ie-edit-unit').value = it.unit || '';
   document.getElementById('ie-edit-price').value = it.price_per_unit ?? '';
   document.getElementById('ie-edit-total').value = it.total ?? '';
   document.getElementById('ie-search-results').innerHTML = '';
   ieState._pickedProduct = null;
-  ieShowIikoUnitHint(it.iiko_unit || '', it.unit || '', it.iiko_containers, it._container_keys);
+  ieSetUnitContext(it.iiko_unit || '', it.iiko_containers, it._container_keys, it.unit || '');
   document.getElementById('ie-modal-back').classList.add('active');
 }
 
@@ -4573,12 +4572,10 @@ function ieSearchProducts() {
 
 function iePickProduct(p) {
   document.getElementById('ie-edit-name').value = p.name || '';
-  const unitEl = document.getElementById('ie-edit-unit');
-  // НЕ затираем введённую оператором единицу — иначе «500 г» превратится в «500 кг».
-  // Если единица пустая, подставим iiko-единицу как дефолт. В iiko количество
-  // всё равно уйдёт в единице товара из iiko (конвертация г↔кг/мл↔л на бэке).
-  if (p.unit && !unitEl.value.trim()) unitEl.value = p.unit;
-  ieShowIikoUnitHint(p.unit || '', unitEl.value.trim(), p.containers, p._container_keys);
+  // Перенаполняем список единиц единицами этого товара (ед. iiko + фасовки),
+  // сохраняя текущий выбор оператора если он есть.
+  const cur = (document.getElementById('ie-edit-unit').value || '').trim();
+  ieSetUnitContext(p.unit || '', p.containers, p._container_keys, cur || p.unit || '');
   document.getElementById('ie-search-results').innerHTML = '';
   ieState._pickedProduct = p;
 }
@@ -4587,6 +4584,13 @@ function ieShowIikoUnitHint(iikoUnit, invUnit, containers, debugKeys) {
   const hint = document.getElementById('ie-edit-iiko-unit-hint');
   if (!hint) return;
   const norm = s => (s || '').trim().toLowerCase().replace(/\.$/, '');
+  // Выбрана фасовка? — показываем коэффициент пересчёта
+  const cont = (containers || []).find(c => norm(c.name) === norm(invUnit));
+  if (cont) {
+    hint.textContent = `Фасовка: 1 ${cont.name} = ${cont.factor} ${iikoUnit || 'ед.'} → в iiko уйдёт в «${iikoUnit || 'ед.'}»`;
+    hint.style.color = 'var(--text-secondary)';
+    return;
+  }
   const mism = iikoUnit && norm(invUnit) && norm(invUnit) !== norm(iikoUnit);
   const lines = [];
   if (iikoUnit) {
@@ -4601,6 +4605,39 @@ function ieShowIikoUnitHint(iikoUnit, invUnit, containers, debugKeys) {
   }
   hint.innerHTML = lines.map(ieEscape).join('<br>');
   hint.style.color = mism ? '#c8860a' : 'var(--text-secondary)';
+}
+
+// Единица — выпадающим списком: ед. iiko + фасовки + ходовые единицы. Оператор выбирает.
+function iePopulateUnitSelect(selectedUnit, iikoUnit, containers) {
+  const sel = document.getElementById('ie-edit-unit');
+  if (!sel) return;
+  const seen = new Set();
+  const opts = [];
+  const add = (val, label) => {
+    const v = (val || '').toString().trim();
+    if (!v || seen.has(v.toLowerCase())) return;
+    seen.add(v.toLowerCase());
+    opts.push(`<option value="${ieEscape(v)}">${ieEscape(label || v)}</option>`);
+  };
+  if (iikoUnit) add(iikoUnit, `${iikoUnit} — ед. iiko`);
+  (containers || []).forEach(c => add(c.name, `${c.name} — фасовка ×${c.factor}${iikoUnit ? ' ' + iikoUnit : ''}`));
+  ['кг', 'г', 'шт', 'л', 'мл', 'уп', 'ящ', 'бут', 'порц'].forEach(u => add(u, u));
+  if (selectedUnit) add(selectedUnit, selectedUnit);
+  sel.innerHTML = opts.join('');
+  const want = (selectedUnit || iikoUnit || '').toString().trim().toLowerCase();
+  for (const o of sel.options) { if (o.value.toLowerCase() === want) { sel.value = o.value; break; } }
+}
+
+function ieSetUnitContext(iikoUnit, containers, debugKeys, selectedUnit) {
+  ieState._editUnitCtx = { iikoUnit: iikoUnit || '', containers: containers || [], debugKeys: debugKeys || [] };
+  iePopulateUnitSelect(selectedUnit, iikoUnit, containers);
+  ieShowIikoUnitHint(iikoUnit || '', document.getElementById('ie-edit-unit').value, containers, debugKeys);
+}
+
+function ieOnUnitChange() {
+  const ctx = ieState._editUnitCtx || {};
+  const sel = document.getElementById('ie-edit-unit');
+  ieShowIikoUnitHint(ctx.iikoUnit || '', sel ? sel.value : '', ctx.containers, ctx.debugKeys);
 }
 
 function ieSaveItem() {
@@ -4672,6 +4709,9 @@ async function ieSave() {
       if (resp.ok) {
         const num = resp.iiko_doc_number ? ` #${resp.iiko_doc_number}` : '';
         showToast(`✅ Создан черновик в iiko${num}`);
+        if (resp.had_comment && resp.comment_applied === false) {
+          showToast('⚠️ Комментарий iiko не принял — накладная создана без него');
+        }
         if (resp.unit_warnings && resp.unit_warnings.length) {
           showToast(`⚠️ Проверь единицы: ${resp.unit_warnings.slice(0,2).join('; ')}${resp.unit_warnings.length>2?'…':''}`);
         }

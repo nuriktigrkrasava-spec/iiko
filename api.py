@@ -2843,7 +2843,9 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         status="draft_in_iiko")
     _invalidate_cache("invoices", real_org)  # иначе список отдаёт старый 'ready' и нет кнопки «Провести»
     return {"ok": True, "iiko_doc_id": resp.get("id"), "iiko_doc_number": resp.get("number"),
-            "unit_warnings": unit_warnings}
+            "unit_warnings": unit_warnings,
+            "comment_applied": resp.get("comment_applied", False),
+            "had_comment": bool(payload.comment)}
 
 
 @app.post("/api/invoices/{invoice_id}/post")
@@ -3547,16 +3549,33 @@ def _reconcile_amount(it: Dict[str, Any]) -> Tuple[float, float, float, Optional
     total = float(it.get("total") or (qty * price_in))
     warning = None
     amount = qty
-    inv_u = _norm_unit(it.get("unit") or "")
-    iiko_u = _norm_unit(it.get("iiko_unit") or "")
-    if inv_u and iiko_u and inv_u != iiko_u:
-        factor = _UNIT_CONVERT.get((inv_u, iiko_u))
-        if factor:
-            amount = qty * factor
-        else:
-            warning = (f"{it.get('name', '—')}: в накладной «{it.get('unit')}», "
-                       f"в iiko «{it.get('iiko_unit')}»")
-    price_out = (total / amount) if amount else price_in
+    converted = False
+    inv_u_raw = (it.get("unit") or "").strip().lower().rstrip(".")
+    # 1) Фасовка: выбранная единица совпала с названием контейнера товара iiko
+    #    (ящик/мешок/упаковка) → количество = qty × коэффициент фасовки (в базовых ед.).
+    for c in (it.get("iiko_containers") or []):
+        cname = (c.get("name") or "").strip().lower()
+        cfactor = c.get("factor")
+        if cname and cfactor and cname == inv_u_raw:
+            amount = qty * float(cfactor)
+            converted = True
+            break
+    # 2) Иначе — безопасная конверсия г↔кг / мл↔л по единице товара iiko
+    if not converted:
+        inv_u = _norm_unit(it.get("unit") or "")
+        iiko_u = _norm_unit(it.get("iiko_unit") or "")
+        if inv_u and iiko_u and inv_u != iiko_u:
+            factor = _UNIT_CONVERT.get((inv_u, iiko_u))
+            if factor:
+                amount = qty * factor
+                converted = True
+            else:
+                warning = (f"{it.get('name', '—')}: в накладной «{it.get('unit')}», "
+                           f"в iiko «{it.get('iiko_unit')}»")
+    # Цену выводим из суммы ТОЛЬКО при реальной конвертации единицы. Без конвертации
+    # сохраняем исходное поведение (price_per_unit) — чтобы обычные накладные слать
+    # ровно как раньше и ничего не сломать.
+    price_out = (total / amount) if (converted and amount) else price_in
     return amount, price_out, total, warning
 
 

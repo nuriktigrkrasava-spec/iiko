@@ -45,6 +45,18 @@ def test_ml_to_l():
     print("  [OK] мл→л: 2000 мл → 2 л, цена выведена из суммы")
 
 
+def test_container_packaging_conversion():
+    # 2 ящика; товар в iiko в «шт», фасовка Ящик ×12 → 24 шт, цена из суммы
+    it = {"name": "Пиво", "quantity": 2, "unit": "Ящик", "iiko_unit": "шт",
+          "iiko_containers": [{"name": "Ящик", "factor": 12}],
+          "price_per_unit": 0, "total": 2400}
+    amount, price, total, warn = api._reconcile_amount(it)
+    assert _approx(amount, 24), f"amount={amount}, ждали 24 шт"
+    assert _approx(price, 100), f"price={price}, ждали 100 ₸/шт"
+    assert warn is None and _approx(amount * price, total)
+    print("  [OK] фасовка: 2 ящика → 24 шт (×12), цена из суммы")
+
+
 def test_unknown_mismatch_warns_and_keeps_qty():
     # ящик vs шт — фактор неизвестен: количество не трогаем, но предупреждаем
     it = {"name": "Пиво", "quantity": 3, "unit": "ящик", "iiko_unit": "шт",
@@ -67,6 +79,7 @@ def test_no_iiko_unit_backward_compat():
 if __name__ == "__main__":
     failed = 0
     for t in (test_same_unit_no_conversion, test_grams_to_kg, test_ml_to_l,
+              test_container_packaging_conversion,
               test_unknown_mismatch_warns_and_keeps_qty, test_no_iiko_unit_backward_compat):
         print(f"\n>>> {t.__name__}")
         try:

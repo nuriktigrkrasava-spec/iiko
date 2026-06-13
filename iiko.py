@@ -1383,85 +1383,87 @@ class IikoWebClient:
             datetime.now().strftime("BOT-%y%m%d-%H%M%S-") + secrets.token_hex(2)
         )
 
-        # Строим XML
-        root = ET.Element("document")
-        ET.SubElement(root, "documentNumber").text = str(doc_num)
-        ET.SubElement(root, "dateIncoming").text = dt_iso
-        ET.SubElement(root, "supplier").text = str(supplier_id)
-        ET.SubElement(root, "defaultStore").text = str(store_id)
-        ET.SubElement(root, "status").text = "NEW"
-        if comment:
-            ET.SubElement(root, "comment").text = str(comment)
-        items_el = ET.SubElement(root, "items")
-        for idx, it in enumerate(items or [], start=1):
-            ie = ET.SubElement(items_el, "item")
-            ET.SubElement(ie, "num").text = str(idx)
-            # iikoServer import ждёт <product> и <store> (НЕ <productId>/<storeId>),
-            # иначе 409 "Product is not found id=null" / 500 "склад позиции отличается".
-            # Подтверждено verify-curl к saya-co.iiko.it (2026-05-27): valid=true.
-            ET.SubElement(ie, "product").text = str(it.get("productId") or "")
-            ET.SubElement(ie, "amount").text = str(it.get("amount") or 0)
-            ET.SubElement(ie, "price").text = str(it.get("price") or 0)
-            ET.SubElement(ie, "sum").text = str(it.get("sum") or 0)
-            ET.SubElement(ie, "store").text = str(store_id)
-
-        xml_body = b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
+        def _build_xml(include_comment: bool) -> bytes:
+            root = ET.Element("document")
+            ET.SubElement(root, "documentNumber").text = str(doc_num)
+            ET.SubElement(root, "dateIncoming").text = dt_iso
+            ET.SubElement(root, "supplier").text = str(supplier_id)
+            ET.SubElement(root, "defaultStore").text = str(store_id)
+            ET.SubElement(root, "status").text = "NEW"
+            if include_comment and comment:
+                ET.SubElement(root, "comment").text = str(comment)
+            items_el = ET.SubElement(root, "items")
+            for idx, it in enumerate(items or [], start=1):
+                ie = ET.SubElement(items_el, "item")
+                ET.SubElement(ie, "num").text = str(idx)
+                # iikoServer import ждёт <product> и <store> (НЕ <productId>/<storeId>),
+                # иначе 409 "Product is not found id=null" / 500 "склад позиции отличается".
+                # Подтверждено verify-curl к saya-co.iiko.it (2026-05-27): valid=true.
+                ET.SubElement(ie, "product").text = str(it.get("productId") or "")
+                ET.SubElement(ie, "amount").text = str(it.get("amount") or 0)
+                ET.SubElement(ie, "price").text = str(it.get("price") or 0)
+                ET.SubElement(ie, "sum").text = str(it.get("sum") or 0)
+                ET.SubElement(ie, "store").text = str(store_id)
+            return b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
 
         token = await self._ensure_token()
-        try:
+
+        async def _post(xml_body: bytes) -> Dict[str, Any]:
+            import logging
             async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/documents/import/incomingInvoice",
                     params={"key": token},
                     headers={"Content-Type": "application/xml"},
-                    content=xml_body
-                )
-                if resp.status_code != 200:
-                    import logging
-                    # Диагностика: показываем productId каждой позиции и сколько пустых
-                    # (empty>0 => в items просочилась позиция без товара).
-                    pids = [str(it.get("productId") or "") for it in (items or [])]
-                    empty = sum(1 for p in pids if not p)
-                    logging.getLogger(__name__).warning(
-                        f"iikoWeb import/incomingInvoice {resp.status_code}: "
-                        f"body={resp.text[:500]} | items={len(items or [])} empty_productId={empty} "
-                        f"productIds={pids} | xml={xml_body[:3000]!r}"
-                    )
-                    return {"ok": False,
-                            "error": f"HTTP {resp.status_code}",
-                            "body": resp.text[:500]}
-                # Ответ — XML <documentValidationResult>: <valid> + (на успехе) documentId.
-                doc_id, num_out, valid_txt, err_txt = "", doc_num, "", ""
-                try:
-                    rroot = ET.fromstring(resp.text)
-                    for el in rroot.iter():
-                        tag = el.tag.split("}", 1)[-1]
-                        txt = (el.text or "").strip()
-                        if tag in ("documentId", "id") and txt:
-                            doc_id = txt
-                        elif tag == "documentNumber" and txt:
-                            num_out = txt
-                        elif tag == "valid" and txt:
-                            valid_txt = txt
-                        elif tag in ("errorMessage", "error", "message") and txt:
-                            err_txt = txt
-                except Exception:
-                    pass
-                # Успешный ответ iikoServer: <valid>true</valid> + documentNumber,
-                # documentId в ответе НЕ приходит. Ошибка — только valid=false.
-                if valid_txt.lower() == "false" or err_txt:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        f"iikoWeb incomingInvoice отклонена: valid={valid_txt!r} "
-                        f"err={err_txt!r} body={resp.text[:800]}"
-                    )
-                    return {"ok": False, "error": err_txt or "документ не прошёл валидацию",
-                            "body": resp.text[:500]}
-                # id в ответе на import пуст — дочитываем его по номеру из export,
-                # иначе позже невозможно провести документ (нет doc_id).
-                if not doc_id:
-                    doc_id = await self._resolve_incoming_doc_id(num_out, dt_iso[:10]) or ""
-                return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
+                    content=xml_body)
+            if resp.status_code != 200:
+                pids = [str(it.get("productId") or "") for it in (items or [])]
+                empty = sum(1 for p in pids if not p)
+                logging.getLogger(__name__).warning(
+                    f"iikoWeb import/incomingInvoice {resp.status_code}: "
+                    f"body={resp.text[:500]} | items={len(items or [])} empty_productId={empty} "
+                    f"productIds={pids} | xml={xml_body[:3000]!r}")
+                return {"ok": False, "error": f"HTTP {resp.status_code}", "body": resp.text[:500]}
+            # Ответ — XML <documentValidationResult>: <valid> + (на успехе) documentId.
+            doc_id, num_out, valid_txt, err_txt = "", doc_num, "", ""
+            try:
+                rroot = ET.fromstring(resp.text)
+                for el in rroot.iter():
+                    tag = el.tag.split("}", 1)[-1]
+                    txt = (el.text or "").strip()
+                    if tag in ("documentId", "id") and txt:
+                        doc_id = txt
+                    elif tag == "documentNumber" and txt:
+                        num_out = txt
+                    elif tag == "valid" and txt:
+                        valid_txt = txt
+                    elif tag in ("errorMessage", "error", "message") and txt:
+                        err_txt = txt
+            except Exception:
+                pass
+            if valid_txt.lower() == "false" or err_txt:
+                logging.getLogger(__name__).warning(
+                    f"iikoWeb incomingInvoice отклонена: valid={valid_txt!r} "
+                    f"err={err_txt!r} body={resp.text[:800]}")
+                return {"ok": False, "error": err_txt or "документ не прошёл валидацию",
+                        "body": resp.text[:500]}
+            if not doc_id:
+                doc_id = await self._resolve_incoming_doc_id(num_out, dt_iso[:10]) or ""
+            return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
+
+        try:
+            # Сначала пробуем С комментарием; если iiko отклонил (его XSD может не
+            # принимать <comment> здесь) — повторяем ТЕМ ЖЕ номером БЕЗ комментария.
+            # Накладная важнее комментария; дублей нет (при valid=false документ не
+            # создаётся). comment_applied показывает, попал ли комментарий в iiko.
+            attempts = [True, False] if comment else [False]
+            last: Dict[str, Any] = {"ok": False, "error": "no attempt"}
+            for include_comment in attempts:
+                last = await _post(_build_xml(include_comment))
+                if last.get("ok"):
+                    last["comment_applied"] = bool(include_comment and comment)
+                    return last
+            return last
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
