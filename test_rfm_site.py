@@ -1,17 +1,19 @@
 """Локальные мини-тесты для сайта /rfm. Запуск: .venv/bin/python test_rfm_site.py
-В iiko не ходим — get_all_restaurants и данные подменяются."""
+В iiko не ходим — get_all_restaurants и данные подменяются.
+Логика и рендер живут в rfm.py; роут /rfm — в api.py."""
 import api
+import rfm
 from datetime import date
 
 
 def test_astana_filter():
-    api.get_all_restaurants = lambda: [
+    rfm.get_all_restaurants = lambda: [
         {"organization_name": "Астана, ул. Бокейхана 25а", "api_login": "x"},
         {"organization_name": "Астана, ул. Сыганак 11 (Жагалау)", "api_login": "x"},
         {"organization_name": "Актау, 12 микрорайон 30а", "api_login": "x"},
         {"organization_name": "Костанай, ул. Абая 153", "api_login": "x"},
     ]
-    out = api._astana_restaurants()
+    out = rfm._astana_restaurants()
     names = [r["organization_name"] for r in out]
     assert len(out) == 2, names
     assert all(n.lower().startswith("астана") for n in names), names
@@ -28,7 +30,7 @@ def test_aggregate_clients():
         # phone C: 0 заказов — отбросить строку
         {"Delivery.CustomerPhone": "+7 701 000 0003", "OpenDate.Typed": "2026-06-08", "UniqOrderId.OrdersCount": 0, "DishDiscountSumInt": 0},
     ]
-    agg = api._aggregate_clients(rows, today)
+    agg = rfm._aggregate_clients(rows, today)
     assert len(agg) == 1, list(agg)
     a = next(iter(agg.values()))
     assert a["orders_total"] == 2 and a["spend_total"] == 8000, a
@@ -50,7 +52,7 @@ def test_rfm_segments():
         "atrisk":  _agg(0, 0.0,   5,  "2026-05-01"),   # R~43, был частый -> at_risk
         "lost":    _agg(0, 0.0,   1,  "2026-01-10"),   # R 90+ -> lost
     }
-    out = api._rfm_by_thresholds(agg, today)
+    out = rfm._rfm_by_thresholds(agg, today)
     got = {s["key"]: s["count"] for s in out["segments"]}
     assert out["total"] == 6, out
     for k in ("champions", "loyal", "big_rare", "new", "at_risk", "lost"):
@@ -66,33 +68,11 @@ def test_branch_stats():
         {"Delivery.CustomerPhone": "+7 701 000 0001", "OpenDate.Typed": "2026-06-10", "UniqOrderId.OrdersCount": 2, "DishDiscountSumInt": 10000},
         {"Delivery.CustomerPhone": "+7 701 000 0002", "OpenDate.Typed": "2026-06-09", "UniqOrderId.OrdersCount": 1, "DishDiscountSumInt": 4000},
     ]
-    st = api._branch_stats(rows, today)
+    st = rfm._branch_stats(rows, today)
     assert st["clients"] == 2, st
     assert st["revenue"] == 14000, st
     assert st["repeat_pct"] == 50, st      # 1 из 2 клиентов с 2+ заказами
     assert st["ltv"] == 7000, st
-
-
-def test_render_html():
-    report = {
-        "date": "2026-06-13",
-        "kpi": {"clients": 1234, "revenue": 9000000, "ltv": 7300, "repeat_pct": 41},
-        "rfm": {"total": 1234, "segments": [
-            {"key": "champions", "emoji": "🏆", "label": "Чемпионы", "count": 142, "pct": 12,
-             "revenue": 3000000, "action": "беречь, без скидок", "example": "Первыми пробуете новинку"},
-        ]},
-        "branches": [
-            {"name": "Астана, ул. Бокейхана 25а", "clients": 300, "revenue": 2000000, "repeat_pct": 44, "ltv": 6600},
-        ],
-    }
-    html = api._render_rfm_html(report)
-    assert "<html" in html.lower()
-    assert "RFM" in html and "Астана" in html
-    assert "Чемпионы" in html and "беречь, без скидок" in html
-    assert "Бокейхана" in html                       # таблица филиалов
-    assert "Уснувшие VIP" in html                    # блок идей
-    assert "Челлендж" in html or "челлендж" in html  # блок идей
-    assert "приложени" in html                       # миграция в приложение
 
 
 def test_cohort_retention():
@@ -104,7 +84,7 @@ def test_cohort_retention():
         # клиент 2: только янв
         {"Delivery.CustomerPhone":"+7 700 000 0002","OpenDate.Typed":"2026-01-20","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
     ]
-    c = api._cohort_retention(rows, today, max_m=2)
+    c = rfm._cohort_retention(rows, today, max_m=2)
     jan = next(x for x in c["cohorts"] if x["month"] == "2026-01")
     assert jan["size"] == 2
     assert jan["ret"][0] == 100            # M0 — все
@@ -125,7 +105,7 @@ def test_branch_top_products():
                 {"DishName": "Суп мисо", "DishCount": 5},
                 {"DishName": "Соус", "DishCount": 2},
             ]}
-    out = asyncio.run(api._branch_top_products(FakeClient(), "Астана X", "2026-01-01", "2026-06-13", n=5))
+    out = asyncio.run(rfm._branch_top_products(FakeClient(), "Астана X", "2026-01-01", "2026-06-13", n=5))
     assert [x["name"] for x in out["top"]][:2] == ["Филадельфия", "Калифорния"]
     assert len(out["top"]) == 5
     assert out["bottom"][0]["name"] == "Соус"        # самый редкий первым
@@ -136,27 +116,49 @@ def test_reviews_by_branch():
     import asyncio, reviews as rv
     rests = [{"organization_id": "ORG-A", "organization_name": "Астана, ул. Бокейхана 25а"}]
     rv.discover_2gis = lambda name, brand=None: {"__await__": None}  # не вызовется (link есть)
-    api.get_review_link = lambda org, plat: {"external_id": "br-1"}
+    rfm.get_review_link = lambda org, plat: {"external_id": "br-1"}
     async def fake_fetch(bid): return {"rating": 4.7, "reviews": [{"text": "Очень вкусная Филадельфия!"}, {"text": "Долго везли"}]}
     rv.fetch_2gis = fake_fetch
     async def fake_claude(q, ctx, org): return "👍 Хвалят: Филадельфия\n👎 Недовольны: долгая доставка"
-    api.analyze_with_claude = fake_claude
-    out = asyncio.run(api._reviews_by_branch(rests))
+    rfm.analyze_with_claude = fake_claude
+    out = asyncio.run(rfm._reviews_by_branch(rests))
     assert len(out) == 1 and out[0]["name"].startswith("Астана")
     assert "Филадельфия" in out[0]["summary"] and out[0]["rating"] == 4.7
+
+
+def test_render_html():
+    report = {
+        "date": "2026-06-13",
+        "kpi": {"clients": 1234, "revenue": 9000000, "ltv": 7300, "repeat_pct": 41},
+        "rfm": {"total": 1234, "segments": [
+            {"key": "champions", "emoji": "🏆", "label": "Чемпионы", "count": 142, "pct": 12,
+             "revenue": 3000000, "action": "беречь, без скидок", "example": "Первыми пробуете новинку"},
+        ]},
+        "branches": [
+            {"name": "Астана, ул. Бокейхана 25а", "clients": 300, "revenue": 2000000, "repeat_pct": 44, "ltv": 6600},
+        ],
+    }
+    html = rfm._render_rfm_html(report)
+    assert "<html" in html.lower()
+    assert "RFM" in html and "Астана" in html
+    assert "Чемпионы" in html and "беречь, без скидок" in html
+    assert "Бокейхана" in html                       # таблица филиалов
+    assert "Уснувшие VIP" in html                    # блок идей
+    assert "Челлендж" in html or "челлендж" in html  # блок идей
+    assert "приложени" in html                       # миграция в приложение
 
 
 def test_render_edu():
     report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
               "rfm":{"total":1,"segments":[]},"branches":[]}
-    html = api._render_rfm_html(report)
+    html = rfm._render_rfm_html(report)
     for s in ("Когортный анализ", "CLV", "+67%", "Прогноз оттока", "Dynamic Yield", "AI Factory"):
         assert s in html, s
 
 
 def test_rfm_route_access():
     from fastapi.testclient import TestClient
-    api.get_all_restaurants = lambda: []     # пустой список → роут не ходит в iiko
+    rfm.get_all_restaurants = lambda: []     # пустой список → build_report не ходит в iiko
     client = TestClient(api.app)
 
     api.RFM_SITE_KEY = ""                     # ключ не задан → 404
