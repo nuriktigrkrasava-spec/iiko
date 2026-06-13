@@ -149,6 +149,19 @@ def _set_cached(key: str, value: Any):
     _cache_time[key] = now
 
 
+def _invalidate_cache(endpoint: str, org_id: str):
+    """Сбросить кэш эндпойнта по org у ВСЕХ пользователей и периодов.
+    Вызывать после мутаций накладной (создание черновика / проведение /
+    распроведение): иначе /api/invoices отдаёт устаревший статус из кэша
+    (TTL 3 мин) и кнопка действия не обновляется. Ключ: user:endpoint:org:period,
+    поэтому ищем по подстроке `:endpoint:org:` (с хвостовым `:` — чтобы org-1
+    не цеплял org-12)."""
+    needle = f":{endpoint}:{org_id}:"
+    for k in [k for k in list(_cache) if needle in k]:
+        _cache.pop(k, None)
+        _cache_time.pop(k, None)
+
+
 def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
     if not BOT_TOKEN:
         return {"id": 0, "username": "dev", "first_name": "Developer"}
@@ -2771,6 +2784,7 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
 
     if unmatched:
         update_bot_invoice(invoice_id, status="needs_mapping")
+        _invalidate_cache("invoices", real_org)
         return {"ok": False, "unmatched": unmatched,
                 "error": f"Не сопоставлено {len(unmatched)} позиций — выбери товар iiko для каждой"}
 
@@ -2783,10 +2797,12 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         )
     except Exception as e:
         update_bot_invoice(invoice_id, status="iiko_error")
+        _invalidate_cache("invoices", real_org)
         raise HTTPException(status_code=502, detail=f"iiko: {e}")
 
     if not resp.get("ok"):
         update_bot_invoice(invoice_id, status="iiko_error")
+        _invalidate_cache("invoices", real_org)
         err = resp.get("error", "unknown")
         body_txt = resp.get("body") or ""
         if body_txt:
@@ -2797,6 +2813,7 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         iiko_doc_id=resp.get("id") or "",
         iiko_doc_number=resp.get("number") or "",
         status="draft_in_iiko")
+    _invalidate_cache("invoices", real_org)  # иначе список отдаёт старый 'ready' и нет кнопки «Провести»
     return {"ok": True, "iiko_doc_id": resp.get("id"), "iiko_doc_number": resp.get("number")}
 
 
@@ -2828,6 +2845,7 @@ async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_use
     if not resp.get("ok"):
         raise HTTPException(status_code=502, detail=resp.get("error") or "iiko error")
     update_bot_invoice(invoice_id, status="posted")
+    _invalidate_cache("invoices", real_org)  # чтобы появилась кнопка «Распровести»
     return {"ok": True}
 
 
@@ -2851,6 +2869,7 @@ async def invoice_unpost_doc(invoice_id: int, user: Dict = Depends(get_current_u
     if not resp.get("ok"):
         raise HTTPException(status_code=502, detail=resp.get("error") or "iiko error")
     update_bot_invoice(invoice_id, status="draft_in_iiko")
+    _invalidate_cache("invoices", real_org)  # чтобы вернулась кнопка «Провести»
     return {"ok": True}
 
 
