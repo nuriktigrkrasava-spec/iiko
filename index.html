@@ -740,24 +740,6 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           </table>
         </div>
       </div>
-      <div class="card" style="margin-top:16px;">
-        <div class="card-header">
-          <div>
-            <div class="card-title">Выручка по типам оплаты</div>
-            <div class="card-subtitle">Сходится с кассой 1:1 · на какой счёт ушли деньги</div>
-          </div>
-        </div>
-        <div class="subtabs" style="margin-bottom:12px">
-          <div class="subtab active" id="pay-view-type" onclick="setPayView('type', this)">Тип оплаты</div>
-          <div class="subtab" id="pay-view-account" onclick="setPayView('account', this)">Счёт</div>
-        </div>
-        <div class="table-container">
-          <table class="data-table" id="paytypes-table">
-            <thead><tr><th id="paytypes-col">Тип оплаты</th><th>Выручка</th><th>Доля</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
       <div class="card">
         <div class="card-header">
           <div class="card-title">Топ блюд по выручке</div>
@@ -2696,31 +2678,8 @@ function renderClients(data) {
   const wrap = document.getElementById('clients-cards');
   const s = data.segments;
   if (!s) { wrap.innerHTML = ''; return; }
-  const n = v => (v || 0).toLocaleString('ru');
-  // Карточка-сегмент: тап раскрывает показатели/пояснение
-  const seg = (i, label, value, sub, color, detail) => `
-    <div class="seg-card">
-      <div class="seg-label">${label}</div>
-      <div class="seg-value" style="color:${color}">${value}</div>
-      <div class="seg-sub">${sub}</div>
-    </div>`;
-  const total = s.total || 0;
-  let html = `<div class="seg-grid">
-    ${seg(0, 'Уникальные', n(s.unique.count), s.unique.pct + '% · 1 заказ', 'var(--text)',
-      `${n(s.unique.count)} клиентов заказали 1 раз (${s.unique.pct}% от ${n(total)}). Цель — вернуть на 2-й заказ.`)}
-    ${seg(1, 'Лояльные', n(s.loyal.count), s.loyal.pct + '% · 2+ заказа', '#34C759',
-      `${n(s.loyal.count)} клиентов с 2+ заказами. Принесли <b>${formatMoney(s.loyal_revenue)}</b>. Могут принести ещё <b style="color:#34C759">+${formatMoney(s.loyal_potential)}</b>, если довести до 10 заказов.`)}
-    ${seg(2, 'VIP', n(s.vip.count), s.vip.pct + '% · 10+ заказов', '#5B9CF6',
-      `${n(s.vip.count)} клиентов с 10+ заказами (${s.vip.pct}%). Самые ценные — удерживать персонально.`)}
-    ${seg(3, 'Повторные', s.repeat_pct + '%', 'клиентов с 2+', '#FF9F0A',
-      `${s.repeat_pct}% клиентов возвращаются (2+ заказа). Чем выше — тем стабильнее выручка.`)}
-  </div>
-  <div class="seg-grid" style="margin-top:10px">
-    ${seg(4, 'Ср. LTV', formatMoney(s.ltv), 'на клиента', 'var(--text)',
-      `В среднем один клиент принёс <b>${formatMoney(s.ltv)}</b> за период.`)}
-    ${seg(5, 'Выручка с клиентов', formatMoney(s.revenue), 'за период', 'var(--text)',
-      `Всего <b>${formatMoney(s.revenue)}</b> от ${n(total)} клиентов за период.`)}
-  </div>`;
+  // Оставляем только карточку RFM-сегментов
+  let html = '';
   if (data.rfm && data.rfm.segments && data.rfm.segments.length) {
     html += `<div class="card" style="margin-top:12px">
       <div class="card-title" style="margin-bottom:4px">RFM-сегменты</div>
@@ -2732,17 +2691,6 @@ function renderClients(data) {
             <div class="seg-value">${(x.count||0).toLocaleString('ru')}</div>
             <div class="seg-sub">${x.pct}%${x.revenue ? ' · ' + formatMoney(x.revenue) : ''}</div>
           </div>`).join('')}
-      </div>
-    </div>`;
-  }
-  if (data.top_vip && data.top_vip.length) {
-    html += `<div class="card" style="margin-top:12px">
-      <div class="card-title" style="margin-bottom:8px">Топ клиенты</div>
-      <div class="table-container">
-        <table class="data-table" style="min-width:0">
-          <thead><tr><th>Клиент</th><th class="num">Заказов</th><th class="num">Сумма</th></tr></thead>
-          <tbody>${data.top_vip.map((v, idx) => `<tr><td class="name">Гость ${idx + 1}</td><td class="num">${v.orders}</td><td class="num">${formatMoney(v.spend)}</td></tr>`).join('')}</tbody>
-        </table>
       </div>
     </div>`;
   }
