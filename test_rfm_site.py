@@ -95,6 +95,23 @@ def test_render_html():
     assert "приложени" in html                       # миграция в приложение
 
 
+def test_cohort_retention():
+    today = date(2026, 6, 13)
+    rows = [
+        # клиент 1: первый заказ янв, вернулся фев
+        {"Delivery.CustomerPhone":"+7 700 000 0001","OpenDate.Typed":"2026-01-10","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+        {"Delivery.CustomerPhone":"+7 700 000 0001","OpenDate.Typed":"2026-02-15","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+        # клиент 2: только янв
+        {"Delivery.CustomerPhone":"+7 700 000 0002","OpenDate.Typed":"2026-01-20","UniqOrderId.OrdersCount":1,"DishDiscountSumInt":1},
+    ]
+    c = api._cohort_retention(rows, today, max_m=2)
+    jan = next(x for x in c["cohorts"] if x["month"] == "2026-01")
+    assert jan["size"] == 2
+    assert jan["ret"][0] == 100            # M0 — все
+    assert jan["ret"][1] == 50             # M1 (фев) — вернулся 1 из 2
+    assert jan["ret"][2] == 0              # M2 (мар) — никто
+
+
 def test_render_edu():
     report = {"date":"2026-06-13","kpi":{"clients":1,"revenue":1,"ltv":1,"repeat_pct":1},
               "rfm":{"total":1,"segments":[]},"branches":[]}
@@ -123,7 +140,7 @@ def test_rfm_route_access():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html, test_render_edu, test_rfm_route_access):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_cohort_retention, test_render_html, test_render_edu, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()

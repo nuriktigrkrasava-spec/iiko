@@ -563,6 +563,7 @@ async def rfm_site(key: str = ""):
                 "repeat_pct": round(repeat / total * 100) if total else 0},
         "rfm": _rfm_by_thresholds(agg, today),
         "branches": sorted(branches, key=lambda b: -b["revenue"]),
+        "cohort": _cohort_retention(all_rows, today),
     }
     return HTMLResponse(_render_rfm_html(report))
 
@@ -2287,6 +2288,37 @@ def _branch_stats(rows, today):
             "ltv": round(revenue / total) if total else 0}
 
 
+def _cohort_retention(rows, today, max_m=4):
+    """По сырым строкам olap_clients_rfm: когорты по месяцу первого заказа и
+    удержание M0..max_m (% когорты с заказом в соответствующем месяце)."""
+    by_phone = {}
+    for d in rows:
+        ph = _norm_phone(d.get("Delivery.CustomerPhone") or "")
+        if not ph or int(d.get("UniqOrderId.OrdersCount") or 0) <= 0:
+            continue
+        m = (d.get("OpenDate.Typed") or "")[:7]
+        if m:
+            by_phone.setdefault(ph, set()).add(m)
+    cohorts = {}
+    for ph, months in by_phone.items():
+        cohorts.setdefault(min(months), []).append(months)
+
+    def month_add(ym, k):
+        y, mo = int(ym[:4]), int(ym[5:7])
+        mo += k; y += (mo - 1) // 12; mo = (mo - 1) % 12 + 1
+        return f"{y:04d}-{mo:02d}"
+
+    cur = today.strftime("%Y-%m")
+    out = []
+    for cm in sorted(cohorts):
+        custs = cohorts[cm]; size = len(custs); ret = []
+        for k in range(max_m + 1):
+            mk = month_add(cm, k)
+            ret.append(None if mk > cur else (round(sum(1 for s in custs if mk in s) / size * 100) if size else 0))
+        out.append({"month": cm, "size": size, "ret": ret})
+    return {"cohorts": out, "max_m": max_m}
+
+
 def _render_rfm_html(report):
     k = report["kpi"]
     nf = lambda v: f"{int(v):,}".replace(",", " ")
@@ -2350,6 +2382,16 @@ def _render_rfm_html(report):
     <p><b>Каналы захода:</b> QR на коробках/чеках/столах → подарок за 1-й заказ · скрипт курьера/кассира · постепенный перенос лучших офферов из WhatsApp/Instagram в push.</p>
     <p class="tip">Экономика: push ≈ бесплатно, WhatsApp/SMS — деньги за каждое касание. Каждый переведённый клиент дешевле в обслуживании и даёт больше данных для RFM.</p>
     '''
+    cohort = report.get("cohort") or {"cohorts": [], "max_m": 4}
+    if cohort["cohorts"]:
+        head = "".join(f"<th>М{k}</th>" for k in range(cohort["max_m"] + 1))
+        crows = "".join(
+            f'<tr><td>{c["month"]}</td><td>{c["size"]}</td>' +
+            "".join(f'<td>{"—" if v is None else str(v)+"%"}</td>' for v in c["ret"]) + "</tr>"
+            for c in cohort["cohorts"])
+        cohort_html = f'<h2>📈 Удержание когорт (по месяцу 1-го заказа)</h2><table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
+    else:
+        cohort_html = ""
     edu = '''
     <h2>📊 Что ещё считаем (методы)</h2>
 
@@ -2404,6 +2446,7 @@ def _render_rfm_html(report):
   <div class="segs">{seg_cards}</div>
   <h2>🏪 По филиалам Астаны</h2>
   <table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>{branch_rows}</table>
+  {cohort_html}
   {ideas}
   {edu}
 </body></html>'''
