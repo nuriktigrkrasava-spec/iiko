@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -37,10 +37,8 @@ from database import (
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
     get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
-    get_review_link, set_review_link,
 )
 from iiko import IikoClient, get_client
-import rfm
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -99,7 +97,6 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
-RFM_SITE_KEY = os.getenv("RFM_SITE_KEY", "")
 
 # Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
 # Сервер на Render работает в UTC, поэтому «сегодня» считаем по локальному времени.
@@ -524,18 +521,6 @@ async def root():
     # новые правки фронта (показывал старую выручку из старого index.html).
     return FileResponse("index.html",
                         headers={"Cache-Control": "no-store, must-revalidate"})
-
-
-@app.get("/rfm")
-async def rfm_site(key: str = ""):
-    """Витрина RFM по филиалам Астаны. Доступ по ?key=RFM_SITE_KEY.
-    Вся логика и рендер — в модуле rfm.py (вёрстка в rfm_template.html)."""
-    if not RFM_SITE_KEY:
-        raise HTTPException(status_code=404, detail="Not found")
-    if key != RFM_SITE_KEY:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    report = await rfm.build_report(local_now().date())
-    return HTMLResponse(rfm.render(report))
 
 
 @app.post("/api/setup/validate")
@@ -2150,7 +2135,6 @@ def _norm_phone(s: str) -> Optional[str]:
     s = (s or "").split(",")[0]
     d = re.sub(r"\D", "", s)
     return d[-10:] if len(d) >= 10 else None
-
 
 
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
