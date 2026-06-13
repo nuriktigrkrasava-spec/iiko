@@ -2,6 +2,7 @@
 import httpx
 import asyncio
 import hashlib
+import re
 import secrets
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, date
@@ -1401,8 +1402,7 @@ class IikoWebClient:
                 except Exception:
                     pass
                 # Успешный ответ iikoServer: <valid>true</valid> + documentNumber,
-                # documentId в ответе НЕ приходит (подтверждено логами 2026-06-12) —
-                # это норма, накладная создана. Ошибка — только valid=false.
+                # documentId в ответе НЕ приходит. Ошибка — только valid=false.
                 if valid_txt.lower() == "false" or err_txt:
                     import logging
                     logging.getLogger(__name__).warning(
@@ -1411,9 +1411,35 @@ class IikoWebClient:
                     )
                     return {"ok": False, "error": err_txt or "документ не прошёл валидацию",
                             "body": resp.text[:500]}
+                # id в ответе на import пуст — дочитываем его по номеру из export,
+                # иначе позже невозможно провести документ (нет doc_id).
+                if not doc_id:
+                    doc_id = await self._resolve_incoming_doc_id(num_out, dt_iso[:10]) or ""
                 return {"ok": True, "id": doc_id, "number": num_out, "raw": resp.text[:500]}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    async def _resolve_incoming_doc_id(self, number: str, date: str) -> Optional[str]:
+        """Находит documentId входящей накладной по её номеру за дату через
+        documents/export (export отдаёт и черновики со <id>, в отличие от OLAP).
+        Нужно потому, что import/incomingInvoice не возвращает id в ответе."""
+        if not number:
+            return None
+        try:
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/documents/export/incomingInvoice",
+                    params={"key": token, "from": date, "to": date})
+                if resp.status_code != 200:
+                    return None
+                for block in re.findall(r"<document>(.*?)</document>", resp.text, re.S):
+                    if f"<documentNumber>{number}</documentNumber>" in block:
+                        m = re.search(r"<id>(.*?)</id>", block)
+                        return m.group(1) if m else None
+        except Exception:
+            return None
+        return None
 
     async def set_document_status(self, org_id: str, document_id: str,
                                    status: str) -> Dict[str, Any]:

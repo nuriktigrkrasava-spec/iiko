@@ -2808,13 +2808,21 @@ async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_use
         raise HTTPException(status_code=404, detail="Invoice not found")
     if inv.get("telegram_id") != user.get("id"):
         raise HTTPException(status_code=403, detail="Not your invoice")
-    if not inv.get("iiko_doc_id"):
-        raise HTTPException(status_code=400, detail="Накладная не создана в iiko (нет doc_id)")
     real_org = _get_org_id(inv["organization_id"], user)
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    # id мог не сохраниться при создании (import не возвращает documentId) —
+    # дочитываем его по номеру с сервера, иначе провести нечего.
+    doc_id = inv.get("iiko_doc_id")
+    if not doc_id and inv.get("iiko_doc_number") and hasattr(client, "_resolve_incoming_doc_id"):
+        date_part = (inv.get("date") or "")[:10]
+        doc_id = await client._resolve_incoming_doc_id(inv["iiko_doc_number"], date_part)
+        if doc_id:
+            update_bot_invoice(invoice_id, iiko_doc_id=doc_id)
+    if not doc_id:
+        raise HTTPException(status_code=400, detail="Накладная не создана в iiko (нет doc_id)")
     try:
-        resp = await client.set_document_status(real_org, inv["iiko_doc_id"], "PROCESSED")
+        resp = await client.set_document_status(real_org, doc_id, "PROCESSED")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"iiko: {e}")
     if not resp.get("ok"):
