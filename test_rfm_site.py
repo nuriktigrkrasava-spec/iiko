@@ -73,9 +73,31 @@ def test_branch_stats():
     assert st["ltv"] == 7000, st
 
 
+def test_render_html():
+    report = {
+        "date": "2026-06-13",
+        "kpi": {"clients": 1234, "revenue": 9000000, "ltv": 7300, "repeat_pct": 41},
+        "rfm": {"total": 1234, "segments": [
+            {"key": "champions", "emoji": "🏆", "label": "Чемпионы", "count": 142, "pct": 12,
+             "revenue": 3000000, "action": "беречь, без скидок", "example": "Первыми пробуете новинку"},
+        ]},
+        "branches": [
+            {"name": "Астана, ул. Бокейхана 25а", "clients": 300, "revenue": 2000000, "repeat_pct": 44, "ltv": 6600},
+        ],
+    }
+    html = api._render_rfm_html(report)
+    assert "<html" in html.lower()
+    assert "RFM" in html and "Астана" in html
+    assert "Чемпионы" in html and "беречь, без скидок" in html
+    assert "Бокейхана" in html                       # таблица филиалов
+    assert "Уснувшие VIP" in html                    # блок идей
+    assert "Челлендж" in html or "челлендж" in html  # блок идей
+    assert "приложени" in html                       # миграция в приложение
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html):
         print(f"\n>>> {t.__name__}")
         try:
             t()

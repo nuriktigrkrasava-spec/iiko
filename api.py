@@ -2243,6 +2243,106 @@ def _branch_stats(rows, today):
             "ltv": round(revenue / total) if total else 0}
 
 
+def _render_rfm_html(report):
+    k = report["kpi"]
+    nf = lambda v: f"{int(v):,}".replace(",", " ")
+    seg_cards = "".join(
+        f'''<div class="seg">
+          <div class="seg-h">{s["emoji"]} {s["label"]}</div>
+          <div class="seg-n">{nf(s["count"])} <span class="muted">· {s["pct"]}%</span></div>
+          <div class="muted">{nf(s["revenue"])} ₸</div>
+          <div class="act">→ {s["action"]}</div>
+          <div class="ex">«{s["example"]}»</div>
+        </div>'''
+        for s in report["rfm"]["segments"]
+    )
+    branch_rows = "".join(
+        f'<tr><td>{b["name"]}</td><td>{nf(b["clients"])}</td><td>{nf(b["revenue"])} ₸</td>'
+        f'<td>{b["repeat_pct"]}%</td><td>{nf(b["ltv"])} ₸</td></tr>'
+        for b in report["branches"]
+    )
+    ideas = '''
+    <h2>💡 Идеи (из плейбука «Тактика»)</h2>
+
+    <h3>😴 Уснувшие VIP — самое ценное</h3>
+    <p>Бывший Чемпион с высоким чеком, но 60–90+ дней тишины. Правило: <b>персональный подход, НЕ массовая скидка</b> — его уводят вниманием.</p>
+    <ul>
+      <li>🤝 Личное касание «от менеджера», не безличная рассылка.</li>
+      <li>🎁 Любимое блюдо в подарок (топ-ролл из истории iiko).</li>
+      <li>👑 Вернуть статус/баллы: «сгорают через 7 дней — заберите».</li>
+      <li>🚪 Эксклюзив: закрытая дегустация новинки.</li>
+      <li>❓ Спросить, почему ушёл — часто причина в качестве/доставке.</li>
+    </ul>
+    <p class="tip"><b>Лестница возврата:</b> День 30 — мягко («скучаем» + маленький бонус) · День 45 — подарок-блюдо · День 60 — максимум (большой бонус + статус). Не давать максимум сразу — приучает уходить ради скидки.</p>
+
+    <h3>🗂️ Что делать с каждым сегментом</h3>
+    <table>
+      <tr><th>Сегмент</th><th>Действие</th><th>Пример сообщения</th></tr>
+      <tr><td>🏆 Активные VIP</td><td>беречь, без скидок</td><td>«Вы в числе первых пробуете новый сет 🔥»</td></tr>
+      <tr><td>😴 Уснувшие VIP</td><td>персональный возврат</td><td>«Ваш любимый [ролл] — в подарок»</td></tr>
+      <tr><td>💛 Лояльные</td><td>апселл, ↑ чек</td><td>«К вашему сету — мисо+напиток за полцены»</td></tr>
+      <tr><td>🌱 Новички</td><td>онбординг до 3-го заказа</td><td>«−15% на 2-й заказ, 7 дней»</td></tr>
+      <tr><td>⚠️ At-risk</td><td>win-back, окно открыто</td><td>«Давно не виделись — сет −20%»</td></tr>
+      <tr><td>⚰️ Ушедшие</td><td>последний шанс или отпустить</td><td>«Последнее предложение: 1+1 на роллы»</td></tr>
+      <tr><td>💸 Редкие крупные</td><td>повод заходить чаще</td><td>подписка «Сет недели»</td></tr>
+      <tr><td>🌙 Спящие новички</td><td>не дать стать ушедшими</td><td>«Помните нас? Вот повод вернуться»</td></tr>
+    </table>
+
+    <h3>🎮 Челленджи в приложение</h3>
+    <ul>
+      <li>🔥 Стрик: 3 недели подряд заказ → бонусный ролл.</li>
+      <li>📅 «Суши-пятница»: ×2 баллов в выбранный день.</li>
+      <li>🏅 Коллекция: попробуй 5 авторских сетов → бейдж + подарок.</li>
+      <li>🎯 Личный челлендж под сегмент: «2 заказа на неделе → бонус».</li>
+      <li>👥 Реферальный: приведи друга → награда обоим.</li>
+      <li>🎉 Сезонные: Наурыз, Новый год, день рождения сети (FOMO).</li>
+      <li>🎰 Mystery box / колесо при заказе через приложение.</li>
+      <li>🥉🥈🥇 Уровни: Бронза → Серебро → Золото, привилегии растут.</li>
+    </ul>
+    <p class="tip">Челлендж = ещё один заказ ради цели, без прямой скидки: маржа цела, частота растёт. Живут только в приложении → это и инструмент миграции.</p>
+
+    <h3>📲 Перевести поток в приложение</h3>
+    <p><b>Пряник:</b> лучшая цена только в приложении · баллы копятся только там · челленджи и уровни · новинки сначала в приложении · заказ в 1 клик (сохранённый адрес и любимый заказ).</p>
+    <p><b>Каналы захода:</b> QR на коробках/чеках/столах → подарок за 1-й заказ · скрипт курьера/кассира · постепенный перенос лучших офферов из WhatsApp/Instagram в push.</p>
+    <p class="tip">Экономика: push ≈ бесплатно, WhatsApp/SMS — деньги за каждое касание. Каждый переведённый клиент дешевле в обслуживании и даёт больше данных для RFM.</p>
+    '''
+    return f'''<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RFM клиентов · Астана</title>
+<style>
+  :root {{ --bg:#0f1115; --card:#1a1d24; --fg:#e8eaed; --muted:#9aa0a6; --accent:#5B9CF6; }}
+  *{{box-sizing:border-box}} body{{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,system-ui,sans-serif;padding:20px;max-width:900px;margin:0 auto;line-height:1.5}}
+  h1{{font-size:22px;margin:0 0 2px}} .sub{{color:var(--muted);font-size:13px;margin-bottom:18px}}
+  .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}}
+  .kpi{{background:var(--card);border-radius:12px;padding:12px}} .kpi .v{{font-size:20px;font-weight:600}}
+  .kpi .l{{color:var(--muted);font-size:12px}}
+  .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:22px}}
+  .seg{{background:var(--card);border-radius:12px;padding:12px}} .seg-h{{font-weight:600;margin-bottom:4px}}
+  .seg-n{{font-size:18px}} .act{{color:var(--accent);font-size:13px;margin-top:6px}}
+  .ex{{color:var(--muted);font-size:12px;font-style:italic;margin-top:2px}}
+  .muted{{color:var(--muted)}} table{{width:100%;border-collapse:collapse;margin:8px 0 22px;font-size:14px}}
+  th,td{{text-align:left;padding:7px 8px;border-bottom:1px solid #262a33}} th{{color:var(--muted);font-weight:500}}
+  td:nth-child(n+2),th:nth-child(n+2){{text-align:right}}
+  h2{{font-size:18px;margin:26px 0 8px}} h3{{font-size:15px;margin:18px 0 6px}}
+  ul{{margin:6px 0;padding-left:20px}} li{{margin:3px 0}}
+  .tip{{background:var(--card);border-left:3px solid var(--accent);padding:8px 12px;border-radius:8px;font-size:13px}}
+</style></head><body>
+  <h1>RFM клиентов · филиалы Астаны</h1>
+  <div class="sub">доставка iiko · последние 180 дней · {report["date"]}</div>
+  <div class="kpis">
+    <div class="kpi"><div class="v">{nf(k["clients"])}</div><div class="l">клиентов</div></div>
+    <div class="kpi"><div class="v">{nf(k["revenue"])} ₸</div><div class="l">выручка с клиентов</div></div>
+    <div class="kpi"><div class="v">{nf(k["ltv"])} ₸</div><div class="l">средний LTV</div></div>
+    <div class="kpi"><div class="v">{k["repeat_pct"]}%</div><div class="l">повторных (2+)</div></div>
+  </div>
+  <div class="segs">{seg_cards}</div>
+  <h2>🏪 По филиалам Астаны</h2>
+  <table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>{branch_rows}</table>
+  {ideas}
+</body></html>'''
+
+
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
     """agg {phone: {orders, spend}} → (segments, top_vip)."""
     total = len(agg)
