@@ -2410,7 +2410,7 @@ def _render_rfm_html(report):
     <p class="tip"><b>Лестница возврата:</b> День 30 — мягко («скучаем» + маленький бонус) · День 45 — подарок-блюдо · День 60 — максимум (большой бонус + статус). Не давать максимум сразу — приучает уходить ради скидки.</p>
 
     <h3>🗂️ Что делать с каждым сегментом</h3>
-    <table>
+    <div class="tablewrap"><table>
       <tr><th>Сегмент</th><th>Действие</th><th>Пример сообщения</th></tr>
       <tr><td>🏆 Активные VIP</td><td>беречь, без скидок</td><td>«Вы в числе первых пробуете новый сет 🔥»</td></tr>
       <tr><td>😴 Уснувшие VIP</td><td>персональный возврат</td><td>«Ваш любимый [ролл] — в подарок»</td></tr>
@@ -2420,7 +2420,7 @@ def _render_rfm_html(report):
       <tr><td>⚰️ Ушедшие</td><td>последний шанс или отпустить</td><td>«Последнее предложение: 1+1 на роллы»</td></tr>
       <tr><td>💸 Редкие крупные</td><td>повод заходить чаще</td><td>подписка «Сет недели»</td></tr>
       <tr><td>🌙 Спящие новички</td><td>не дать стать ушедшими</td><td>«Помните нас? Вот повод вернуться»</td></tr>
-    </table>
+    </table></div>
 
     <h3>🎮 Челленджи в приложение</h3>
     <ul>
@@ -2447,7 +2447,7 @@ def _render_rfm_html(report):
             f'<tr><td>{c["month"]}</td><td>{c["size"]}</td>' +
             "".join(f'<td>{"—" if v is None else str(v)+"%"}</td>' for v in c["ret"]) + "</tr>"
             for c in cohort["cohorts"])
-        cohort_html = f'<table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table>'
+        cohort_html = f'<div class="tablewrap"><table><tr><th>Когорта</th><th>Клиентов</th>{head}</tr>{crows}</table></div>'
     else:
         cohort_html = ""
     prod_html = ""
@@ -2522,8 +2522,8 @@ def _render_rfm_html(report):
 
     branches_panel = (
         branches_lead +
-        '<table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>'
-        f'{branch_rows}</table>{products_block}'
+        '<div class="tablewrap"><table><tr><th>Филиал</th><th>Клиентов</th><th>Выручка</th><th>Повторных</th><th>LTV</th></tr>'
+        f'{branch_rows}</table></div>{products_block}'
     )
     # (id, подпись вкладки, содержимое панели) — первая вкладка активна по умолчанию
     tabs = [
@@ -2549,54 +2549,67 @@ def _render_rfm_html(report):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RFM клиентов · Астана</title>
 <style>
-  :root {{ --bg:#0e1014; --card:#171a21; --fg:#e8eaed; --muted:#9aa0a6; --accent:#5B9CF6; --line:#262a33; }}
+  :root {{ --bg:#0d0f13; --card:#161a22; --card2:#1c212b; --fg:#eef0f3; --muted:#98a0ab; --accent:#5B9CF6; --line:#252b36; }}
   *{{box-sizing:border-box}}
   body{{margin:0;background:var(--bg);color:var(--fg);
-    font-family:-apple-system,system-ui,sans-serif;line-height:1.5}}
-  .wrap{{max-width:920px;margin:0 auto;padding:0 16px 40px}}
-  header{{padding:18px 0 10px}}
-  h1{{font-size:20px;margin:0 0 2px}} .sub{{color:var(--muted);font-size:12px;margin-bottom:12px}}
-  .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}}
-  .kpi{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}}
-  .kpi .v{{font-size:18px;font-weight:700}} .kpi .l{{color:var(--muted);font-size:11px;margin-top:2px}}
+    font-family:-apple-system,system-ui,'Segoe UI',Roboto,sans-serif;line-height:1.55;font-size:15px}}
+  .wrap{{max-width:1200px;margin:0 auto;padding:0 40px 64px}}
+  header{{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:8px;
+    padding:32px 0 22px;border-bottom:1px solid var(--line);margin-bottom:8px}}
+  h1{{font-size:28px;font-weight:700;margin:0;letter-spacing:-.4px}}
+  .sub{{color:var(--muted);font-size:13px;margin-top:6px}}
+  .when{{color:var(--muted);font-size:13px;text-align:right}}
+  .kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:24px 0 8px}}
+  .kpi{{background:linear-gradient(180deg,var(--card2),var(--card));border:1px solid var(--line);
+    border-radius:16px;padding:18px 20px}}
+  .kpi .v{{font-size:26px;font-weight:700;letter-spacing:-.5px}} .kpi .l{{color:var(--muted);font-size:13px;margin-top:4px}}
   .tabin{{position:absolute;width:0;height:0;opacity:0;pointer-events:none}}
-  .tabs{{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:6px;background:var(--bg);
-    padding:10px 0;margin-bottom:10px;border-bottom:1px solid var(--line)}}
-  .tabs label{{cursor:pointer;white-space:nowrap;padding:8px 15px;border-radius:999px;
-    font-size:14px;color:var(--muted);background:var(--card);border:1px solid var(--line);user-select:none;
-    transition:.12s}}
+  .tabs{{position:sticky;top:0;z-index:4;display:flex;flex-wrap:wrap;gap:8px;background:var(--bg);
+    padding:14px 0;margin-bottom:18px;border-bottom:1px solid var(--line)}}
+  .tabs label{{cursor:pointer;white-space:nowrap;padding:9px 20px;border-radius:999px;
+    font-size:15px;font-weight:500;color:var(--muted);background:var(--card);border:1px solid var(--line);
+    user-select:none;transition:.12s}}
+  .tabs label:hover{{color:var(--fg);border-color:#39414f}}
   {active_css}{{color:#fff;background:var(--accent);border-color:var(--accent)}}
   .panel{{display:none;animation:fade .16s ease}}
   {show_css}{{display:block}}
-  .lead{{color:var(--muted);font-size:13.5px;margin:6px 0 12px;max-width:680px}}
+  .lead{{color:var(--muted);font-size:14.5px;margin:8px 0 18px;max-width:760px}}
   .lead b{{color:var(--fg)}}
-  @keyframes fade{{from{{opacity:0;transform:translateY(5px)}}to{{opacity:1;transform:none}}}}
-  .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}}
-  .seg{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}}
-  .seg-h{{font-weight:600;margin-bottom:6px}} .seg-n{{font-size:20px;font-weight:700}}
-  .act{{color:var(--accent);font-size:13px;margin-top:8px}}
-  .ex{{color:var(--muted);font-size:12px;font-style:italic;margin-top:3px}}
+  @keyframes fade{{from{{opacity:0;transform:translateY(6px)}}to{{opacity:1;transform:none}}}}
+  .segs{{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:16px}}
+  .seg{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px 20px}}
+  .seg:hover{{border-color:#39414f}}
+  .seg-h{{font-weight:600;font-size:16px;margin-bottom:8px}} .seg-n{{font-size:24px;font-weight:700}}
+  .act{{color:var(--accent);font-size:14px;margin-top:10px}}
+  .ex{{color:var(--muted);font-size:13px;font-style:italic;margin-top:4px}}
   .muted{{color:var(--muted)}}
-  table{{display:block;overflow-x:auto;-webkit-overflow-scrolling:touch;
-    width:100%;border-collapse:collapse;margin:6px 0 16px;font-size:14px;white-space:nowrap}}
-  th,td{{text-align:left;padding:8px;border-bottom:1px solid var(--line)}} th{{color:var(--muted);font-weight:500}}
+  .tablewrap{{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:8px 0 24px;
+    border:1px solid var(--line);border-radius:14px}}
+  table{{width:100%;border-collapse:collapse;font-size:14.5px}}
+  th,td{{text-align:left;padding:13px 16px;border-bottom:1px solid var(--line)}}
+  th{{color:var(--muted);font-weight:500;background:var(--card)}}
+  tr:last-child td{{border-bottom:none}}
+  tbody tr:hover td,table tr:hover td{{background:rgba(255,255,255,.02)}}
   td:nth-child(n+2),th:nth-child(n+2){{text-align:right}}
-  h2{{font-size:17px;margin:4px 0 10px}} h3{{font-size:15px;margin:16px 0 6px}}
-  ul,ol{{margin:6px 0;padding-left:20px}} li{{margin:3px 0}}
-  .tip{{background:var(--card);border-left:3px solid var(--accent);padding:10px 12px;border-radius:8px;font-size:13px;margin:8px 0}}
-  @media(max-width:560px){{.kpis{{grid-template-columns:repeat(2,1fr)}}}}
+  h2{{font-size:21px;font-weight:700;margin:6px 0 12px;letter-spacing:-.3px}}
+  h3{{font-size:17px;margin:22px 0 8px}}
+  ul,ol{{margin:8px 0;padding-left:22px}} li{{margin:5px 0}}
+  .tip{{background:var(--card);border-left:3px solid var(--accent);padding:12px 16px;border-radius:10px;font-size:14px;margin:10px 0}}
 </style></head><body>
 <div class="wrap">
   <header>
-    <h1>RFM клиентов · филиалы Астаны</h1>
-    <div class="sub">доставка iiko · последние 180 дней · {report["date"]}</div>
-    <div class="kpis">
-      <div class="kpi"><div class="v">{nf(k["clients"])}</div><div class="l">клиентов</div></div>
-      <div class="kpi"><div class="v">{nf(k["revenue"])} ₸</div><div class="l">выручка с клиентов</div></div>
-      <div class="kpi"><div class="v">{nf(k["ltv"])} ₸</div><div class="l">средний LTV</div></div>
-      <div class="kpi"><div class="v">{k["repeat_pct"]}%</div><div class="l">повторных (2+)</div></div>
+    <div>
+      <h1>RFM клиентов · филиалы Астаны</h1>
+      <div class="sub">сегментация клиентов по доставке iiko · последние 180 дней</div>
     </div>
+    <div class="when">отчёт на {report["date"]}</div>
   </header>
+  <div class="kpis">
+    <div class="kpi"><div class="v">{nf(k["clients"])}</div><div class="l">клиентов</div></div>
+    <div class="kpi"><div class="v">{nf(k["revenue"])} ₸</div><div class="l">выручка с клиентов</div></div>
+    <div class="kpi"><div class="v">{nf(k["ltv"])} ₸</div><div class="l">средний LTV</div></div>
+    <div class="kpi"><div class="v">{k["repeat_pct"]}%</div><div class="l">повторных клиентов (2+)</div></div>
+  </div>
   {radios}
   <nav class="tabs">{nav}</nav>
   {panels}
