@@ -2172,6 +2172,66 @@ def _aggregate_clients(rows, today):
     return agg
 
 
+# (key, emoji, label, action, example) — действия/примеры из заметки «Тактика»/«Сегменты RFM»
+_RFM_META = [
+    ("champions", "🏆", "Чемпионы",      "беречь, без скидок — ранний доступ к новинкам",
+     "Вы в числе первых пробуете новый сет 🔥"),
+    ("loyal",     "💛", "Лояльные",      "апселл, поднимать чек",
+     "К вашему сету — мисо-суп и напиток за полцены"),
+    ("big_rare",  "💸", "Крупные редкие", "дать повод заходить чаще",
+     "Подписка «Сет недели» — вкуснее и выгоднее"),
+    ("new",       "🌱", "Новички",        "онбординг до 3-го заказа",
+     "−15% на второй заказ, действует 7 дней"),
+    ("at_risk",   "⚠️", "В зоне риска",    "win-back, окно ещё открыто",
+     "Давно не виделись — собрали для вас сет −20%"),
+    ("lost",      "⚰️", "Уснувшие",       "последний шанс или отпустить",
+     "Последнее предложение: 1+1 на роллы"),
+]
+
+
+def _rfm_by_thresholds(agg, today):
+    """agg → сегменты по фиксированным порогам заметки (R дни, F за 90д, M-квинтиль spend_90).
+    Возвращает {total, segments:[{key,emoji,label,count,pct,revenue,action,example}]}."""
+    custs = [(ph, a) for ph, a in agg.items() if a.get("orders_total", 0) > 0]
+    total = len(custs)
+    if not total:
+        return {"total": 0, "segments": []}
+
+    def rec_days(a):
+        ld = a.get("last_date") or ""
+        try:
+            return (today - date.fromisoformat(ld[:10])).days
+        except Exception:
+            return 9999
+
+    # M-квинтиль по spend_90 среди клиентов с заказами за 90д (5 = топ)
+    spenders = sorted([(ph, a["spend_90"]) for ph, a in custs if a.get("orders_90", 0) >= 1],
+                      key=lambda kv: kv[1], reverse=True)
+    Lm = len(spenders)
+    mq = {ph: 5 - (i * 5 // Lm) for i, (ph, _) in enumerate(spenders)} if Lm else {}
+
+    def seg_of(ph, a):
+        r = rec_days(a); f = a.get("orders_90", 0); m = mq.get(ph, 0); ot = a.get("orders_total", 0)
+        if r <= 30 and f >= 4 and m >= 4:   return "champions"
+        if r <= 30 and f >= 2:              return "loyal"
+        if m >= 4 and f <= 2 and r <= 60:   return "big_rare"
+        if r <= 30 and f == 1:              return "new"
+        if 31 <= r <= 90 and ot >= 3:       return "at_risk"
+        return "lost"
+
+    buckets = {k: {"count": 0, "revenue": 0.0} for k, *_ in _RFM_META}
+    for ph, a in custs:
+        b = buckets[seg_of(ph, a)]
+        b["count"] += 1
+        b["revenue"] += a.get("spend_total", 0.0)
+    segs = [{"key": k, "emoji": e, "label": lbl, "action": act, "example": ex,
+             "count": buckets[k]["count"],
+             "pct": round(buckets[k]["count"] / total * 100),
+             "revenue": round(buckets[k]["revenue"])}
+            for k, e, lbl, act, ex in _RFM_META if buckets[k]["count"] > 0]
+    return {"total": total, "segments": segs}
+
+
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
     """agg {phone: {orders, spend}} → (segments, top_vip)."""
     total = len(agg)

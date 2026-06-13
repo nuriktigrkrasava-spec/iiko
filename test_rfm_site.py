@@ -36,9 +36,33 @@ def test_aggregate_clients():
     assert a["last_date"] == "2026-06-08", a
 
 
+def _agg(orders_90, spend_90, orders_total, last_date):
+    return {"orders_90": orders_90, "spend_90": spend_90,
+            "orders_total": orders_total, "spend_total": spend_90, "last_date": last_date}
+
+def test_rfm_segments():
+    today = date(2026, 6, 13)
+    agg = {
+        "champ":   _agg(8, 90000, 12, "2026-06-12"),   # R~1, F7+, высокий M -> champions
+        "loyal":   _agg(3, 12000, 5,  "2026-06-10"),   # R~3, F2-3 -> loyal
+        "bigrare": _agg(1, 80000, 2,  "2026-05-20"),   # R~24, F=1, топ-M -> big_rare
+        "new":     _agg(1, 1500,  1,  "2026-06-11"),   # R~2, F=1, низкий M -> new
+        "atrisk":  _agg(0, 0.0,   5,  "2026-05-01"),   # R~43, был частый -> at_risk
+        "lost":    _agg(0, 0.0,   1,  "2026-01-10"),   # R 90+ -> lost
+    }
+    out = api._rfm_by_thresholds(agg, today)
+    got = {s["key"]: s["count"] for s in out["segments"]}
+    assert out["total"] == 6, out
+    for k in ("champions", "loyal", "big_rare", "new", "at_risk", "lost"):
+        assert got.get(k) == 1, (k, got)
+    # у каждого сегмента есть действие и пример
+    for s in out["segments"]:
+        assert s["action"] and s["example"], s
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments):
         print(f"\n>>> {t.__name__}")
         try:
             t()
