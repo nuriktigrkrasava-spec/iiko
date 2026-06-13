@@ -95,9 +95,27 @@ def test_render_html():
     assert "приложени" in html                       # миграция в приложение
 
 
+def test_rfm_route_access():
+    from fastapi.testclient import TestClient
+    api.get_all_restaurants = lambda: []     # пустой список → роут не ходит в iiko
+    client = TestClient(api.app)
+
+    api.RFM_SITE_KEY = ""                     # ключ не задан → 404
+    assert client.get("/rfm").status_code == 404
+    assert client.get("/rfm?key=anything").status_code == 404
+
+    api.RFM_SITE_KEY = "secret"
+    assert client.get("/rfm").status_code == 403          # нет ключа
+    assert client.get("/rfm?key=wrong").status_code == 403
+    r = client.get("/rfm?key=secret")
+    assert r.status_code == 200, r.status_code
+    assert "RFM" in r.text and "Астаны" in r.text         # страница отрендерилась
+    api.RFM_SITE_KEY = ""                                 # вернуть как было
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html):
+    for t in (test_astana_filter, test_aggregate_clients, test_rfm_segments, test_branch_stats, test_render_html, test_rfm_route_access):
         print(f"\n>>> {t.__name__}")
         try:
             t()

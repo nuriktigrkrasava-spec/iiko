@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -97,6 +97,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+RFM_SITE_KEY = os.getenv("RFM_SITE_KEY", "")
 
 # Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
 # Сервер на Render работает в UTC, поэтому «сегодня» считаем по локальному времени.
@@ -521,6 +522,49 @@ async def root():
     # новые правки фронта (показывал старую выручку из старого index.html).
     return FileResponse("index.html",
                         headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+@app.get("/rfm")
+async def rfm_site(key: str = ""):
+    """Витрина RFM по филиалам Астаны. Доступ по ?key=RFM_SITE_KEY."""
+    if not RFM_SITE_KEY:
+        raise HTTPException(status_code=404, detail="Not found")
+    if key != RFM_SITE_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    today = local_now().date()
+    date_to = today.isoformat()
+    date_from = (today - timedelta(days=180)).isoformat()
+
+    async def fetch(r):
+        client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+        fn = getattr(client, "olap_clients_rfm", None)
+        if not fn:
+            return (r, [])
+        try:
+            return (r, await fn(r["organization_name"], date_from, date_to))
+        except Exception as e:
+            logger.warning(f"[rfm] {r.get('organization_name')}: {e}")
+            return (r, [])
+
+    pairs = await asyncio.gather(*(fetch(r) for r in _astana_restaurants()))
+    all_rows, branches = [], []
+    for r, rows in pairs:
+        all_rows.extend(rows)
+        branches.append({"name": r["organization_name"], **_branch_stats(rows, today)})
+
+    agg = _aggregate_clients(all_rows, today)
+    total = len(agg)
+    revenue = round(sum(a["spend_total"] for a in agg.values()))
+    repeat = sum(1 for a in agg.values() if a["orders_total"] >= 2)
+    report = {
+        "date": date_to,
+        "kpi": {"clients": total, "revenue": revenue,
+                "ltv": round(revenue / total) if total else 0,
+                "repeat_pct": round(repeat / total * 100) if total else 0},
+        "rfm": _rfm_by_thresholds(agg, today),
+        "branches": sorted(branches, key=lambda b: -b["revenue"]),
+    }
+    return HTMLResponse(_render_rfm_html(report))
 
 
 @app.post("/api/setup/validate")
