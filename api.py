@@ -2146,6 +2146,32 @@ def _astana_restaurants():
     return out
 
 
+def _aggregate_clients(rows, today):
+    """Сырые строки olap_clients_rfm → {phone: {orders_90, spend_90, orders_total, spend_total, last_date}}.
+    90д-окно считается относительно today."""
+    cutoff = (today - timedelta(days=90)).isoformat()
+    agg = {}
+    for d in rows:
+        ph = _norm_phone(d.get("Delivery.CustomerPhone") or "")
+        if not ph:
+            continue
+        n = int(d.get("UniqOrderId.OrdersCount") or 0)
+        if n <= 0:
+            continue
+        spend = float(d.get("DishDiscountSumInt") or 0)
+        od = (d.get("OpenDate.Typed") or "")[:10]
+        a = agg.setdefault(ph, {"orders_90": 0, "spend_90": 0.0,
+                                "orders_total": 0, "spend_total": 0.0, "last_date": ""})
+        a["orders_total"] += n
+        a["spend_total"] += spend
+        if od and od >= cutoff:
+            a["orders_90"] += n
+            a["spend_90"] += spend
+        if od and od > a["last_date"]:
+            a["last_date"] = od
+    return agg
+
+
 def _clients_segments(agg: Dict[str, Dict[str, float]]):
     """agg {phone: {orders, spend}} → (segments, top_vip)."""
     total = len(agg)

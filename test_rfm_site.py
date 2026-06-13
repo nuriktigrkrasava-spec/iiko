@@ -17,9 +17,28 @@ def test_astana_filter():
     assert all(n.lower().startswith("астана") for n in names), names
 
 
+def test_aggregate_clients():
+    today = date(2026, 6, 13)
+    rows = [
+        # phone A: заказ 5 дней назад + заказ 100 дней назад
+        {"Delivery.CustomerPhone": "+7 701 000 0001", "OpenDate.Typed": "2026-06-08", "UniqOrderId.OrdersCount": 1, "DishDiscountSumInt": 5000},
+        {"Delivery.CustomerPhone": "+7 701 000 0001", "OpenDate.Typed": "2026-03-05", "UniqOrderId.OrdersCount": 1, "DishDiscountSumInt": 3000},
+        # phone B: пустой телефон — отбросить
+        {"Delivery.CustomerPhone": "", "OpenDate.Typed": "2026-06-08", "UniqOrderId.OrdersCount": 1, "DishDiscountSumInt": 1000},
+        # phone C: 0 заказов — отбросить строку
+        {"Delivery.CustomerPhone": "+7 701 000 0003", "OpenDate.Typed": "2026-06-08", "UniqOrderId.OrdersCount": 0, "DishDiscountSumInt": 0},
+    ]
+    agg = api._aggregate_clients(rows, today)
+    assert len(agg) == 1, list(agg)
+    a = next(iter(agg.values()))
+    assert a["orders_total"] == 2 and a["spend_total"] == 8000, a
+    assert a["orders_90"] == 1 and a["spend_90"] == 5000, a   # только заказ 5 дней назад
+    assert a["last_date"] == "2026-06-08", a
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_astana_filter,):
+    for t in (test_astana_filter, test_aggregate_clients):
         print(f"\n>>> {t.__name__}")
         try:
             t()
