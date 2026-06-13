@@ -536,6 +536,26 @@ async def root():
                         headers={"Cache-Control": "no-store, must-revalidate"})
 
 
+@app.get("/api/version")
+async def version():
+    """Хеш задеплоенного коммита — чтобы проверять, что прод реально обновился.
+    На Render берётся из RENDER_GIT_COMMIT, локально — git rev-parse. Без авторизации."""
+    commit = os.environ.get("RENDER_GIT_COMMIT") or ""
+    if not commit:
+        try:
+            import subprocess
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            commit = "unknown"
+    short = commit[:7] if commit and commit != "unknown" else commit
+    return {"service": "iiko", "commit": commit, "short": short,
+            "branch": os.environ.get("RENDER_GIT_BRANCH")}
+
+
 @app.post("/api/setup/validate")
 @limiter.limit("5/15 minutes")
 async def setup_validate(request: Request, payload: SetupValidate, user: Dict = Depends(get_current_user)):
