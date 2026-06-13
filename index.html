@@ -715,7 +715,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   <div class="tabs" id="sales-tabs">
     <div class="tab active" onclick="setSalesTab('general', this)">Общие</div>
     <div class="tab" onclick="setSalesTab('clients', this)">Клиенты</div>
-    <div class="tab" onclick="setSalesTab('products', this)">🍣 Продукты</div>
+    <div class="tab" onclick="setSalesTab('abc', this)">ABC</div>
     <div class="tab" onclick="setSalesTab('cancels', this)">Отмены</div>
     <div class="tab" onclick="setSalesTab('reviews', this)">Отзывы</div>
   </div>
@@ -792,9 +792,29 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div id="clients-cards"></div>
     </div>
 
-    <!-- Продукты по филиалу (топ-5 / анти-топ-5) -->
-    <div id="sales-products" style="display:none">
-      <div id="products-content"></div>
+    <!-- ABC tab -->
+    <div id="sales-abc" style="display:none">
+      <div class="card" style="margin-top:16px;">
+        <div class="card-header">
+          <div class="card-title">ABC анализ</div>
+          <button class="excel-btn" onclick="exportReport('abc')">↓ Excel</button>
+        </div>
+        <div class="subtabs" style="margin-bottom:12px;">
+          <div class="subtab active abc-mode-btn" onclick="setAbcMode('revenue', this)">Выручка</div>
+          <div class="subtab abc-mode-btn" onclick="setAbcMode('count', this)">Кол-во</div>
+        </div>
+        <div class="abc-counters">
+          <div class="abc-counter"><span class="abc-badge abc-a">A</span><span id="abc-count-a">0</span> поз.</div>
+          <div class="abc-counter"><span class="abc-badge abc-b">B</span><span id="abc-count-b">0</span> поз.</div>
+          <div class="abc-counter"><span class="abc-badge abc-c">C</span><span id="abc-count-c">0</span> поз.</div>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="abc-table">
+            <thead><tr><th>Блюдо</th><th>Выручка</th><th>%</th><th>Нак.%</th><th>ABC</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <!-- Cancels tab -->
@@ -2408,17 +2428,16 @@ async function setSalesTab(tab, el) {
   state.salesTab = tab;
   document.querySelectorAll('#sales-tabs .tab').forEach(t => t.classList.remove('active'));
   if (el) el.classList.add('active');
-  ['general', 'clients', 'products', 'cancels', 'cart', 'reviews'].forEach(t => {
-    const node = document.getElementById('sales-' + t);
-    if (node) node.style.display = t === tab ? 'block' : 'none';
+  ['general', 'clients', 'abc', 'cancels', 'cart', 'reviews'].forEach(t => {
+    document.getElementById('sales-' + t).style.display = t === tab ? 'block' : 'none';
   });
   if (tab === 'reviews') loadReviews();
   // Если salesData ещё не загружен — ждём
-  if (tab === 'products' && (!state.salesData?.top_dishes?.length)) {
+  if (tab === 'abc' && (!state.salesData?.top_dishes?.length)) {
     await loadSales();
   }
   if (tab === 'clients') loadClients();
-  if (tab === 'products') renderProducts();
+  if (tab === 'abc') renderABC();
   if (tab === 'cancels') renderCancels().catch(console.error);
   if (tab === 'cart') renderCart().catch(console.error);
 }
@@ -2686,17 +2705,7 @@ function renderClients(data) {
       <div class="seg-sub">${sub}</div>
     </div>`;
   const total = s.total || 0;
-  const branchName = (state.restaurant && state.restaurant.organization_name) || '';
-  let html = `<div class="card" style="margin-top:14px">
-    <div class="card-title" style="margin-bottom:10px">🏪 Сводка по филиалу${branchName ? ' · ' + branchName : ''}</div>
-    <div class="seg-grid">
-      ${seg(0, 'Клиентов', n(total), 'за период', 'var(--text)', '')}
-      ${seg(0, 'Выручка', formatMoney(s.revenue), 'с клиентов', 'var(--text)', '')}
-      ${seg(0, 'Повторных', s.repeat_pct + '%', '2+ заказа', '#FF9F0A', '')}
-      ${seg(0, 'Ср. LTV', formatMoney(s.ltv), 'на клиента', 'var(--text)', '')}
-    </div>
-  </div>
-  <div class="seg-grid">
+  let html = `<div class="seg-grid">
     ${seg(0, 'Уникальные', n(s.unique.count), s.unique.pct + '% · 1 заказ', 'var(--text)',
       `${n(s.unique.count)} клиентов заказали 1 раз (${s.unique.pct}% от ${n(total)}). Цель — вернуть на 2-й заказ.`)}
     ${seg(1, 'Лояльные', n(s.loyal.count), s.loyal.pct + '% · 2+ заказа', '#34C759',
@@ -2830,37 +2839,39 @@ function renderEngineering() {
     </tr>`).join('');
 }
 
+let abcMode = 'revenue';
 
-// Продукты по выбранному филиалу: топ-5 и анти-топ-5 блюд по количеству (за выбранный период).
-// Данные берём из уже загруженного salesData.top_dishes — без отдельного запроса.
-function renderProducts() {
-  const box = document.getElementById('products-content');
-  if (!box) return;
-  const dishes = [...(state.salesData?.top_dishes || [])].filter(d => (d.count || 0) > 0);
-  if (!dishes.length) {
-    box.innerHTML = '<div class="card" style="margin-top:16px"><div class="card-title">Нет данных за выбранный период</div></div>';
-    return;
-  }
-  const byCount = dishes.sort((a, b) => b.count - a.count);
-  const top = byCount.slice(0, 5);
-  const bottom = byCount.length > 5 ? byCount.slice(-5).reverse() : [];
-  const row = d => `<tr>
-      <td class="name" style="white-space:normal;font-size:13px;max-width:170px">${d.name}</td>
-      <td class="num">${d.count}</td>
-      <td class="num">${formatMoney(d.revenue)}</td>
+function setAbcMode(mode, el) {
+  abcMode = mode;
+  document.querySelectorAll('.abc-mode-btn').forEach(b => b.classList.remove('active'));
+  if (el) el.classList.add('active');
+  renderABC();
+}
+
+function renderABC() {
+  const dishes = [...(state.salesData?.top_dishes || [])];
+  dishes.sort((a, b) => (abcMode === 'revenue' ? b.revenue - a.revenue : b.count - a.count));
+  const total = dishes.reduce((s, d) => s + (abcMode === 'revenue' ? d.revenue : d.count), 0);
+  let cum = 0, cA = 0, cB = 0, cC = 0;
+  const rows = dishes.map(d => {
+    const val = abcMode === 'revenue' ? d.revenue : d.count;
+    const pct = total ? val / total * 100 : 0;
+    cum += pct;
+    const abc = cum <= 80 ? 'A' : cum <= 95 ? 'B' : 'C';
+    if (abc === 'A') cA++; else if (abc === 'B') cB++; else cC++;
+    const display = abcMode === 'revenue' ? (d.revenue / 1000).toFixed(0) + 'к' : d.count;
+    return `<tr>
+      <td class="name" style="white-space:normal;font-size:13px;max-width:130px;">${d.name}</td>
+      <td class="num">${display}</td>
+      <td class="num">${pct.toFixed(1)}%</td>
+      <td class="num">${cum.toFixed(1)}%</td>
+      <td><span class="abc-badge abc-${abc.toLowerCase()}">${abc}</span></td>
     </tr>`;
-  const tbl = (title, items) => `
-    <div class="card" style="margin-top:16px">
-      <div class="card-title" style="margin-bottom:10px">${title}</div>
-      <div class="table-container">
-        <table class="data-table">
-          <thead><tr><th>Блюдо</th><th>Кол-во</th><th>Выручка</th></tr></thead>
-          <tbody>${items.map(row).join('')}</tbody>
-        </table>
-      </div>
-    </div>`;
-  box.innerHTML = tbl('👍 Топ-5 блюд (берут чаще всего)', top)
-    + (bottom.length ? tbl('👎 Анти-топ-5 (берут реже всего)', bottom) : '');
+  });
+  document.querySelector('#abc-table tbody').innerHTML = rows.join('');
+  document.getElementById('abc-count-a').textContent = cA;
+  document.getElementById('abc-count-b').textContent = cB;
+  document.getElementById('abc-count-c').textContent = cC;
 }
 
 async function renderCancels() {
