@@ -573,7 +573,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <h2>Аналитика вашего ресторана</h2>
     <p>Контролируйте выручку, персонал, расходы и лояльность гостей в одном приложении</p>
     <button class="btn-full btn-black" onclick="nextOnboarding(2)">Начать →</button>
-    <button class="btn-full btn-white" onclick="startDemo()">Попробовать демо</button>
+    <button class="btn-full btn-white js-demo-btn" onclick="startDemo()">Попробовать демо</button>
   </div>
   <div class="onboarding" id="onboarding-step2" style="display:none">
     <button class="help-btn" onclick="openHelp('register')" aria-label="Помощь">?</button>
@@ -586,7 +586,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <input type="password" class="input-field" id="api-password-input" placeholder="Пароль">
     </div>
     <button class="btn-full btn-black" style="margin-top:12px" onclick="validateApiKey()">Подключить</button>
-    <button class="btn-full btn-white" onclick="startDemo()">Пропустить (демо)</button>
+    <button class="btn-full btn-white js-demo-btn" onclick="startDemo()">Пропустить (демо)</button>
   </div>
   <div class="onboarding" id="onboarding-step3" style="display:none">
     <div class="emoji">🏢</div>
@@ -1613,12 +1613,25 @@ document.addEventListener('DOMContentLoaded', () => {
   }, 1500);
 });
 
-function initApp() {
+async function initApp() {
   const tg = window.Telegram?.WebApp;
   if (tg) { tg.expand(); tg.ready(); }
   setupViewportHeight();
   updateDate();
   document.getElementById('navbar').classList.remove('visible');
+
+  // Демо-режим вынесен в отдельного бота (DEMO_ONLY=1). На демо-боте сразу
+  // открываем демо, на основном — прячем демо-кнопки онбординга.
+  let demoOnly = false;
+  try {
+    const cfg = await apiGet('/api/config');
+    demoOnly = !!(cfg && cfg.demo_only);
+  } catch(e) {}
+  if (demoOnly) {
+    startDemo();
+    return;
+  }
+  document.querySelectorAll('.js-demo-btn').forEach(b => b.style.display = 'none');
   checkExistingUser();
 }
 

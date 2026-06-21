@@ -97,6 +97,9 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+# DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
+# Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
+DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
 
 # Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
 # Сервер на Render работает в UTC, поэтому «сегодня» считаем по локальному времени.
@@ -556,10 +559,16 @@ async def version():
             "branch": os.environ.get("RENDER_GIT_BRANCH")}
 
 
+@app.get("/api/config")
+async def get_config():
+    """Публичный конфиг для фронта. demo_only=True — это демо-бот."""
+    return {"demo_only": DEMO_ONLY}
+
+
 @app.post("/api/setup/validate")
 @limiter.limit("5/15 minutes")
 async def setup_validate(request: Request, payload: SetupValidate, user: Dict = Depends(get_current_user)):
-    if payload.api_login == "demo" or payload.api_login == DEMO_API_LOGIN:
+    if DEMO_ONLY and (payload.api_login == "demo" or payload.api_login == DEMO_API_LOGIN):
         return {"valid": True, "organizations": [{"id": "demo-org-1", "name": "Демо Ресторан"}]}
     try:
         client = get_client(payload.api_login, payload.iiko_server, payload.api_password)
@@ -603,6 +612,8 @@ async def remove_restaurant(rest_id: int, user: Dict = Depends(get_current_user)
 
 @app.post("/api/demo")
 async def enable_demo(user: Dict = Depends(get_current_user)):
+    if not DEMO_ONLY:
+        raise HTTPException(status_code=404, detail="Not found")
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     set_demo_mode(tid, 1)
@@ -620,16 +631,9 @@ async def logout(user: Dict = Depends(get_current_user)):
 
 
 def _is_demo_user(user: Dict) -> bool:
-    tid = user.get("id", 0)
-    u = get_user(tid)
-    if u is None or u.get("is_demo", 0) == 0:
-        return False
-    # Флаг is_demo=1, но если есть реальные рестораны — не демо
-    rests = get_restaurants(tid)
-    if rests:
-        set_demo_mode(tid, 0)  # сбрасываем зависший флаг
-        return False
-    return True
+    # Демо живёт только на демо-боте (DEMO_ONLY=1): там все юзеры демо.
+    # На основном боте демо-режима нет вообще.
+    return DEMO_ONLY
 
 
 def _get_org_id(org_id: str, user: Dict) -> str:
