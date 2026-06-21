@@ -507,6 +507,177 @@ def _demo_upsell_kb() -> dict:
         [{"text": "💬 Подключить — написать менеджеру", "url": "https://t.me/wiregroup"}],
     ]}
 
+
+# ============ DEMO DATA для остальных вкладок (курьеры/клиенты/год-год/план/…) ============
+# Чтобы демо-бот показывал заполненными ВСЕ вкладки, как основной. Формы 1-в-1 с реальными
+# ветками эндпоинтов. avg_way/avg_delay у курьеров — в минутах (так их рисует фронт).
+
+DEMO_COURIERS = {
+    "couriers": [
+        {"name": "Алексей Соколов",   "deliveries": 312, "avg_way": 22, "avg_delay": 4,  "late_pct": 11},
+        {"name": "Марат Жумабеков",   "deliveries": 287, "avg_way": 25, "avg_delay": 5,  "late_pct": 14},
+        {"name": "Ержан Сапаров",     "deliveries": 241, "avg_way": 21, "avg_delay": 3,  "late_pct": 8},
+        {"name": "Дмитрий Орлов",     "deliveries": 198, "avg_way": 27, "avg_delay": 7,  "late_pct": 19},
+        {"name": "Игорь Лебедев",     "deliveries": 156, "avg_way": 29, "avg_delay": 9,  "late_pct": 23},
+    ],
+    "summary": {"deliveries": 1194, "couriers": 5, "avg_way": 24, "avg_delay": 5, "late_pct": 14},
+}
+
+DEMO_CANCELS = {
+    "items": [
+        {"name": "Стейк Рибай",       "amount": 18900},
+        {"name": "Лосось гриль",      "amount": 12400},
+        {"name": "Паста карбонара",   "amount": 7650},
+        {"name": "Пицца Пепперони",   "amount": 6300},
+        {"name": "Цезарь с курицей",  "amount": 4180},
+        {"name": "Тирамису",          "amount": 2900},
+    ],
+    "total_amount": 52330,
+    "total_orders": 19,
+}
+
+DEMO_COMPANIONS = {
+    "pairs": [
+        {"a": "Пицца Маргарита", "b": "Кока-кола 0.5", "count": 48},
+        {"a": "Бургер Классик",  "b": "Картофель фри", "count": 41},
+        {"a": "Цезарь с курицей","b": "Лимонад",       "count": 33},
+        {"a": "Паста карбонара", "b": "Тирамису",       "count": 27},
+        {"a": "Суши-сет",        "b": "Мисо-суп",       "count": 24},
+        {"a": "Стейк Рибай",     "b": "Красное вино",   "count": 19},
+    ],
+    "companions": {
+        "Пицца Маргарита":  [{"name": "Кока-кола 0.5", "count": 48}, {"name": "Чесночный соус", "count": 22}, {"name": "Лимонад", "count": 15}],
+        "Бургер Классик":   [{"name": "Картофель фри", "count": 41}, {"name": "Кока-кола 0.5", "count": 30}, {"name": "Соус барбекю", "count": 18}],
+        "Цезарь с курицей": [{"name": "Лимонад", "count": 33}, {"name": "Чиабатта", "count": 14}, {"name": "Эспрессо", "count": 9}],
+        "Суши-сет":         [{"name": "Мисо-суп", "count": 24}, {"name": "Соевый соус", "count": 20}, {"name": "Зелёный чай", "count": 12}],
+    },
+}
+
+
+def _demo_clients_agg() -> Dict[str, Dict[str, float]]:
+    """Синтетическая база клиентов для демо: смесь разовых/лояльных/VIP.
+    Прогоняется через _clients_segments/_compute_rfm — форма ответа гарантированно верная."""
+    today = local_now().date()
+    agg: Dict[str, Dict[str, float]] = {}
+    for i in range(140):
+        phone = f"+7700{1000000 + (i * 73491) % 8999999:07d}"
+        if i % 12 == 0:
+            orders = 11 + (i % 6)        # VIP (>=10)
+        elif i % 3 == 0:
+            orders = 2 + (i % 7)         # лояльные
+        else:
+            orders = 1                   # разовые
+        avg_check = 3800 + (i * 137) % 5200
+        spend = float(orders * avg_check)
+        days_ago = (i * 11) % 210
+        agg[phone] = {"orders": orders, "spend": spend,
+                      "last_date": (today - timedelta(days=days_ago)).isoformat()}
+    return agg
+
+
+_DEMO_CHAN_SHARE = [("Обычный заказ", 0.52), ("Доставка", 0.28), ("Самовывоз", 0.12), ("Wolt", 0.08)]
+_DEMO_MONTH_SEASON = [0.92, 0.90, 0.98, 1.02, 1.08, 1.12, 1.10, 1.05, 1.04, 1.06, 1.00, 1.20]
+
+
+def _demo_period(key, label, year, base_rev, growth):
+    avg_check = 4200 * growth
+    channels = {}
+    total_rev = 0
+    total_orders = 0
+    for ch, share in _DEMO_CHAN_SHARE:
+        rev = round(base_rev * growth * share)
+        ac = avg_check if ch == "Обычный заказ" else avg_check * 0.8
+        orders = round(rev / ac) if ac else 0
+        channels[ch] = {"rev": rev, "orders": orders}
+        total_rev += rev
+        total_orders += orders
+    return {"key": key, "label": label, "year": year,
+            "total_rev": total_rev, "total_orders": total_orders, "channels": channels}
+
+
+def _demo_comparison() -> dict:
+    today = local_now().date()
+    cur_year = today.year
+    prev_year = cur_year - 1
+    months_ru = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек']
+    cur_month = today.month
+    cur_week = today.isocalendar()[1]
+    GROW = 1.18  # текущий год +18% к прошлому
+
+    def month(year, m, growth):
+        return _demo_period(f"{year}-{m:02d}", months_ru[m - 1], year,
+                            11_000_000 * _DEMO_MONTH_SEASON[m - 1], growth)
+
+    def week(year, w, growth):
+        season = 0.90 + ((w * 7) % 20) / 100.0
+        return _demo_period(f"{year}-W{w:02d}", f"Нед {w}", year, 2_550_000 * season, growth)
+
+    return {
+        "weeks": {
+            "current":  [week(cur_year, w, GROW) for w in range(1, cur_week + 1)],
+            "previous": [week(prev_year, w, 1.0) for w in range(1, 53)],
+        },
+        "months": {
+            "current":  [month(cur_year, m, GROW) for m in range(1, cur_month + 1)],
+            "previous": [month(prev_year, m, 1.0) for m in range(1, 13)],
+        },
+        "channels": sorted(ch for ch, _ in _DEMO_CHAN_SHARE),
+        "cur_year": cur_year,
+        "prev_year": prev_year,
+    }
+
+
+def _demo_plan() -> dict:
+    today = local_now().date()
+    yr = today.year
+    cur_week = today.isocalendar()[1]
+    rows = []
+    for w in range(max(1, cur_week - 9), cur_week + 1):
+        buckets = {}
+        for b, base in [("Доставка", 520), ("Зал / вынос", 780), ("Агрегаторы", 240)]:
+            season = 0.90 + ((w * 3) % 20) / 100.0
+            plan = round(base * season)
+            fact = round(plan * (0.85 + ((w * 7) % 30) / 100.0))
+            buckets[b] = {"plan": plan, "fact": fact,
+                          "pct": round(fact / plan * 100) if plan else None}
+        try:
+            first = date.fromisocalendar(yr, w, 1)
+            label = f"Нед {w} · {first.day:02d}.{first.month:02d}"
+        except Exception:
+            label = f"Нед {w}"
+        rows.append({"week": w, "label": label, "buckets": buckets})
+    return {"has_link": True, "url": "", "buckets": PLAN_BUCKETS, "rows": rows, "year": yr}
+
+
+def _demo_price_stats(product_id: str, days: int) -> dict:
+    prod = next((p for p in DEMO_NOMENCLATURE if p["id"] == product_id), None)
+    name = prod["name"] if prod else "Товар"
+    unit = prod["unit"] if prod else "кг"
+    try:
+        base = 600 + (int(prod["code"]) % 20) * 70 if prod else 850
+    except Exception:
+        base = 850
+    today = local_now().date()
+    raw = [
+        ("demo-sup-1", "ТОО «Демо-Поставщик»", 1.00, 6),
+        ("demo-sup-2", "ИП Свежие Продукты",   1.08, 12),
+        ("demo-sup-3", "ТОО «ОптТорг»",          1.15, 21),
+    ]
+    suppliers = [
+        {"supplier_id": sid, "supplier_name": sname,
+         "price_per_unit": round(base * mult), "unit": unit,
+         "date": (today - timedelta(days=ago)).isoformat()}
+        for sid, sname, mult, ago in raw
+    ]
+    suppliers.sort(key=lambda r: r["price_per_unit"])
+    best = suppliers[0]
+    for s in suppliers:
+        s["delta_pct"] = ((s["price_per_unit"] - best["price_per_unit"]) /
+                          best["price_per_unit"] * 100) if best["price_per_unit"] else 0.0
+    return {"product": {"id": product_id, "name": name, "unit": unit},
+            "best": best, "suppliers": suppliers,
+            "stats": {"purchases": 9, "days": days}, "iiko_ok": True}
+
 MONTH_NAMES_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
 
 
@@ -1189,7 +1360,7 @@ async def couriers(org_id: str, period: str = "month",
     """Аналитика курьеров: доставок, ср. время в пути, ср. опоздание, % опозданий.
     Один DELIVERIES OLAP на филиал (курьер×опоздание), агрегируем по курьеру."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"couriers": [], "summary": {}}
+        return DEMO_COURIERS
     orgs = _parse_org_ids(org_ids, org_id, user)
     if from_ and to:
         date_from, date_to = get_period_dates("custom", from_, to)
@@ -1603,8 +1774,7 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
     """
     import time
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"product": {"id": product_id, "name": "—", "unit": ""},
-                "best": None, "suppliers": [], "stats": {"purchases": 0, "days": days}}
+        return _demo_price_stats(product_id, days)
 
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -1796,7 +1966,7 @@ async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(g
 @app.get("/api/cancels/{org_id}")
 async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"items": [], "total_amount": 0, "total_orders": 0}
+        return DEMO_CANCELS
 
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -1827,7 +1997,7 @@ async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_c
 async def companions(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     """Анализ компаньонов — блюда которые покупают вместе."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"pairs": [], "companions": {}}
+        return DEMO_COMPANIONS
 
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -1899,7 +2069,7 @@ async def comparison(org_id: str,
                      user: Dict = Depends(get_current_user)):
     """YoY сравнение по неделям и месяцам с разбивкой по каналам."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"weeks": [], "months": [], "channels": []}
+        return _demo_comparison()
 
     orgs = _parse_org_ids(org_ids, org_id, user)
 
@@ -2137,7 +2307,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
     """План/факт/% по 3 корзинам, понедельно. Факт — 1 OLAP-запрос на филиал.
     Недели берём из таблицы клиента, чтобы план и факт делились одинаково."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"has_link": False, "buckets": PLAN_BUCKETS, "rows": []}
+        return _demo_plan()
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     org_name = info.get("org_name", "")
@@ -2384,7 +2554,11 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
                           user: Dict = Depends(get_current_user)):
     """Лояльность клиентов: source=iiko (из доставок iiko) или source=table (из ссылки)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"segments": None, "source": source}
+        agg = _demo_clients_agg()
+        segments, top_vip = _clients_segments(agg)
+        return {"segments": segments, "top_vip": top_vip,
+                "rfm": _compute_rfm(agg, local_now().date()),
+                "source": source, "year": str(local_now().year)}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     org_name = info.get("org_name", "")
