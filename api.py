@@ -4184,6 +4184,10 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             if action == "act:send":
+                # Демо-бот: реальной отправки в iiko нет — вместо тупика показываем оффер.
+                if DEMO_ONLY:
+                    await _send_demo_upsell(chat_id)
+                    return {"ok": True}
                 rests = _get_user_orgs(pending["telegram_id"])
                 if not rests:
                     await _tg_edit(chat_id, msg_id, "⚠️ У тебя не настроен ни один ресторан. Открой Mini App и подключи iiko-учётку.")
