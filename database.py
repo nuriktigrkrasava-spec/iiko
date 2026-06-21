@@ -123,6 +123,13 @@ def init_db():
         key TEXT PRIMARY KEY,
         value TEXT
     );
+
+    -- Демо-бот: сколько накладных юзер уже распознал (лимит 1, дальше апселл)
+    CREATE TABLE IF NOT EXISTS demo_invoice_usage (
+        telegram_id INTEGER PRIMARY KEY,
+        count INTEGER DEFAULT 0,
+        updated_at TEXT
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -181,6 +188,30 @@ def set_demo_mode(telegram_id: int, is_demo: int):
     )
     conn.commit()
     conn.close()
+
+def get_demo_invoice_count(telegram_id: int) -> int:
+    """Сколько накладных распознал юзер на демо-боте (для лимита 1)."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT count FROM demo_invoice_usage WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return int(row["count"]) if row else 0
+
+def inc_demo_invoice_count(telegram_id: int) -> int:
+    """Увеличивает счётчик распознанных накладных на демо-боте, возвращает новое значение."""
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO demo_invoice_usage (telegram_id, count, updated_at) VALUES (?, 1, ?) "
+        "ON CONFLICT(telegram_id) DO UPDATE SET count = count + 1, updated_at = excluded.updated_at",
+        (telegram_id, datetime.now().isoformat())
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT count FROM demo_invoice_usage WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return int(row["count"]) if row else 1
 
 def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
     conn = get_db()

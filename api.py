@@ -27,6 +27,7 @@ import uvicorn
 
 from database import (
     init_db, get_user, create_user, set_demo_mode,
+    get_demo_invoice_count, inc_demo_invoice_count,
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
@@ -447,6 +448,64 @@ DEMO_RETENTION = {
     ],
     "frequency": [1120, 412, 185, 78, 52]
 }
+
+# Демо-номенклатура для редактора накладной на демо-боте: к этим позициям
+# клиент сопоставляет распознанные строки (реальной iiko номенклатуры нет).
+DEMO_NOMENCLATURE = [
+    {"id": "demo-prod-1",  "name": "Молоко 3.2%",                "unit": "л",  "code": "1001"},
+    {"id": "demo-prod-2",  "name": "Мука пшеничная в/с",        "unit": "кг", "code": "1002"},
+    {"id": "demo-prod-3",  "name": "Куриное филе охл.",         "unit": "кг", "code": "1003"},
+    {"id": "demo-prod-4",  "name": "Масло подсолнечное",        "unit": "л",  "code": "1004"},
+    {"id": "demo-prod-5",  "name": "Сахар-песок",               "unit": "кг", "code": "1005"},
+    {"id": "demo-prod-6",  "name": "Сыр Моцарелла",             "unit": "кг", "code": "1006"},
+    {"id": "demo-prod-7",  "name": "Помидоры свежие",           "unit": "кг", "code": "1007"},
+    {"id": "demo-prod-8",  "name": "Огурцы свежие",             "unit": "кг", "code": "1008"},
+    {"id": "demo-prod-9",  "name": "Кофе в зёрнах",             "unit": "кг", "code": "1009"},
+    {"id": "demo-prod-10", "name": "Картофель",                 "unit": "кг", "code": "1010"},
+    {"id": "demo-prod-11", "name": "Лук репчатый",              "unit": "кг", "code": "1011"},
+    {"id": "demo-prod-12", "name": "Говядина вырезка",          "unit": "кг", "code": "1012"},
+    {"id": "demo-prod-13", "name": "Лосось с/м",                "unit": "кг", "code": "1013"},
+    {"id": "demo-prod-14", "name": "Рис круглозёрный",          "unit": "кг", "code": "1014"},
+    {"id": "demo-prod-15", "name": "Масло сливочное 82.5%",     "unit": "кг", "code": "1015"},
+    {"id": "demo-prod-16", "name": "Яйцо куриное С1",           "unit": "шт", "code": "1016"},
+    {"id": "demo-prod-17", "name": "Соль поваренная",           "unit": "кг", "code": "1017"},
+    {"id": "demo-prod-18", "name": "Сметана 20%",               "unit": "кг", "code": "1018"},
+    {"id": "demo-prod-19", "name": "Майонез",                   "unit": "кг", "code": "1019"},
+    {"id": "demo-prod-20", "name": "Кетчуп томатный",           "unit": "кг", "code": "1020"},
+]
+
+# Продающее сообщение демо-бота — после первого (и единственного) распознавания.
+# Лимит «До N накладных/мес» в платном тарифе:
+DEMO_PLAN_INVOICES = 300
+DEMO_UPSELL_TEXT = (
+    "✨ Вот так — за 10 секунд бот распознал вашу накладную и подготовил её к загрузке в iiko. "
+    "Без единой цифры вручную.\n\n"
+    "А теперь представьте, что так обрабатывается каждая накладная от каждого поставщика. "
+    "Каждый день. Сама.\n\n"
+    "Сейчас ваш кладовщик тратит на это по часу, а бухгалтер потом ищет, где закралась опечатка. "
+    "Эти часы и ошибки тихо стоят вам денег — каждый месяц. Бот убирает их полностью: "
+    "кладовщик просто фотографирует, остальное делает бот.\n\n"
+    "📦 <b>Что внутри:</b>\n"
+    "• Распознавание накладных с фото — секунды вместо часов\n"
+    "• Автосопоставление с вашей номенклатурой в iiko\n"
+    "• Загрузка прихода в один тап\n"
+    "• Аналитика, где утекают деньги: фудкост, смены, персонал, потери\n"
+    f"• До {DEMO_PLAN_INVOICES} накладных в месяц включено — с запасом для большинства заведений\n\n"
+    "🤖 При подключении напишем и настроим бота под вас — под вашу номенклатуру, "
+    "ваших поставщиков и вашу сеть.\n\n"
+    "💰 <b>Обычная цена:</b> 300 000 ₸ за подключение + 40 000 ₸/мес.\n"
+    "Сейчас беру первых 5 заведений на особых условиях:\n"
+    "• Подключение — <b>150 000 ₸</b> вместо 300 000 ₸\n"
+    "• Обслуживание — <b>30 000 ₸/мес</b>, цена закреплена за вами навсегда\n"
+    "• Не подойдёт за первый месяц — верну подключение полностью\n\n"
+    "Это дешевле часа бухгалтера в день — а бот не ошибается, не устаёт и работает круглосуточно.\n\n"
+    "👉 Свободно мест: 5. Напишите мне в Telegram — настрою под вас."
+)
+
+def _demo_upsell_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "💬 Подключить — написать менеджеру", "url": "https://t.me/wiregroup"}],
+    ]}
 
 MONTH_NAMES_RU = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"]
 
@@ -2660,7 +2719,13 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
                                user: Dict = Depends(get_current_user)):
     """Поиск товаров по имени в номенклатуре iiko (для редактора накладных)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"products": []}
+        ql = (q or "").strip().lower()
+        items = [p for p in DEMO_NOMENCLATURE if not ql or ql in p["name"].lower()]
+        return {"products": [
+            {"id": p["id"], "name": p["name"], "num": p["code"], "code": p["code"],
+             "unit": p["unit"], "containers": [], "_container_keys": []}
+            for p in items[:limit]
+        ]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
@@ -2715,7 +2780,7 @@ async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
 async def suppliers_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Список поставщиков из iiko (для редактора)."""
     if _is_demo_user(user) or org_id == "demo-org-1":
-        return {"suppliers": []}
+        return {"suppliers": [{"id": "demo-sup-1", "name": "ТОО «Демо-Поставщик»"}]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
@@ -3941,6 +4006,25 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     _drop_pending(chat_id)
 
 
+async def _send_demo_upsell(chat_id: int) -> None:
+    await _tg_send(chat_id, DEMO_UPSELL_TEXT, _demo_upsell_kb())
+
+
+async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
+    """Демо-бот: если юзер уже распознал свою 1 накладную — шлём апселл и блокируем."""
+    if DEMO_ONLY and get_demo_invoice_count(telegram_id) >= 1:
+        await _send_demo_upsell(chat_id)
+        return True
+    return False
+
+
+async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
+    """Демо-бот: после успешного распознавания фиксируем лимит и шлём апселл."""
+    if DEMO_ONLY:
+        inc_demo_invoice_count(telegram_id)
+        await _send_demo_upsell(chat_id)
+
+
 async def _recognize_invoice_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     file_id: str, image_bytes: bytes, mime: str
@@ -3952,6 +4036,10 @@ async def _recognize_invoice_and_create_pending(
         n = len(pending["images"])
         await _tg_send(chat_id,
             f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
+        return
+
+    # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
+    if await _demo_block_if_used(chat_id, telegram_id):
         return
 
     status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
@@ -3987,6 +4075,8 @@ async def _recognize_invoice_and_create_pending(
     else:
         new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
         pending["message_id"] = new_id
+
+    await _demo_after_recognition(chat_id, telegram_id)
 
 
 @app.post("/telegram/webhook")
@@ -4249,6 +4339,10 @@ async def telegram_webhook(request: Request):
                     "📎 Пришли накладную — фото, файлом или текстом (минимум 20 символов с позициями и ценами).")
                 return {"ok": True}
 
+            # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
+            if await _demo_block_if_used(chat_id, telegram_id):
+                return {"ok": True}
+
             status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную из текста...")
             result = await analyze_invoice_text(text)
             if "error" in result or not (result.get("items") or []):
@@ -4279,6 +4373,7 @@ async def telegram_webhook(request: Request):
             await _tg_edit(chat_id, status_msg_id,
                            _format_invoice_v2(pending, "preview"),
                            _invoice_kb(pending["pending_id"]))
+            await _demo_after_recognition(chat_id, telegram_id)
             return {"ok": True}
 
     except Exception as e:
