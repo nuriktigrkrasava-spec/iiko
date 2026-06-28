@@ -13,6 +13,8 @@ import database; database.init_db()
 import api
 from fastapi import HTTPException
 
+_REAL_ASYNC_CLIENT = api.httpx.AsyncClient
+
 ALLOWED = {"id": 355897224, "username": "boss", "first_name": "B"}
 OTHER = {"id": 111, "username": "x", "first_name": "X"}
 
@@ -69,29 +71,35 @@ def test_503_when_unconfigured():
 
 def test_proxies_with_key_and_org():
     api.httpx.AsyncClient = FakeClient
-    FakeClient.next_resp = FakeResp(200, {"hello": "world", "org_id": "org-alieva"})
-    out = _call(from_="2026-06-01", to="2026-06-28", sla_minutes=30, user=ALLOWED)
-    assert out == {"hello": "world", "org_id": "org-alieva"}, out
-    cap = FakeClient.captured
-    assert cap["headers"].get("X-API-Key") == "secret-test-key", cap["headers"]
-    assert cap["params"].get("org_id") == "org-alieva", cap["params"]
-    assert cap["params"].get("from") == "2026-06-01", cap["params"]
-    assert cap["params"].get("to") == "2026-06-28", cap["params"]
-    assert cap["params"].get("sla_minutes") == 30, cap["params"]
-    assert cap["url"].endswith("/admin/analytics/export"), cap["url"]
-    print("  [OK] проксирует с X-API-Key и org_id из env")
+    try:
+        FakeClient.next_resp = FakeResp(200, {"hello": "world", "org_id": "org-alieva"})
+        out = _call(from_="2026-06-01", to="2026-06-28", sla_minutes=30, user=ALLOWED)
+        assert out == {"hello": "world", "org_id": "org-alieva"}, out
+        cap = FakeClient.captured
+        assert cap["headers"].get("X-API-Key") == "secret-test-key", cap["headers"]
+        assert cap["params"].get("org_id") == "org-alieva", cap["params"]
+        assert cap["params"].get("from") == "2026-06-01", cap["params"]
+        assert cap["params"].get("to") == "2026-06-28", cap["params"]
+        assert cap["params"].get("sla_minutes") == 30, cap["params"]
+        assert cap["url"].endswith("/admin/analytics/export"), cap["url"]
+        print("  [OK] проксирует с X-API-Key и org_id из env")
+    finally:
+        api.httpx.AsyncClient = _REAL_ASYNC_CLIENT
 
 
 def test_upstream_error_becomes_502():
     api.httpx.AsyncClient = FakeClient
-    FakeClient.next_resp = FakeResp(401, None, "bad key")
     try:
-        _call(from_=None, to=None, sla_minutes=None, user=ALLOWED)
-    except HTTPException as e:
-        assert e.status_code == 502, f"ждали 502, got {e.status_code}"
-        print("  [OK] upstream 401 → 502")
-        return
-    raise AssertionError("ожидался HTTPException 502")
+        FakeClient.next_resp = FakeResp(401, None, "bad key")
+        try:
+            _call(from_=None, to=None, sla_minutes=None, user=ALLOWED)
+        except HTTPException as e:
+            assert e.status_code == 502, f"ждали 502, got {e.status_code}"
+            print("  [OK] upstream 401 → 502")
+            return
+        raise AssertionError("ожидался HTTPException 502")
+    finally:
+        api.httpx.AsyncClient = _REAL_ASYNC_CLIENT
 
 
 if __name__ == "__main__":

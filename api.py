@@ -1548,7 +1548,7 @@ async def chaspik_export(
     to: Optional[str] = Query(None),
     sla_minutes: Optional[int] = Query(None),
     user: Dict = Depends(get_current_user),
-):
+) -> dict:
     """Прокси к saya-kds /admin/analytics/export. Виден только CHASPIK_TG_IDS.
     Ключ X-API-Key держим на бэке и не отдаём во фронт."""
     if int(user.get("id", 0)) not in CHASPIK_TG_IDS:
