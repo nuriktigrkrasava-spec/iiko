@@ -886,6 +886,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="subtab active" id="staff-sub-waiters" onclick="setStaffSubtab('waiters', this)">Официанты</div>
       <div class="subtab" id="staff-sub-couriers" onclick="setStaffSubtab('couriers', this)">Курьеры</div>
       <div class="subtab" id="staff-sub-heatmap" onclick="setStaffSubtab('heatmap', this)">Час пик</div>
+      <div class="subtab" id="staff-sub-kds" onclick="setStaffSubtab('kds', this)">saya-kds</div>
     </div>
     <div id="staff-view-waiters">
     <!-- Сейчас на смене -->
@@ -949,6 +950,13 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <div id="hm-peak" style="font-size:14px;color:var(--text);font-weight:600;margin-bottom:14px"></div>
         <div id="hm-grid"></div>
       </div>
+    </div>
+    <div id="staff-view-kds" style="display:none">
+      <div id="kds-status" style="color:var(--text-secondary);font-size:13px;margin-top:12px"></div>
+      <div id="kds-zoneload"></div>
+      <div id="kds-sla"></div>
+      <div id="kds-kitchen"></div>
+      <div id="kds-anomalies"></div>
     </div>
 
   </div>
@@ -1618,6 +1626,7 @@ async function initApp() {
   if (tg) { tg.expand(); tg.ready(); }
   setupViewportHeight();
   updateDate();
+  applyChaspikGate();
   document.getElementById('navbar').classList.remove('visible');
 
   // Демо-режим вынесен в отдельного бота (DEMO_ONLY=1). На демо-боте сразу
@@ -1743,6 +1752,7 @@ function getActiveOrgIds() {
 }
 // Telegram id, которому показываем переключатель филиалов в «Плане». См. spec 2026-06-11.
 const PLAN_BRANCH_SWITCHER_TG_ID = 355897224;
+const CHASPIK_TG_IDS = [355897224, 8727082281];  // кому видна суб-вкладка «saya-kds»
 function getMyTgId() {
   return window.Telegram?.WebApp?.initDataUnsafe?.user?.id || null;
 }
@@ -3024,14 +3034,28 @@ async function loadStaff() {
 // ---- Курьеры (суб-вкладка в Персонале) ----
 let _couriersLoaded = false;
 
+function applyChaspikGate() {
+  if (!CHASPIK_TG_IDS.includes(getMyTgId())) {
+    document.getElementById('staff-sub-kds')?.remove();
+  }
+}
+
+async function loadChaspik() {
+  const status = document.getElementById('kds-status');
+  if (status) status.textContent = 'Загрузка…';
+}
+
 function setStaffSubtab(view, el) {
-  const views = ['waiters', 'couriers', 'heatmap'];
+  const views = ['waiters', 'couriers', 'heatmap', 'kds'];
   views.forEach(v => {
-    document.getElementById('staff-sub-' + v).classList.toggle('active', v === view);
-    document.getElementById('staff-view-' + v).style.display = v === view ? '' : 'none';
+    const sub = document.getElementById('staff-sub-' + v);
+    if (sub) sub.classList.toggle('active', v === view);
+    const vw = document.getElementById('staff-view-' + v);
+    if (vw) vw.style.display = v === view ? '' : 'none';
   });
   if (view === 'couriers' && !_couriersLoaded) loadCouriers();
   if (view === 'heatmap') loadHeatmap();
+  if (view === 'kds') loadChaspik();
 }
 
 // ---- Час пик (heatmap загрузки по дням×часам) ----
