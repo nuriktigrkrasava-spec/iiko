@@ -102,6 +102,13 @@ TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
 
+# ── saya-kds (внешняя аналитика доставки/кухни) ──
+# Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
+ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
+CHASPIK_ORG_ID = os.getenv("CHASPIK_ORG_ID", "")
+CHASPIK_BASE_URL = os.getenv("CHASPIK_BASE_URL", "https://saya-kds.onrender.com")
+CHASPIK_TG_IDS = {355897224, 8727082281}
+
 # Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
 # Сервер на Render работает в UTC, поэтому «сегодня» считаем по локальному времени.
 LOCAL_TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET_HOURS", "5"))))
@@ -1533,6 +1540,39 @@ async def load_heatmap(org_id: str, period: str = "month",
     resp = {"cells": cells, "max": mx, "peak": peak, "metric": "orders"}
     _set_cached(key, resp)
     return resp
+
+
+@app.get("/api/chaspik")
+async def chaspik_export(
+    from_: Optional[str] = Query(None, alias="from"),
+    to: Optional[str] = Query(None),
+    sla_minutes: Optional[int] = Query(None),
+    user: Dict = Depends(get_current_user),
+) -> dict:
+    """Прокси к saya-kds /admin/analytics/export. Виден только CHASPIK_TG_IDS.
+    Ключ X-API-Key держим на бэке и не отдаём во фронт."""
+    if int(user.get("id", 0)) not in CHASPIK_TG_IDS:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not ANALYTICS_API_KEY or not CHASPIK_ORG_ID:
+        raise HTTPException(
+            status_code=503,
+            detail="saya-kds выгрузка не настроена (нет ANALYTICS_API_KEY или CHASPIK_ORG_ID)")
+    params: Dict = {"org_id": CHASPIK_ORG_ID}
+    if from_:
+        params["from"] = from_
+    if to:
+        params["to"] = to
+    if sla_minutes is not None:
+        params["sla_minutes"] = sla_minutes
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as c:
+            r = await c.get(f"{CHASPIK_BASE_URL}/admin/analytics/export",
+                            params=params, headers={"X-API-Key": ANALYTICS_API_KEY})
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"saya-kds недоступен: {e}")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"saya-kds {r.status_code}: {r.text[:200]}")
+    return r.json()
 
 
 @app.get("/api/foodcost/{org_id}")
