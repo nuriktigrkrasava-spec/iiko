@@ -3040,9 +3040,141 @@ function applyChaspikGate() {
   }
 }
 
+function _fmtSec(s) {
+  s = Math.round(Number(s) || 0);
+  const m = Math.floor(s / 60), r = s % 60;
+  return m ? `${m} мин ${r} с` : `${r} с`;
+}
+
 async function loadChaspik() {
   const status = document.getElementById('kds-status');
+  const elZone = document.getElementById('kds-zoneload');
+  const elSla = document.getElementById('kds-sla');
+  const elKit = document.getElementById('kds-kitchen');
+  const elAno = document.getElementById('kds-anomalies');
+  [elZone, elSla, elKit, elAno].forEach(e => { if (e) e.innerHTML = ''; });
   if (status) status.textContent = 'Загрузка…';
+  let data;
+  try {
+    data = await apiGet('/api/chaspik');
+  } catch (e) {
+    if (status) status.textContent = 'Ошибка сети';
+    return;
+  }
+  if (data && data.detail) {  // 403/503/502 от прокси приходят как {detail: "..."}
+    if (status) status.textContent = 'saya-kds: ' + data.detail;
+    return;
+  }
+  if (status) status.textContent = '';
+
+  // ── 1. Нагрузка по часам/зонам (zone_load) ──
+  const zl = data.zone_load || {};
+  const zones = zl.zones || [];
+  const hours = zl.hours || [];
+  const cells = zl.cells || {};
+  if (zones.length && hours.length) {
+    let max = 1;
+    zones.forEach(z => hours.forEach(h => {
+      const c = (cells[z] && cells[z][h]) ? cells[z][h].count || 0 : 0;
+      if (c > max) max = c;
+    }));
+    let peakHour = null, peakVal = -1;
+    hours.forEach(h => {
+      let sum = 0; zones.forEach(z => { sum += (cells[z] && cells[z][h]) ? (cells[z][h].count || 0) : 0; });
+      if (sum > peakVal) { peakVal = sum; peakHour = h; }
+    });
+    let html = '<div class="card" style="margin-top:12px;padding:12px">';
+    html += '<div class="card-title" style="margin-bottom:8px">Нагрузка по часам и зонам</div>';
+    if (peakHour !== null) html += `<div style="font-size:13px;margin-bottom:8px">⏰ Пик в <span style="color:#34C759">${peakHour}:00</span></div>`;
+    html += `<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px">`;
+    html += '<tr><th style="text-align:left;padding:2px 6px">Зона\\Час</th>' +
+      hours.map(h => `<th style="padding:2px 4px;color:var(--text-secondary)">${h}</th>`).join('') + '</tr>';
+    zones.forEach(z => {
+      html += `<tr><td style="padding:2px 6px;font-weight:600">${escHtml(z)}</td>`;
+      hours.forEach(h => {
+        const c = (cells[z] && cells[z][h]) ? (cells[z][h].count || 0) : 0;
+        const a = c ? (0.15 + 0.85 * c / max).toFixed(2) : 0;
+        html += `<td style="padding:2px 4px;text-align:center;background:rgba(52,199,89,${a})">${c || ''}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</table></div></div>';
+    elZone.innerHTML = html;
+  }
+
+  // ── 2. SLA и этапы пути (stage_stats) ──
+  const ss = data.stage_stats || {};
+  const stages = (ss.stage_aggregates && ss.stage_aggregates.stages) || [];
+  const sla = ss.sla || {};
+  const bott = ss.bottleneck_distribution || {};
+  if (stages.length || Object.keys(sla).length) {
+    let html = '<div class="card" style="margin-top:12px;padding:12px">';
+    html += '<div class="card-title" style="margin-bottom:8px">SLA и этапы пути</div>';
+    if (typeof sla.rate === 'number') {
+      const pct = (sla.rate * 100).toFixed(1);
+      html += `<div style="font-size:13px;margin-bottom:8px">Просрочка SLA: <span style="color:#FF3B30">${pct}%</span> (${sla.breached || 0} из ${sla.total || 0})</div>`;
+    }
+    const bottTop = Object.entries(bott).sort((a, b) => b[1] - a[1])[0];
+    if (bottTop) html += `<div style="font-size:13px;margin-bottom:8px">Узкое место: <b>${escHtml(bottTop[0])}</b></div>`;
+    if (stages.length) {
+      html += '<table style="border-collapse:collapse;font-size:12px;width:100%">';
+      html += '<tr><th style="text-align:left;padding:3px 6px">Этап</th><th style="padding:3px 6px">avg</th><th style="padding:3px 6px">median</th><th style="padding:3px 6px">p95</th></tr>';
+      stages.forEach(st => {
+        html += `<tr><td style="padding:3px 6px">${escHtml(st.label || st.key)}</td>` +
+          `<td style="padding:3px 6px;text-align:right">${_fmtSec(st.avg)}</td>` +
+          `<td style="padding:3px 6px;text-align:right">${_fmtSec(st.median)}</td>` +
+          `<td style="padding:3px 6px;text-align:right">${_fmtSec(st.p95)}</td></tr>`;
+      });
+      html += '</table>';
+    }
+    html += '</div>';
+    elSla.innerHTML = html;
+  }
+
+  // ── 3. Кухня по зонам + сотрудники (kitchen_zones) ──
+  const kz = (data.kitchen_zones && data.kitchen_zones.zones) || [];
+  if (kz.length) {
+    let html = '<div class="card" style="margin-top:12px;padding:12px">';
+    html += '<div class="card-title" style="margin-bottom:8px">Кухня по зонам</div>';
+    kz.forEach(z => {
+      html += `<div style="margin-bottom:10px"><div style="font-weight:600;font-size:13px">${escHtml(z.zone)} · ${z.count || 0} шт · ср. ${_fmtSec(z.avg)}</div>`;
+      (z.employees || []).forEach(e => {
+        html += `<div style="font-size:12px;color:var(--text-secondary);padding-left:8px">${escHtml(e.name)} — ${e.count || 0} шт, ${_fmtSec(e.avg)}</div>`;
+      });
+      html += '</div>';
+    });
+    html += '</div>';
+    elKit.innerHTML = html;
+  }
+
+  // ── 4. Аномалии + журнал (anomalies, journal) ──
+  const ano = data.anomalies || {};
+  const fast = ano.fast || [], reverts = ano.reverts || [];
+  const rows = (data.journal && data.journal.rows) || [];
+  let html = '<div class="card" style="margin-top:12px;padding:12px">';
+  html += '<div class="card-title" style="margin-bottom:8px">Аномалии и журнал</div>';
+  if (fast.length) {
+    html += '<div style="font-size:13px;font-weight:600;margin:6px 0">⚡ Подозрительно быстрые</div>';
+    fast.slice(0, 10).forEach(f => {
+      html += `<div style="font-size:12px;color:var(--text-secondary)">№${escHtml(String(f.order_number))} · ${escHtml(f.item_name || '')} · ${_fmtSec(f.prep_seconds)} · ${escHtml(f.name || '')}</div>`;
+    });
+  }
+  if (reverts.length) {
+    html += '<div style="font-size:13px;font-weight:600;margin:6px 0">↩️ Возвраты</div>';
+    reverts.slice(0, 10).forEach(r => {
+      html += `<div style="font-size:12px;color:var(--text-secondary)">№${escHtml(String(r.order_number))} · ${r.count || 0}×</div>`;
+    });
+  }
+  if (rows.length) {
+    html += '<div style="font-size:13px;font-weight:600;margin:6px 0">📋 Журнал (последние)</div>';
+    rows.slice(-20).reverse().forEach(r => {
+      const t = String(r.at || '').slice(11, 16);
+      html += `<div style="font-size:11px;color:var(--text-secondary)">${t} · №${escHtml(String(r.order_number || ''))} · ${escHtml(r.type || '')} · ${escHtml(r.actor_name || '')} ${escHtml(r.item_name || '')}</div>`;
+    });
+  }
+  if (!fast.length && !reverts.length && !rows.length) html += '<div style="font-size:12px;color:var(--text-secondary)">Нет данных за период</div>';
+  html += '</div>';
+  elAno.innerHTML = html;
 }
 
 function setStaffSubtab(view, el) {
