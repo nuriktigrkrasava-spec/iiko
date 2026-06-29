@@ -937,7 +937,7 @@ def _use_demo_data(user: Dict, org_id: str) -> bool:
 
 
 def _get_org_id(org_id: str, user: Dict) -> str:
-    if org_id == "demo-org-1" or _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return "demo"
     rests = get_restaurants(user.get("id", 0))
     for r in rests:
@@ -1067,7 +1067,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
                     user: Dict = Depends(get_current_user)):
     # webview не должен кешировать выручку (показывал старую цифру после фикса)
     response.headers["Cache-Control"] = "no-store"
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_DASHBOARD
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1152,7 +1152,7 @@ async def revenue(org_id: str, response: Response, period: str = "today",
     её для шапки дашборда вместо OLAP-суммы (та считается по дате открытия и
     расходится с кассой). Гости/чеки/график остаются на OLAP."""
     response.headers["Cache-Control"] = "no-store"
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"revenue": DEMO_DASHBOARD["revenue_today"], "ok": False, "source": "demo"}
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1254,7 +1254,7 @@ async def sales(org_id: str, period: str = "today",
                 to: Optional[str] = Query(None),
                 org_ids: Optional[str] = Query(None),
                 user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_SALES
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1371,7 +1371,7 @@ async def sales(org_id: str, period: str = "today",
 @app.get("/api/shifts/{org_id}")
 async def shifts(org_id: str, user: Dict = Depends(get_current_user)):
     """Сотрудники на смене сегодня с временем начала."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"staff": [
             {"name": "Виктория Ким", "since": "10:00", "revenue": 1250000, "orders": 48},
             {"name": "Артём Волков",  "since": "10:00", "revenue": 980000,  "orders": 38},
@@ -1429,7 +1429,7 @@ async def couriers(org_id: str, period: str = "month",
                    user: Dict = Depends(get_current_user)):
     """Аналитика курьеров: доставок, ср. время в пути, ср. опоздание, % опозданий.
     Один DELIVERIES OLAP на филиал (курьер×опоздание), агрегируем по курьеру."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_COURIERS
     orgs = _parse_org_ids(org_ids, org_id, user)
     if from_ and to:
@@ -1500,7 +1500,7 @@ async def couriers(org_id: str, period: str = "month",
 
 @app.get("/api/staff/{org_id}")
 async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_STAFF
 
     real_org = _get_org_id(org_id, user)
@@ -1547,7 +1547,7 @@ async def load_heatmap(org_id: str, period: str = "month",
                        user: Dict = Depends(get_current_user)):
     """Загрузка по дням недели × часам (heatmap «Час пик»). Метрика — кол-во заказов.
     Поддерживает «Все филиалы» через org_ids (агрегация по всем филиалам)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_HEATMAP
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1639,7 +1639,7 @@ async def chaspik_export(
 
 @app.get("/api/foodcost/{org_id}")
 async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_FOODCOST
 
     real_org = _get_org_id(org_id, user)
@@ -1724,7 +1724,7 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
 
 @app.get("/api/expenses/{org_id}")
 async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_EXPENSES
 
     real_org = _get_org_id(org_id, user)
@@ -1787,7 +1787,7 @@ async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_c
 
 @app.get("/api/invoices/{org_id}")
 async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"invoices": DEMO_INVOICES}
 
     real_org = _get_org_id(org_id, user)
@@ -1891,7 +1891,7 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
     Источник: iiko export invoice_incoming + локальные bot_invoices.
     """
     import time
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_price_stats(product_id, days)
 
     real_org = _get_org_id(org_id, user)
@@ -1981,7 +1981,7 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
 
 @app.get("/api/writeoffs/{org_id}")
 async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_WRITEOFFS
 
     real_org = _get_org_id(org_id, user)
@@ -2060,7 +2060,7 @@ async def weekly_report_preview(
 @app.get("/api/withdrawals/{org_id}")
 async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
     """Изъятия наличных из кассы (выемка/инкассация) за период."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_WITHDRAWALS
 
     real_org = _get_org_id(org_id, user)
@@ -2088,7 +2088,7 @@ async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(g
 
 @app.get("/api/cancels/{org_id}")
 async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_CANCELS
 
     real_org = _get_org_id(org_id, user)
@@ -2119,7 +2119,7 @@ async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_c
 @app.get("/api/companions/{org_id}")
 async def companions(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     """Анализ компаньонов — блюда которые покупают вместе."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_COMPANIONS
 
     real_org = _get_org_id(org_id, user)
@@ -2181,7 +2181,7 @@ async def companions(org_id: str, period: str = "week", user: Dict = Depends(get
 
 @app.get("/api/retention/{org_id}")
 async def retention(org_id: str, user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_RETENTION
     return {"clients": 0, "orders": 0, "cohorts": [], "frequency": []}
 
@@ -2191,7 +2191,7 @@ async def comparison(org_id: str,
                      org_ids: Optional[str] = Query(None),
                      user: Dict = Depends(get_current_user)):
     """YoY сравнение по неделям и месяцам с разбивкой по каналам."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_comparison()
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -2414,7 +2414,7 @@ def _parse_plan_csv(text: str, org_name: str):
 async def plan_set_link(org_id: str, payload: Dict[str, Any],
                         user: Dict = Depends(get_current_user)):
     """Сохранить ссылку на таблицу с планом для филиала."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
@@ -2429,7 +2429,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
                           user: Dict = Depends(get_current_user)):
     """План/факт/% по 3 корзинам, понедельно. Факт — 1 OLAP-запрос на филиал.
     Недели берём из таблицы клиента, чтобы план и факт делились одинаково."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_plan()
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -2659,7 +2659,7 @@ def _parse_clients_csv(text: str, org_name: str) -> Dict[str, Dict[str, float]]:
 async def clients_set_link(org_id: str, payload: Dict[str, Any],
                            user: Dict = Depends(get_current_user)):
     """Сохранить ссылку на таблицу клиентов (для source=table)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
@@ -2676,7 +2676,7 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
                           org_ids: Optional[str] = Query(None),
                           user: Dict = Depends(get_current_user)):
     """Лояльность клиентов: source=iiko (из доставок iiko) или source=table (из ссылки)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         agg = _demo_clients_agg()
         segments, top_vip = _clients_segments(agg)
         return {"segments": segments, "top_vip": top_vip,
@@ -2756,7 +2756,7 @@ async def olap_raw(org_id: str, period: str = "today",
                    org_ids: Optional[str] = Query(None),
                    user: Dict = Depends(get_current_user)):
     """Один большой OLAP-запрос — фронтенд сам фильтрует."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"data": [], "demo": True}
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -2793,7 +2793,7 @@ async def olap_raw(org_id: str, period: str = "today",
 
 @app.get("/api/stoplist/{org_id}")
 async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         demo = dict(DEMO_STOPLIST)
         demo["updated_at"] = local_now().strftime("%H:%M")
         return demo
@@ -3015,7 +3015,7 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
                                limit: int = Query(30, le=50),
                                user: Dict = Depends(get_current_user)):
     """Поиск товаров по имени в номенклатуре iiko (для редактора накладных)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         ql = (q or "").strip().lower()
         items = [p for p in DEMO_NOMENCLATURE if not ql or ql in p["name"].lower()]
         return {"products": [
@@ -3058,7 +3058,7 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
 @app.get("/api/stores/{org_id}")
 async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Склады филиала из iiko (для выбора склада накладной в редакторе)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"stores": [{"id": "d1", "name": "Основной склад"}]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -3076,7 +3076,7 @@ async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
 @app.get("/api/suppliers/{org_id}")
 async def suppliers_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Список поставщиков из iiko (для редактора)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"suppliers": [{"id": "demo-sup-1", "name": "ТОО «Демо-Поставщик»"}]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)

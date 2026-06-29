@@ -56,9 +56,30 @@ def test_use_demo_data_no_trial():
     print("  [OK] нет триала → демо")
 
 
+def test_get_org_id_trial_returns_real():
+    tid = 666
+    database.start_demo_trial(tid, "org-real-666", int(time.time()))
+    # во время триала _get_org_id НЕ должен схлопывать реальный org в "demo".
+    # (без записи в restaurants реальный путь кинет 404 — это и проверяем: НЕ "demo")
+    try:
+        res = api._get_org_id("org-real-666", {"id": tid})
+        assert res != "demo", f"ожидали не demo, got {res}"
+        print("  [OK] _get_org_id в триале не схлопывает в demo")
+    except HTTPException as e:
+        assert e.status_code == 404
+        print("  [OK] _get_org_id в триале идёт реальным путём (404 без записи в БД — ожидаемо)")
+
+
+def test_get_org_id_no_trial_is_demo():
+    res = api._get_org_id("anything", {"id": 777})  # демо-юзер без триала
+    assert res == "demo", res
+    print("  [OK] _get_org_id без триала → demo")
+
+
 if __name__ == "__main__":
     tests = [test_trial_insert_and_get, test_trial_not_reset_on_second_connect, test_get_trial_none,
-             test_use_demo_data_active_trial, test_use_demo_data_ended_trial, test_use_demo_data_no_trial]
+             test_use_demo_data_active_trial, test_use_demo_data_ended_trial, test_use_demo_data_no_trial,
+             test_get_org_id_trial_returns_real, test_get_org_id_no_trial_is_demo]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")
