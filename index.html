@@ -2581,7 +2581,7 @@ async function loadCashshifts() {
       </div>` : ''}
       ${(s.edits || []).length ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider);">
         <div style="font-size:13px;font-weight:600;color:#e5484d;">Исправленные платежи (${s.edits.length}):</div>
-        ${s.edits.map(e => `<div style="font-size:13px;color:var(--text-secondary);">• ${e.time} ${e.type}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}${e.account_changed ? ' (тип оплаты изменён)' : ''}</div>`).join('')}
+        ${s.edits.map(e => `<div style="font-size:13px;color:var(--text-secondary);">• ${escHtml(e.time)} ${escHtml(e.type)}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}${e.account_changed ? ' (тип оплаты изменён)' : ''}</div>`).join('')}
       </div>` : ''}
     </div>`;
   }).join('');
