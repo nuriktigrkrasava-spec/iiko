@@ -175,13 +175,22 @@ def test_salary_blocks_demo_user():
         api.DEMO_ONLY = saved
 
 
+def test_iiko_unavailable_no_fake_data():
+    # A1: при сбое iiko реальному клиенту — флаг ошибки, а НЕ фейковые DEMO-данные.
+    r = api._iiko_unavailable()
+    assert r.get("_iiko_error"), r
+    for fake_key in ("revenue_today", "employees", "channels", "fact_pct", "categories"):
+        assert fake_key not in r, f"в ответе ошибки не должно быть {fake_key}"
+    print("  [OK] _iiko_unavailable: флаг ошибки, без фейковых метрик/ФИО")
+
+
 if __name__ == "__main__":
     tests = [test_initdata_valid_fresh, test_initdata_expired, test_initdata_bad_hash,
              test_failclosed_prod_missing_bot_token, test_failclosed_dev_ok,
              test_weekly_report_denies_no_auth, test_weekly_report_denies_non_operator,
              test_weekly_report_allows_operator, test_salary_rate_denies_non_owner,
              test_salary_rate_blocks_demo_org_bypass, test_salary_override_blocks_demo_org_bypass,
-             test_salary_blocks_demo_user]
+             test_salary_blocks_demo_user, test_iiko_unavailable_no_fake_data]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")

@@ -761,6 +761,12 @@ class ExportSendPayload(BaseModel):
 
 
 # ============ ENDPOINTS ============
+def _iiko_unavailable() -> Dict[str, Any]:
+    """Ответ при сбое iiko для РЕАЛЬНОГО клиента: не подсовываем фейковые DEMO-данные
+    (выдуманную выручку/ФИО) как настоящие — честно сообщаем о недоступности."""
+    return {"_iiko_error": "Данные iiko временно недоступны. Обновите через минуту."}
+
+
 def _check_required_secrets() -> None:
     """Fail-closed в проде: без BOT_TOKEN авторизация отключается (все становятся
     user id 0), без ENCRYPTION_KEY пароли iiko пишутся в БД открытым текстом.
@@ -1102,7 +1108,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
         return resp
     except Exception as e:
         print(f"[dashboard] {e}")
-        return dict(DEMO_DASHBOARD)
+        return _iiko_unavailable()
 
 
 @app.get("/api/revenue/{org_id}")
@@ -1328,7 +1334,7 @@ async def sales(org_id: str, period: str = "today",
         return result
     except Exception as e:
         print(f"[sales] {e}")
-        return dict(DEMO_SALES)
+        return _iiko_unavailable()
 
 
 @app.get("/api/shifts/{org_id}")
@@ -1501,8 +1507,7 @@ async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_curr
         return resp
     except Exception as e:
         print(f"[staff] {e}")
-        demo = dict(DEMO_STAFF)
-        return demo
+        return _iiko_unavailable()
 
 
 @app.get("/api/load-heatmap/{org_id}")
@@ -1683,8 +1688,7 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
         return resp
     except Exception as e:
         print(f"[foodcost] {e}")
-        demo = dict(DEMO_FOODCOST)
-        return demo
+        return _iiko_unavailable()
 
 
 @app.get("/api/expenses/{org_id}")
@@ -1982,7 +1986,7 @@ async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_
         return result
     except Exception as e:
         print(f"[writeoffs] {e}")
-        return DEMO_WRITEOFFS
+        return _iiko_unavailable()
 
 
 @app.get("/api/weekly-report/preview")
@@ -2774,7 +2778,7 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
             return_exceptions=True
         )
         if isinstance(stop_data, Exception) or isinstance(nomen_data, Exception):
-            return DEMO_STOPLIST
+            return _iiko_unavailable()
 
         id_to_product = {p["id"]: p for p in nomen_data.get("products", [])}
         stopped = []
@@ -2793,7 +2797,7 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
 
         return {"items": stopped, "total": len(stopped), "updated_at": local_now().strftime("%H:%M")}
     except Exception:
-        return DEMO_STOPLIST
+        return _iiko_unavailable()
 
 
 @app.post("/api/expenses/manual")

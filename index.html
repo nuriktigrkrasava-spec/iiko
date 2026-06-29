@@ -2171,6 +2171,7 @@ async function loadDashboard() {
   // Фолбек на старый endpoint (демо или iikoWeb без OLAP)
   try {
     const data = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     hideIikoError();
     animateValue('m-revenue', data.revenue_today, ' ₸');
     animateValue('m-check', data.avg_check, ' ₸');
@@ -2239,6 +2240,7 @@ async function loadSales() {
 
   // Каналы и персонал — через отдельный backend (точные данные по заказам)
   apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`).then(data => {
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     if (!data.channels) return;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -2303,6 +2305,7 @@ async function loadSales() {
   // Фолбек
   try {
     const data = await apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     state.salesData = data;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -3031,6 +3034,7 @@ async function loadStaff() {
       apiGet(`/api/staff/${orgId}?period=week`),
       apiGet(`/api/shifts/${orgId}`)
     ]);
+    if (staffData && staffData._iiko_error) { showIikoError(staffData._iiko_error); return; }
     state.staffData = staffData.staff;
     document.getElementById('staff-total-rev').textContent = formatMoney(staffData.total_revenue);
     document.getElementById('staff-total-orders').textContent = staffData.orders;
@@ -3340,7 +3344,7 @@ async function loadExpenses() {
   if (state.expenseTab === 'foodcost') {
     try {
       const data = await apiGet(`/api/foodcost/${orgId}?period=month`);
-      if (data._iiko_error && !state.demoMode) showIikoError(data._iiko_error);
+      if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
       const costNA = data.cost_available === false || data.fact_pct === null;
       document.getElementById('fc-norm-pct').textContent = data.norm_pct + '%';
       document.getElementById('fc-fact-pct').textContent = costNA ? '—' : data.fact_pct + '%';
@@ -3454,6 +3458,7 @@ async function loadExpenses() {
   if (state.expenseTab === 'writeoffs') {
     try {
       const data = await apiGet(`/api/writeoffs/${orgId}?period=week`);
+      if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
       state.writeoffsData = data.categories || [];
       document.getElementById('wo-total').textContent = formatMoney(data.total_written);
       document.getElementById('wo-purchases').textContent = formatMoney(data.purchases);
@@ -3721,6 +3726,7 @@ async function loadStopList() {
   const orgId = state.restaurant.organization_id;
   try {
     const data = await apiGet(`/api/stoplist/${orgId}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     document.getElementById('stoplist-count').textContent = data.total;
     document.getElementById('stoplist-updated').textContent = 'Обновлено: ' + data.updated_at;
     if (!data.items || data.items.length === 0) {
