@@ -504,6 +504,10 @@ html, body {
 .ie-search-name { font-size:13px; color:var(--text); }
 .ie-search-meta { font-size:11px; color:var(--text-secondary); margin-top:2px; }
 .ie-modal-actions { display:flex; gap:8px; margin-top:12px; }
+.ie-hint { margin:12px 16px; padding:14px 16px; background:var(--bg-secondary); border:1px solid var(--divider); border-radius:12px; }
+.ie-hint-title { font-size:14px; font-weight:700; color:var(--text); margin-bottom:8px; }
+.ie-hint-row { font-size:13px; line-height:1.45; color:var(--text-secondary); margin-bottom:7px; }
+.ie-hint-close { margin-top:6px; width:100%; padding:10px; background:var(--accent); color:var(--bg); border:none; border-radius:10px; font-weight:700; font-size:14px; cursor:pointer; }
 .ie-modal-actions button { flex:1; padding:12px; border-radius:10px; border:none; cursor:pointer; font-weight:600; font-size:14px; }
 .ie-modal-save { background:var(--accent); color:var(--bg); }
 .ie-modal-cancel { background:var(--bg-secondary); color:var(--text); }
@@ -1304,6 +1308,14 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
   <div class="scroll-container" id="ie-scroll">
     <div id="ie-loading" class="ie-empty">Загрузка...</div>
     <div id="ie-content" style="display:none;">
+      <div id="ie-hint" class="ie-hint" style="display:none;">
+        <div class="ie-hint-title">📝 Как редактировать накладную</div>
+        <div class="ie-hint-row">🏭 <b>Поставщик · 📅 Дата · 🏢 Филиал</b> — реквизиты накладной сверху. Проверьте и поправьте при необходимости.</div>
+        <div class="ie-hint-row">📦 <b>Позиции</b> — что распознал бот. <span style="color:var(--green,#2bb673)">Зелёным</span> — товар уже сопоставлен с вашей номенклатурой iiko; <span style="color:var(--red,#e25c5c)">красным</span> — нужно сопоставить вручную: нажмите ✏️ и выберите товар.</div>
+        <div class="ie-hint-row">💰 <b>Итоги</b> — суммы по накладной, считаются автоматически из позиций.</div>
+        <div class="ie-hint-row">✅ <b>Сохранить</b> — вернуть накладную в бот и загрузить приход в iiko.</div>
+        <button class="ie-hint-close" onclick="ieDismissHint()">Понятно</button>
+      </div>
       <div class="ie-meta">
         <div class="ie-meta-row" id="ie-branch-row" style="display:none;">
           <div class="ie-meta-label">Филиал</div>
@@ -4569,6 +4581,7 @@ async function ieInit() {
     document.getElementById('ie-loading').style.display = 'none';
     document.getElementById('ie-content').style.display = 'block';
     document.getElementById('ie-save-bar').style.display = 'flex';
+    ieMaybeShowHint();
   } catch (e) {
     document.getElementById('ie-loading').textContent = '❌ Не удалось загрузить накладную. Сессия могла истечь.';
   }
@@ -4914,6 +4927,18 @@ async function ieSave() {
   setTimeout(() => { tg?.close?.(); }, 200);
 }
 
+function ieMaybeShowHint() {
+  const hint = document.getElementById('ie-hint');
+  if (!hint) return;
+  hint.style.display = localStorage.getItem('ie_hint_seen') ? 'none' : 'block';
+}
+
+function ieDismissHint() {
+  try { localStorage.setItem('ie_hint_seen', '1'); } catch (e) {}
+  const hint = document.getElementById('ie-hint');
+  if (hint) hint.style.display = 'none';
+}
+
 function ieClose() {
   if (ieState.savedBotId) {
     ieCloseSavedEditor();
@@ -4963,6 +4988,7 @@ async function openSavedInvoiceEditor(botId) {
     document.getElementById('ie-loading').style.display = 'none';
     document.getElementById('ie-content').style.display = 'block';
     document.getElementById('ie-save-bar').style.display = 'flex';
+    ieMaybeShowHint();
   } catch (e) {
     document.getElementById('ie-loading').textContent = '❌ Не удалось загрузить.';
   }
