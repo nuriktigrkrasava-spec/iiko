@@ -485,28 +485,21 @@ DEMO_NOMENCLATURE = [
 # Лимит «До N накладных/мес» в платном тарифе:
 DEMO_PLAN_INVOICES = 300
 DEMO_UPSELL_TEXT = (
-    "✨ Вот так — за 10 секунд бот распознал вашу накладную и подготовил её к загрузке в iiko. "
-    "Без единой цифры вручную.\n\n"
-    "А теперь представьте, что так обрабатывается каждая накладная от каждого поставщика. "
-    "Каждый день. Сама.\n\n"
-    "Сейчас ваш кладовщик тратит на это по часу, а бухгалтер потом ищет, где закралась опечатка. "
-    "Эти часы и ошибки тихо стоят вам денег — каждый месяц. Бот убирает их полностью: "
-    "кладовщик просто фотографирует, остальное делает бот.\n\n"
-    "📦 <b>Что внутри:</b>\n"
-    "• Распознавание накладных с фото — секунды вместо часов\n"
-    "• Автосопоставление с вашей номенклатурой в iiko\n"
+    "✨ Готово — за 10 секунд бот распознал вашу накладную и подготовил к загрузке в iiko. "
+    "Ни одной цифры руками.\n\n"
+    "А теперь представьте, что так — каждая накладная, каждый день, сама. "
+    "Кладовщик просто фотографирует.\n\n"
+    "📦 Что входит:\n"
+    "• Распознавание с фото + автосопоставление с вашей номенклатурой\n"
     "• Загрузка прихода в один тап\n"
-    "• Аналитика, где утекают деньги: фудкост, смены, персонал, потери\n"
-    f"• До {DEMO_PLAN_INVOICES} накладных в месяц включено — с запасом для большинства заведений\n\n"
-    "🤖 При подключении напишем и настроим бота под вас — под вашу номенклатуру, "
-    "ваших поставщиков и вашу сеть.\n\n"
-    "💰 <b>Обычная цена:</b> 300 000 ₸ за подключение + 40 000 ₸/мес.\n"
-    "Сейчас беру первых 5 заведений на особых условиях:\n"
-    "• Подключение — <b>150 000 ₸</b> вместо 300 000 ₸\n"
-    "• Обслуживание — <b>30 000 ₸/мес</b>, цена закреплена за вами навсегда\n"
-    "• Не подойдёт за первый месяц — верну подключение полностью\n\n"
-    "Это дешевле часа бухгалтера в день — а бот не ошибается, не устаёт и работает круглосуточно.\n\n"
-    "👉 Свободно мест: 5. Напишите мне в Telegram — настрою под вас."
+    "• Настройка под ваших поставщиков и сеть\n"
+    "• До 300 накладных/мес\n\n"
+    "💰 Обычно: 300 000 ₸ подключение + 40 000 ₸/мес.\n"
+    "Первым 5 заведениям:\n"
+    "• Подключение 150 000 ₸\n"
+    "• 30 000 ₸/мес — цена закреплена за вами навсегда\n"
+    "• Не подойдёт за месяц — верну подключение полностью\n\n"
+    "👉 Осталось 5 мест. Напишите — настрою под вас."
 )
 
 def _demo_upsell_kb() -> dict:
@@ -3193,6 +3186,20 @@ async def invoice_unpost_doc(invoice_id: int, user: Dict = Depends(get_current_u
 _pending_invoices: Dict[int, dict] = {}
 _pending_by_id: Dict[str, int] = {}
 
+# Демо-бот: пошаговое подключение реального iiko прямо в чате.
+# chat_id -> {"step": "server"|"login"|"password", "server", "login", "pending_id"}
+_demo_reg: Dict[int, dict] = {}
+
+DEMO_REG_PROMPTS = {
+    "server": ("🔌 Подключим ваш iiko — и накладная улетит прямо к вам.\n\n"
+               "Шаг 1/3 — пришлите адрес вашего iiko-сервера "
+               "(например <code>https://ваш-сервер.iiko.it/resto</code> или адрес iikoWeb).\n\n"
+               "Отменить — /cancel"),
+    "login": "Шаг 2/3 — логин API-пользователя iiko:",
+    "password": ("Шаг 3/3 — пароль API-пользователя iiko:\n\n"
+                 "🔒 Сообщение с паролем удалю сразу после проверки."),
+}
+
 def _invoice_kb(pending_id: str) -> dict:
     """Динамическая клавиатура превью — WebApp-кнопка редактирования с pending_id в URL."""
     return {
@@ -4224,6 +4231,16 @@ async def _send_demo_upsell(chat_id: int) -> None:
     await _tg_send(chat_id, DEMO_UPSELL_TEXT, _demo_upsell_kb())
 
 
+async def _delayed_demo_upsell(chat_id: int, delay: float = 10.0) -> None:
+    """Шлём продающее сообщение через паузу после распознавания — чтобы клиент
+    успел увидеть результат, а потом получил оффер."""
+    try:
+        await asyncio.sleep(delay)
+        await _send_demo_upsell(chat_id)
+    except Exception as e:
+        logger.warning(f"[demo upsell] {e}")
+
+
 async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
     """Демо-бот: если юзер уже распознал свою 1 накладную — шлём апселл и блокируем."""
     if DEMO_ONLY and get_demo_invoice_count(telegram_id) >= 1:
@@ -4233,10 +4250,10 @@ async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
 
 
 async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
-    """Демо-бот: после успешного распознавания фиксируем лимит и шлём апселл."""
+    """Демо-бот: после успешного распознавания фиксируем лимит и шлём апселл через 10с."""
     if DEMO_ONLY:
         inc_demo_invoice_count(telegram_id)
-        await _send_demo_upsell(chat_id)
+        asyncio.create_task(_delayed_demo_upsell(chat_id))
 
 
 async def _recognize_invoice_and_create_pending(
@@ -4291,6 +4308,87 @@ async def _recognize_invoice_and_create_pending(
         pending["message_id"] = new_id
 
     await _demo_after_recognition(chat_id, telegram_id)
+
+
+async def _handle_demo_registration(chat_id: int, telegram_id: int, username: str,
+                                    message: dict) -> bool:
+    """Демо-бот: пошаговое подключение реального iiko в чате (server→login→password),
+    проверка доступа и реальная отправка отложенной накладной. True если сообщение
+    обработано как часть регистрации."""
+    reg = _demo_reg.get(chat_id)
+    if not reg:
+        return False
+    # Сохранение из Mini App-редактора не перехватываем — пусть идёт по своему пути.
+    if message.get("web_app_data"):
+        return False
+    text = (message.get("text") or "").strip()
+    # /start выходит из регистрации и показывает обычное приветствие.
+    if text == "/start":
+        _demo_reg.pop(chat_id, None)
+        return False
+    if text.lower() in ("/cancel", "отмена", "cancel"):
+        _demo_reg.pop(chat_id, None)
+        await _tg_send(chat_id, "Окей, подключение отменено. Нажми «Отправить в iiko» в накладной, когда будешь готов.")
+        return True
+    if not text:
+        await _tg_send(chat_id, "Заверши подключение iiko — пришли ответ текстом по шагам, или /cancel.")
+        return True
+
+    step = reg.get("step")
+    if step == "server":
+        srv = text if text.startswith("http") else "https://" + text
+        reg["server"] = srv
+        reg["step"] = "login"
+        await _tg_send(chat_id, DEMO_REG_PROMPTS["login"])
+        return True
+    if step == "login":
+        reg["login"] = text
+        reg["step"] = "password"
+        await _tg_send(chat_id, DEMO_REG_PROMPTS["password"])
+        return True
+    if step == "password":
+        # Пароль в чате — удаляем сообщение сразу, чтобы не висел в истории.
+        mid = message.get("message_id")
+        if mid:
+            await _tg_delete_msg(chat_id, mid)
+        password = text
+        server, login = reg.get("server"), reg.get("login")
+        pending_id = reg.get("pending_id")
+        status = await _tg_send(chat_id, "🔐 Проверяю доступ к iiko...")
+        try:
+            client = get_client(login, server, password)
+            orgs = await client.get_organizations()
+        except Exception as e:
+            reg["step"] = "server"
+            await _tg_edit(chat_id, status,
+                f"❌ Не получилось подключиться: {e}\n\n"
+                f"Пришли адрес сервера заново (шаг 1/3), или /cancel.")
+            return True
+        if not orgs:
+            reg["step"] = "server"
+            await _tg_edit(chat_id, status,
+                "❌ По этим доступам не нашлось организаций. Пришли адрес сервера заново, или /cancel.")
+            return True
+        create_user(telegram_id, username, username)
+        for o in orgs:
+            add_restaurant(telegram_id, login, o["id"], o.get("name") or "iiko", server, password)
+        _demo_reg.pop(chat_id, None)
+        await _tg_edit(chat_id, status, f"✅ iiko подключён ({orgs[0].get('name') or 'организация'}).")
+
+        pending = _get_pending_by_id(pending_id) if pending_id else _get_pending_by_chat(chat_id)
+        if not pending:
+            await _tg_send(chat_id, "Накладная устарела — пришли её заново и нажми «Отправить в iiko».")
+            return True
+        rests = [r for r in _get_user_orgs(telegram_id) if r.get("api_login") != "demo"]
+        send_msg = await _tg_send(chat_id, "➡️ Отправляю накладную в iiko...")
+        if len(rests) == 1:
+            pending["organization_id"] = rests[0]["organization_id"]
+            _persist_pending(pending)
+            await _show_supplier_picker_for_org(chat_id, send_msg, pending, rests[0]["organization_id"])
+        else:
+            await _show_org_picker(chat_id, send_msg, pending)
+        return True
+    return True
 
 
 @app.post("/telegram/webhook")
@@ -4398,16 +4496,15 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
 
             if action == "act:send":
-                # Демо-бот: реальной отправки в iiko нет — вместо тупика показываем оффер.
-                if DEMO_ONLY:
-                    await _send_demo_upsell(chat_id)
-                    return {"ok": True}
-                rests = _get_user_orgs(pending["telegram_id"])
+                rests = [r for r in _get_user_orgs(pending["telegram_id"])
+                         if r.get("api_login") != "demo"]
                 if not rests:
+                    # Демо-бот: подключаем реальный iiko прямо в чате, потом отправляем.
+                    if DEMO_ONLY:
+                        _demo_reg[chat_id] = {"step": "server", "pending_id": pending["pending_id"]}
+                        await _tg_send(chat_id, DEMO_REG_PROMPTS["server"])
+                        return {"ok": True}
                     await _tg_edit(chat_id, msg_id, "⚠️ У тебя не настроен ни один ресторан. Открой Mini App и подключи iiko-учётку.")
-                    return {"ok": True}
-                if rests[0]["api_login"] == "demo":
-                    await _tg_edit(chat_id, msg_id, "⚠️ Ты в demo-режиме. Отправка в iiko недоступна — добавь реальную учётку.")
                     return {"ok": True}
                 if len(rests) == 1:
                     pending["organization_id"] = rests[0]["organization_id"]
@@ -4474,6 +4571,10 @@ async def telegram_webhook(request: Request):
         user_tg = message.get("from", {})
         telegram_id = user_tg.get("id", 0)
         username = user_tg.get("username") or user_tg.get("first_name", "user")
+
+        # Демо-бот: идёт пошаговое подключение iiko — перехватываем ввод до распознавания.
+        if await _handle_demo_registration(chat_id, telegram_id, username, message):
+            return {"ok": True}
 
         # === WEB_APP_DATA (Mini App-редактор → бот) ===
         if message.get("web_app_data"):
