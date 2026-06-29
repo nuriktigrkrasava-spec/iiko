@@ -84,11 +84,22 @@ def test_demo_trial_endpoint_active():
     print("  [OK] /api/demo/trial → active с org_id")
 
 
+def test_trials_due_for_sales():
+    database.start_demo_trial(1001, "o", 1000)            # давно — должен попасть
+    database.start_demo_trial(1002, "o", int(time.time()))  # только что — не должен
+    due = database.get_trials_due_for_sales(int(time.time()), 24 * 3600)
+    assert 1001 in due and 1002 not in due, due
+    database.mark_trial_sales_sent(1001)
+    due2 = database.get_trials_due_for_sales(int(time.time()), 24 * 3600)
+    assert 1001 not in due2, "после mark_trial_sales_sent не должен повторяться"
+    print("  [OK] get_trials_due_for_sales + mark_trial_sales_sent")
+
+
 if __name__ == "__main__":
     tests = [test_trial_insert_and_get, test_trial_not_reset_on_second_connect, test_get_trial_none,
              test_use_demo_data_active_trial, test_use_demo_data_ended_trial, test_use_demo_data_no_trial,
              test_get_org_id_trial_returns_real, test_get_org_id_no_trial_is_demo,
-             test_demo_trial_endpoint_active]
+             test_demo_trial_endpoint_active, test_trials_due_for_sales]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")

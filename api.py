@@ -29,6 +29,7 @@ from database import (
     init_db, get_user, create_user, set_demo_mode,
     get_demo_invoice_count, inc_demo_invoice_count,
     start_demo_trial, get_demo_trial,
+    get_trials_due_for_sales, mark_trial_sales_sent,
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
@@ -792,6 +793,8 @@ async def startup():
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
+    if DEMO_ONLY:
+        asyncio.create_task(_demo_sales_scheduler())
 
 
 @app.get("/")
@@ -3628,6 +3631,25 @@ async def _send_weekly_report() -> bool:
         return False
     await _tg_send(int(user["telegram_id"]), text)
     return True
+
+
+async def _demo_sales_scheduler():
+    """Демо-бот: через DEMO_TRIAL_HOURS после подключения шлёт оффер в чат — один раз на юзера.
+    В личке Telegram chat_id == telegram_id."""
+    if not DEMO_ONLY:
+        return
+    while True:
+        try:
+            now = int(datetime.now(timezone.utc).timestamp())
+            for tid in get_trials_due_for_sales(now, DEMO_TRIAL_HOURS * 3600):
+                try:
+                    await _tg_send(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
+                    mark_trial_sales_sent(tid)
+                except Exception as e:
+                    logger.warning(f"[demo_sales] {tid}: {e}")
+        except Exception as e:
+            logger.warning(f"[demo_sales] loop: {e}")
+        await asyncio.sleep(300)
 
 
 async def _weekly_report_scheduler():
