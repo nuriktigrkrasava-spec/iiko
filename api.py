@@ -98,6 +98,8 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+# Срок годности Telegram initData (сек). По умолчанию сутки.
+INIT_DATA_MAX_AGE = int(os.getenv("INIT_DATA_MAX_AGE_SEC", "86400"))
 # DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
@@ -188,8 +190,16 @@ def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
-        if calculated_hash != hash_:
+        if not hmac.compare_digest(calculated_hash, hash_):
             raise HTTPException(status_code=403, detail="Invalid Telegram init data")
+
+        # Срок годности initData: без проверки перехваченная строка — вечный пропуск.
+        try:
+            auth_date = int(parsed.get("auth_date", "0"))
+        except (ValueError, TypeError):
+            auth_date = 0
+        if auth_date and (datetime.now(timezone.utc).timestamp() - auth_date) > INIT_DATA_MAX_AGE:
+            raise HTTPException(status_code=401, detail="Telegram init data expired")
 
         user_raw = unquote(parsed.get("user", "{}"))
         user = json.loads(user_raw)
@@ -748,8 +758,28 @@ class ExportSendPayload(BaseModel):
 
 
 # ============ ENDPOINTS ============
+def _check_required_secrets() -> None:
+    """Fail-closed в проде: без BOT_TOKEN авторизация отключается (все становятся
+    user id 0), без ENCRYPTION_KEY пароли iiko пишутся в БД открытым текстом.
+    Лучше не подняться, чем тихо работать дырявым. Webhook-секрет — громкое
+    предупреждение (его отсутствие открывает вебхук, но не валит прод)."""
+    if not IS_PROD:
+        return
+    missing = []
+    if not BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN (без него авторизация выключена)")
+    if not os.getenv("ENCRYPTION_KEY"):
+        missing.append("ENCRYPTION_KEY (без него пароли iiko в БД открытым текстом)")
+    if missing:
+        raise RuntimeError("Отказ запуска (fail-closed): не заданы " + "; ".join(missing))
+    if not TELEGRAM_WEBHOOK_SECRET:
+        logger.warning("[security] TELEGRAM_WEBHOOK_SECRET не задан — вебхук бота "
+                       "принимает запросы без проверки. Задайте секрет в проде.")
+
+
 @app.on_event("startup")
 async def startup():
+    _check_required_secrets()
     init_db()
     from database import init_reviews_db, init_salary_db, init_salary_overrides_db
     init_reviews_db()
@@ -1941,12 +1971,17 @@ async def weekly_report_preview(
         token: Optional[str] = Query(None),
         x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
     """Предпросмотр воскресного отчёта (и отправка получателю при send=true).
-    Доступ: секретный токен (для браузера) ИЛИ Telegram-авторизация (из Mini App)."""
-    authed = bool(REPORT_PREVIEW_TOKEN and token == REPORT_PREVIEW_TOKEN)
+    ВНУТРЕННИЙ отчёт оператора по ВСЕМ филиалам сети — доступ только оператору
+    (получателю REPORT_RECIPIENT_USERNAME) или по секретному токену. Обычный клиент
+    НЕ должен видеть выручку чужих филиалов."""
+    authed = bool(REPORT_PREVIEW_TOKEN and token
+                  and hmac.compare_digest(token, REPORT_PREVIEW_TOKEN))
     if not authed:
         try:
             u = await get_current_user(x_telegram_init_data)
-            authed = not _is_demo_user(u)
+            recipient = get_user_by_username(REPORT_RECIPIENT_USERNAME)
+            authed = bool(recipient and not _is_demo_user(u)
+                          and int(u.get("id", 0)) == int(recipient.get("telegram_id") or 0))
         except Exception:
             authed = False
     if not authed:
@@ -3456,7 +3491,9 @@ async def _tg_send(chat_id: int, text: str, reply_markup: dict = None) -> Option
 REPORT_RECIPIENT_USERNAME = os.getenv("REPORT_RECIPIENT_USERNAME", "AibolatAvilkhan")
 REPORT_HOUR_LOCAL = int(os.getenv("REPORT_HOUR_LOCAL", "10"))  # во сколько (локальное) слать
 # Секрет для открытия превью отчёта из браузера (URL никуда не выводится).
-REPORT_PREVIEW_TOKEN = os.getenv("REPORT_PREVIEW_TOKEN", "e8c893c7c1fd22c47d5ceedbd5973d93")
+# Без явно заданного env — токен-доступ ВЫКЛЮЧЕН (fail-closed), остаётся только
+# доступ оператора по Telegram. Хардкод-дефолт убран — это была дыра.
+REPORT_PREVIEW_TOKEN = os.getenv("REPORT_PREVIEW_TOKEN", "")
 
 
 async def _branch_week_metrics(rest: Dict[str, Any], date_from: str, date_to: str):
@@ -4988,11 +5025,13 @@ async def salary(org_id: str, response: Response,
 
 
 class SalaryRateIn(BaseModel):
+    org_id: str
     employee_id: str
     rate: float
 
 
 class SalaryOverrideIn(BaseModel):
+    org_id: str
     employee_id: str
     period_key: str
     amount: Optional[float] = None  # None = убрать ручную правку
@@ -5000,6 +5039,7 @@ class SalaryOverrideIn(BaseModel):
 
 @app.post("/api/salary/rate")
 async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
+    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
     from database import set_salary_rate
     set_salary_rate(payload.employee_id, payload.rate)
     return {"ok": True}
@@ -5008,6 +5048,7 @@ async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_us
 @app.post("/api/salary/override")
 async def salary_override(payload: SalaryOverrideIn, user: Dict = Depends(get_current_user)):
     """Ручная правка итоговой зарплаты за период (None — вернуть авторасчёт)."""
+    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
     from database import set_salary_override
     set_salary_override(payload.employee_id, payload.period_key, payload.amount)
     return {"ok": True}

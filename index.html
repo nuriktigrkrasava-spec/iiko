@@ -2680,7 +2680,7 @@ async function loadSalary() {
 async function setSalaryTotal(employeeId, current) {
   const v = prompt('Итоговая зарплата за период, ₸ (пусто — вернуть авторасчёт):', current || '');
   if (v === null) return;
-  await apiPost('/api/salary/override', { employee_id: employeeId,
+  await apiPost('/api/salary/override', { org_id: csOrgId(), employee_id: employeeId,
     period_key: state._salaryPeriodKey, amount: v.trim() === '' ? null : +v });
   loadSalary();
 }
@@ -2688,7 +2688,7 @@ async function setSalaryTotal(employeeId, current) {
 async function setRate(employeeId, current) {
   const v = prompt('Ставка, ₸/час:', current || '');
   if (v === null) return;
-  await apiPost('/api/salary/rate', { employee_id: employeeId, rate: +v || 0 });
+  await apiPost('/api/salary/rate', { org_id: csOrgId(), employee_id: employeeId, rate: +v || 0 });
   loadSalary();
 }
 
