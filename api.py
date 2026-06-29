@@ -948,7 +948,7 @@ def _get_org_id(org_id: str, user: Dict) -> str:
 
 def _get_restaurant_info(org_id: str, user: Dict) -> Dict[str, Any]:
     """Возвращает api_login, iiko_server, api_password, org_name для ресторана."""
-    if org_id == "demo" or _is_demo_user(user):
+    if org_id == "demo" or _use_demo_data(user, org_id):
         return {"api_login": "demo", "iiko_server": None, "api_password": None, "org_name": ""}
     rests = get_restaurants(user.get("id", 0))
     for r in rests:
@@ -4842,7 +4842,7 @@ async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
     from database import (get_review_link, set_review_link,
                           save_rating_snapshot, get_rating_history)
 
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"platforms": [
             {"platform": "2gis", "label": "2ГИС", "rating": 4.6, "scale": 5,
              "reviews_count": 1234, "delta": 0.1, "title": "Demo"},
@@ -4969,7 +4969,7 @@ def _payment_edits(payments: Dict[str, Any]) -> List[Dict[str, Any]]:
 @app.get("/api/cashshifts_day/{org_id}")
 async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_current_user)):
     """Смены филиала за дату: суммы, расхождения, исправленные платежи, кассиры."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"date": date, "shifts": [
             {"number": 12, "cash_reg": 1, "cashier": "Виктория Ким", "open": "10:02", "close": "23:48",
              "cash": 55970, "card": 276508, "credit": 8973, "total": 341451,
@@ -5035,7 +5035,7 @@ async def salary(org_id: str, response: Response,
                  from_: str = Query(..., alias="from"), to: str = Query(...),
                  user: Dict = Depends(get_current_user)):
     """Часы сотрудников филиала из явок iiko × ставка (хранится у нас)."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"rows": [
             {"employee_id": "d1", "name": "Виктория Ким", "hours": 142.5, "rate": 900, "total": 128250},
             {"employee_id": "d2", "name": "Артём Волков", "hours": 156.0, "rate": 800, "total": 124800},
@@ -5198,7 +5198,7 @@ async def _daily_shifts_scheduler():
 async def cashshifts_pending(org_id: str, days: int = 30,
                              user: Dict = Depends(get_current_user)):
     """Непринятые/незакрытые смены филиала за последние N дней (для счётчика)."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"count": 3, "items": [
             {"date": "2026-06-10", "number": 41, "status": "UNACCEPTED", "open_now": False},
             {"date": "2026-06-09", "number": 40, "status": "UNACCEPTED", "open_now": False},
