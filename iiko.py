@@ -89,6 +89,8 @@ def _dt(date_str: str, end: bool = False) -> str:
 # ============ iiko CLOUD CLIENT ============
 
 class IikoClient:
+    supports_cost = True  # облачный API отдаёт себестоимость (DishCostSumInt)
+
     def __init__(self, api_login: str):
         self.api_login = api_login
         self.token: Optional[str] = None
@@ -443,6 +445,8 @@ class IikoClient:
 
 class IikoWebClient:
     """Клиент для самохостед iikoWeb 9.x через REST API /resto/api/v2/"""
+
+    supports_cost = False  # DishCostSumInt нет в iikoWeb без отдельной лицензии
 
     def __init__(self, base_url: str, login: str, password: str):
         self.base_url = base_url.rstrip("/")

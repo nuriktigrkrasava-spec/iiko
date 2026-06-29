@@ -135,11 +135,62 @@ def test_salary_rate_denies_non_owner():
     raise AssertionError("ожидался 404")
 
 
+def test_salary_rate_blocks_demo_org_bypass():
+    # Регрессия: раньше org_id="demo-org-1" проскакивал _get_org_id без проверки.
+    payload = api.SalaryRateIn(org_id="demo-org-1", employee_id="victim-emp", rate=777.0)
+    try:
+        asyncio.run(api.salary_rate(payload, user={"id": 4242}))
+    except HTTPException as e:
+        assert e.status_code == 403, e.status_code
+        print("  [OK] salary/rate через demo-org-1 → 403 (обход закрыт)")
+        return
+    raise AssertionError("ожидался 403 на demo-org-1 bypass")
+
+
+def test_salary_override_blocks_demo_org_bypass():
+    payload = api.SalaryOverrideIn(org_id="demo-org-1", employee_id="victim",
+                                   period_key="2026-06", amount=999999.0)
+    try:
+        asyncio.run(api.salary_override(payload, user={"id": 4242}))
+    except HTTPException as e:
+        assert e.status_code == 403, e.status_code
+        print("  [OK] salary/override через demo-org-1 → 403")
+        return
+    raise AssertionError("ожидался 403")
+
+
+def test_salary_blocks_demo_user():
+    saved = api.DEMO_ONLY
+    api.DEMO_ONLY = True  # на демо-боте каждый юзер демо → запись зарплат запрещена
+    try:
+        payload = api.SalaryRateIn(org_id="whatever", employee_id="e", rate=1.0)
+        try:
+            asyncio.run(api.salary_rate(payload, user={"id": 4242}))
+        except HTTPException as e:
+            assert e.status_code == 403, e.status_code
+            print("  [OK] demo-юзер не может писать зарплаты → 403")
+            return
+        raise AssertionError("ожидался 403 для демо-юзера")
+    finally:
+        api.DEMO_ONLY = saved
+
+
+def test_iiko_unavailable_no_fake_data():
+    # A1: при сбое iiko реальному клиенту — флаг ошибки, а НЕ фейковые DEMO-данные.
+    r = api._iiko_unavailable()
+    assert r.get("_iiko_error"), r
+    for fake_key in ("revenue_today", "employees", "channels", "fact_pct", "categories"):
+        assert fake_key not in r, f"в ответе ошибки не должно быть {fake_key}"
+    print("  [OK] _iiko_unavailable: флаг ошибки, без фейковых метрик/ФИО")
+
+
 if __name__ == "__main__":
     tests = [test_initdata_valid_fresh, test_initdata_expired, test_initdata_bad_hash,
              test_failclosed_prod_missing_bot_token, test_failclosed_dev_ok,
              test_weekly_report_denies_no_auth, test_weekly_report_denies_non_operator,
-             test_weekly_report_allows_operator, test_salary_rate_denies_non_owner]
+             test_weekly_report_allows_operator, test_salary_rate_denies_non_owner,
+             test_salary_rate_blocks_demo_org_bypass, test_salary_override_blocks_demo_org_bypass,
+             test_salary_blocks_demo_user, test_iiko_unavailable_no_fake_data]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")

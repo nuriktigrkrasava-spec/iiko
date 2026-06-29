@@ -700,6 +700,9 @@ def _fmt_date(dt_str: str) -> str:
 
 
 async def _foodcost_month(client, org_id: str, date_from: str, date_to: str):
+    # На самохостед iikoWeb себестоимости (DishCostSumInt) нет — не выдаём 0%/−30
+    # как «факт», а помечаем недоступной, чтобы не показывать клиенту неверную цифру.
+    cost_available = getattr(client, "supports_cost", True)
     result = await client.olap_report(
         org_id, date_from, date_to,
         ["DishName", "ProductCategory.Name"],
@@ -718,9 +721,9 @@ async def _foodcost_month(client, org_id: str, date_from: str, date_to: str):
         total_cost += cost
         dishes.append({
             "name": name, "category": cat, "revenue": rev, "count": count,
-            "cost_pct": round(cost / rev * 100, 1) if rev else 0.0
+            "cost_pct": (round(cost / rev * 100, 1) if rev else 0.0) if cost_available else None
         })
-    return dishes, total_rev, total_cost
+    return dishes, total_rev, total_cost, cost_available
 
 
 # ============ MODELS ============
@@ -758,6 +761,12 @@ class ExportSendPayload(BaseModel):
 
 
 # ============ ENDPOINTS ============
+def _iiko_unavailable() -> Dict[str, Any]:
+    """Ответ при сбое iiko для РЕАЛЬНОГО клиента: не подсовываем фейковые DEMO-данные
+    (выдуманную выручку/ФИО) как настоящие — честно сообщаем о недоступности."""
+    return {"_iiko_error": "Данные iiko временно недоступны. Обновите через минуту."}
+
+
 def _check_required_secrets() -> None:
     """Fail-closed в проде: без BOT_TOKEN авторизация отключается (все становятся
     user id 0), без ENCRYPTION_KEY пароли iiko пишутся в БД открытым текстом.
@@ -1099,7 +1108,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
         return resp
     except Exception as e:
         print(f"[dashboard] {e}")
-        return dict(DEMO_DASHBOARD)
+        return _iiko_unavailable()
 
 
 @app.get("/api/revenue/{org_id}")
@@ -1325,7 +1334,7 @@ async def sales(org_id: str, period: str = "today",
         return result
     except Exception as e:
         print(f"[sales] {e}")
-        return dict(DEMO_SALES)
+        return _iiko_unavailable()
 
 
 @app.get("/api/shifts/{org_id}")
@@ -1498,8 +1507,7 @@ async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_curr
         return resp
     except Exception as e:
         print(f"[staff] {e}")
-        demo = dict(DEMO_STAFF)
-        return demo
+        return _iiko_unavailable()
 
 
 @app.get("/api/load-heatmap/{org_id}")
@@ -1633,38 +1641,54 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
 
         if isinstance(results[0], Exception):
             raise results[0]
-        dishes, total_rev, total_cost = results[0]
+        dishes, total_rev, total_cost, cost_available = results[0]
 
         NORM_PCT = 30
-        fact_pct = round(total_cost / total_rev * 100, 1) if total_rev else 0.0
-        dishes.sort(key=lambda x: x["cost_pct"], reverse=True)
+        dishes.sort(key=lambda x: (x["cost_pct"] if x["cost_pct"] is not None else -1), reverse=True)
 
         trend = []
         for idx, (month_name, _, _) in enumerate(trend_periods):
             r = results[idx + 1]
-            if isinstance(r, Exception):
-                m_fact = 0.0
+            if isinstance(r, Exception) or not cost_available:
+                m_fact = None if not cost_available else 0.0
             else:
-                _, m_rev, m_cost = r
+                _, m_rev, m_cost, _ = r
                 m_fact = round(m_cost / m_rev * 100, 1) if m_rev else 0.0
             trend.append({"month": month_name, "fact": m_fact, "norm": NORM_PCT})
 
-        resp = {
-            "norm_pct": NORM_PCT,
-            "fact_pct": fact_pct,
-            "diff_pct": round(fact_pct - NORM_PCT, 1),
-            "norm_sum": round(total_rev * NORM_PCT / 100),
-            "fact_sum": round(total_cost),
-            "warning": None,
-            "trend": trend,
-            "dishes": dishes[:20]
-        }
+        if cost_available:
+            fact_pct = round(total_cost / total_rev * 100, 1) if total_rev else 0.0
+            resp = {
+                "norm_pct": NORM_PCT,
+                "fact_pct": fact_pct,
+                "diff_pct": round(fact_pct - NORM_PCT, 1),
+                "norm_sum": round(total_rev * NORM_PCT / 100),
+                "fact_sum": round(total_cost),
+                "warning": None,
+                "cost_available": True,
+                "trend": trend,
+                "dishes": dishes[:20]
+            }
+        else:
+            # Себестоимости нет на этой лицензии — не врём «0% / −30», честно помечаем.
+            resp = {
+                "norm_pct": NORM_PCT,
+                "fact_pct": None,
+                "diff_pct": None,
+                "norm_sum": round(total_rev * NORM_PCT / 100),
+                "fact_sum": None,
+                "warning": "Себестоимость недоступна на вашей лицензии iiko "
+                           "(iikoWeb без отдельной лицензии не отдаёт DishCostSumInt). "
+                           "Показываем выручку и продажи по блюдам; фудкост-% посчитать нельзя.",
+                "cost_available": False,
+                "trend": trend,
+                "dishes": dishes[:20]
+            }
         _set_cached(key, resp)
         return resp
     except Exception as e:
         print(f"[foodcost] {e}")
-        demo = dict(DEMO_FOODCOST)
-        return demo
+        return _iiko_unavailable()
 
 
 @app.get("/api/expenses/{org_id}")
@@ -1962,7 +1986,7 @@ async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_
         return result
     except Exception as e:
         print(f"[writeoffs] {e}")
-        return DEMO_WRITEOFFS
+        return _iiko_unavailable()
 
 
 @app.get("/api/weekly-report/preview")
@@ -1975,7 +1999,7 @@ async def weekly_report_preview(
     (получателю REPORT_RECIPIENT_USERNAME) или по секретному токену. Обычный клиент
     НЕ должен видеть выручку чужих филиалов."""
     authed = bool(REPORT_PREVIEW_TOKEN and token
-                  and hmac.compare_digest(token, REPORT_PREVIEW_TOKEN))
+                  and hmac.compare_digest(token.encode(), REPORT_PREVIEW_TOKEN.encode()))
     if not authed:
         try:
             u = await get_current_user(x_telegram_init_data)
@@ -2754,7 +2778,7 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
             return_exceptions=True
         )
         if isinstance(stop_data, Exception) or isinstance(nomen_data, Exception):
-            return DEMO_STOPLIST
+            return _iiko_unavailable()
 
         id_to_product = {p["id"]: p for p in nomen_data.get("products", [])}
         stopped = []
@@ -2773,7 +2797,7 @@ async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
 
         return {"items": stopped, "total": len(stopped), "updated_at": local_now().strftime("%H:%M")}
     except Exception:
-        return DEMO_STOPLIST
+        return _iiko_unavailable()
 
 
 @app.post("/api/expenses/manual")
@@ -5037,9 +5061,16 @@ class SalaryOverrideIn(BaseModel):
     amount: Optional[float] = None  # None = убрать ручную правку
 
 
+# ВНИМАНИЕ (остаточный зазор, задокументирован): таблицы salary_rates/salary_overrides
+# ключуются только по employee_id (без org). Проверки ниже не дают писать демо-юзеру
+# и не-владельцу филиала, но владелец org A, узнавший employee_id из org B (iiko-UUID,
+# не перечисляем), технически может записать ставку для чужого сотрудника. Полный фикс —
+# добавить org_id в схему salary и/или проверять employee_id ∈ employees(real_org).
 @app.post("/api/salary/rate")
 async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
-    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
+    real_org = _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец
+    if real_org == "demo" or _is_demo_user(user):
+        raise HTTPException(status_code=403, detail="Salary write not allowed in demo")
     from database import set_salary_rate
     set_salary_rate(payload.employee_id, payload.rate)
     return {"ok": True}
@@ -5048,7 +5079,9 @@ async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_us
 @app.post("/api/salary/override")
 async def salary_override(payload: SalaryOverrideIn, user: Dict = Depends(get_current_user)):
     """Ручная правка итоговой зарплаты за период (None — вернуть авторасчёт)."""
-    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
+    real_org = _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец
+    if real_org == "demo" or _is_demo_user(user):
+        raise HTTPException(status_code=403, detail="Salary write not allowed in demo")
     from database import set_salary_override
     set_salary_override(payload.employee_id, payload.period_key, payload.amount)
     return {"ok": True}

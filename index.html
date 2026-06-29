@@ -2171,6 +2171,7 @@ async function loadDashboard() {
   // Фолбек на старый endpoint (демо или iikoWeb без OLAP)
   try {
     const data = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     hideIikoError();
     animateValue('m-revenue', data.revenue_today, ' ₸');
     animateValue('m-check', data.avg_check, ' ₸');
@@ -2239,6 +2240,7 @@ async function loadSales() {
 
   // Каналы и персонал — через отдельный backend (точные данные по заказам)
   apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`).then(data => {
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     if (!data.channels) return;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -2303,6 +2305,7 @@ async function loadSales() {
   // Фолбек
   try {
     const data = await apiGet(`/api/sales/${orgId}?${buildPeriodQuery(state.salesPeriod, state.salesCustomRange)}${getOrgIdsParam()}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     state.salesData = data;
     const tbody = document.querySelector('#channels-table tbody');
     tbody.innerHTML = data.channels.map(c => `
@@ -2578,7 +2581,7 @@ async function loadCashshifts() {
       </div>` : ''}
       ${(s.edits || []).length ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--divider);">
         <div style="font-size:13px;font-weight:600;color:#e5484d;">Исправленные платежи (${s.edits.length}):</div>
-        ${s.edits.map(e => `<div style="font-size:13px;color:var(--text-secondary);">• ${e.time} ${e.type}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}${e.account_changed ? ' (тип оплаты изменён)' : ''}</div>`).join('')}
+        ${s.edits.map(e => `<div style="font-size:13px;color:var(--text-secondary);">• ${escHtml(e.time)} ${escHtml(e.type)}: ${formatMoney(e.sum_was)} → ${formatMoney(e.sum_now)}${e.account_changed ? ' (тип оплаты изменён)' : ''}</div>`).join('')}
       </div>` : ''}
     </div>`;
   }).join('');
@@ -2772,7 +2775,7 @@ function renderCategoriesChart(cats) {
     }
   });
   document.getElementById('cat-legend').innerHTML = cats.map(c => `
-    <div class="legend-item"><div class="legend-dot" style="background:${c.color}"></div>${c.name}</div>
+    <div class="legend-item"><div class="legend-dot" style="background:${c.color}"></div>${escHtml(c.name)}</div>
   `).join('');
 }
 
@@ -2824,13 +2827,13 @@ function renderEngineering() {
   }
   ['stars', 'horses', 'puzzles', 'dogs'].forEach(g => {
     document.getElementById('eng-' + g).innerHTML = groups[g].length
-      ? groups[g].map(d => `<div class="quad-item">${d.name}</div>`).join('')
+      ? groups[g].map(d => `<div class="quad-item">${escHtml(d.name)}</div>`).join('')
       : '<div style="font-size:11px;opacity:0.35;padding-top:4px;">—</div>';
   });
   document.querySelector('#eng-table tbody').innerHTML = [...dishes]
     .sort((a, b) => b.revenue - a.revenue)
     .map(d => `<tr>
-      <td class="name" style="white-space:normal;font-size:13px;max-width:120px;">${d.name}</td>
+      <td class="name" style="white-space:normal;font-size:13px;max-width:120px;">${escHtml(d.name)}</td>
       <td class="num">${(d.revenue/1000).toFixed(0)}к</td>
       <td class="num">${d.margin}%</td>
       <td class="num">${d.count}</td>
@@ -2860,7 +2863,7 @@ function renderABC() {
     if (abc === 'A') cA++; else if (abc === 'B') cB++; else cC++;
     const display = abcMode === 'revenue' ? (d.revenue / 1000).toFixed(0) + 'к' : d.count;
     return `<tr>
-      <td class="name" style="white-space:normal;font-size:13px;max-width:130px;">${d.name}</td>
+      <td class="name" style="white-space:normal;font-size:13px;max-width:130px;">${escHtml(d.name)}</td>
       <td class="num">${display}</td>
       <td class="num">${pct.toFixed(1)}%</td>
       <td class="num">${cum.toFixed(1)}%</td>
@@ -3031,6 +3034,7 @@ async function loadStaff() {
       apiGet(`/api/staff/${orgId}?period=week`),
       apiGet(`/api/shifts/${orgId}`)
     ]);
+    if (staffData && staffData._iiko_error) { showIikoError(staffData._iiko_error); return; }
     state.staffData = staffData.staff;
     document.getElementById('staff-total-rev').textContent = formatMoney(staffData.total_revenue);
     document.getElementById('staff-total-orders').textContent = staffData.orders;
@@ -3315,7 +3319,7 @@ function renderStaffTable() {
   });
   document.querySelector('#staff-table tbody').innerHTML = sorted.map(s => `
     <tr>
-      <td class="name">${s.name}</td>
+      <td class="name">${escHtml(s.name)}</td>
       <td class="num">${formatMoney(s.revenue)}</td>
       <td class="num">${s.orders}</td>
       <td class="num">${s.guests}</td>
@@ -3340,26 +3344,30 @@ async function loadExpenses() {
   if (state.expenseTab === 'foodcost') {
     try {
       const data = await apiGet(`/api/foodcost/${orgId}?period=month`);
-      if (data._iiko_error && !state.demoMode) showIikoError(data._iiko_error);
+      if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
+      const costNA = data.cost_available === false || data.fact_pct === null;
       document.getElementById('fc-norm-pct').textContent = data.norm_pct + '%';
-      document.getElementById('fc-fact-pct').textContent = data.fact_pct + '%';
-      document.getElementById('fc-diff-pct').textContent = '+' + data.diff_pct + '%';
+      document.getElementById('fc-fact-pct').textContent = costNA ? '—' : data.fact_pct + '%';
+      document.getElementById('fc-diff-pct').textContent = costNA ? '—'
+        : ((data.diff_pct >= 0 ? '+' : '') + data.diff_pct + '%');
       document.getElementById('fc-norm-sum').textContent = formatMoney(data.norm_sum);
-      document.getElementById('fc-fact-sum').textContent = formatMoney(data.fact_sum);
+      document.getElementById('fc-fact-sum').textContent = costNA ? '—' : formatMoney(data.fact_sum);
       if (data.warning) {
         document.getElementById('foodcost-warning').style.display = 'flex';
         document.getElementById('foodcost-warning-text').textContent = data.warning;
       } else { document.getElementById('foodcost-warning').style.display = 'none'; }
       renderFcTrend(data.trend);
       document.querySelector('#fc-dishes-table tbody').innerHTML = data.dishes.map(d => {
+        const cp = d.cost_pct;
         let cls = 'cost-green';
-        if (d.cost_pct > 35) cls = 'cost-red';
-        else if (d.cost_pct >= 28) cls = 'cost-orange';
+        if (cp == null) cls = '';
+        else if (cp > 35) cls = 'cost-red';
+        else if (cp >= 28) cls = 'cost-orange';
         return `<tr>
-          <td><div class="name">${d.name}</div><div style="font-size:12px;color:var(--text-secondary)">${d.category}</div></td>
+          <td><div class="name">${escHtml(d.name)}</div><div style="font-size:12px;color:var(--text-secondary)">${escHtml(d.category)}</div></td>
           <td class="num">${formatMoney(d.revenue)}</td>
           <td class="num">${d.count}</td>
-          <td class="num ${cls}">${d.cost_pct.toFixed(1)}%</td>
+          <td class="num ${cls}">${cp == null ? '—' : cp.toFixed(1) + '%'}</td>
         </tr>`;
       }).join('');
     } catch(e) { console.error(e); }
@@ -3373,7 +3381,7 @@ async function loadExpenses() {
       const maxCat = Math.max(...data.categories.map(c => c.amount));
       document.getElementById('exp-categories-chart').innerHTML = data.categories.map(c => `
         <div class="hbar-item">
-          <div class="hbar-label">${c.name}</div>
+          <div class="hbar-label">${escHtml(c.name)}</div>
           <div class="hbar-track">
             <div class="hbar-fill orange" style="width:${(c.amount/maxCat*100).toFixed(1)}%"></div>
             <div class="hbar-value">${formatMoney(c.amount)}</div>
@@ -3383,7 +3391,7 @@ async function loadExpenses() {
       document.getElementById('exp-operations-list').innerHTML = data.operations.map(o => `
         <div class="expense-item op-item" data-type="${o.type || 'order'}" data-id="${o.id || ''}">
           <div class="expense-info">
-            <h4>${o.name}</h4>
+            <h4>${escHtml(o.name)}</h4>
             <div class="expense-meta">${o.cat || o.category || ''} · ${o.date} · ${o.kassa || ''}</div>
           </div>
           <div style="display:flex;align-items:center;">
@@ -3435,9 +3443,9 @@ async function loadExpenses() {
         <div class="invoice-card">
           <div class="invoice-header">
             <div class="invoice-id">#${inv.id}</div>
-            <div class="badge ${cls}">${inv.status}</div>
+            <div class="badge ${cls}">${escHtml(inv.status)}</div>
           </div>
-          <div class="invoice-meta">${inv.supplier} · ${inv.date}${inv.items ? ' · ' + inv.items + ' позиций' : ''}${inv.branch ? ' · 🏢 ' + inv.branch : ''}</div>
+          <div class="invoice-meta">${escHtml(inv.supplier)} · ${escHtml(inv.date)}${inv.items ? ' · ' + inv.items + ' позиций' : ''}${inv.branch ? ' · 🏢 ' + escHtml(inv.branch) : ''}</div>
           <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
             <div style="font-weight:700;font-size:16px;">${formatMoney(inv.amount)}${vatLine}</div>
             <div class="invoice-actions">${actions}</div>
@@ -3450,6 +3458,7 @@ async function loadExpenses() {
   if (state.expenseTab === 'writeoffs') {
     try {
       const data = await apiGet(`/api/writeoffs/${orgId}?period=week`);
+      if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
       state.writeoffsData = data.categories || [];
       document.getElementById('wo-total').textContent = formatMoney(data.total_written);
       document.getElementById('wo-purchases').textContent = formatMoney(data.purchases);
@@ -3457,7 +3466,7 @@ async function loadExpenses() {
       document.getElementById('writeoff-categories').innerHTML = data.categories.map(c => `
         <div class="wc-item">
           <div class="wc-header">
-            <div class="wc-name">${c.alert ? '⚠ ' : ''}${c.name}</div>
+            <div class="wc-name">${c.alert ? '⚠ ' : ''}${escHtml(c.name)}</div>
             <div class="wc-pct ${c.alert ? 'red' : ''}">${c.pct}%</div>
           </div>
           <div class="wc-meta">списано ${formatMoney(c.written)} закупки ${formatMoney(c.purchases)}</div>
@@ -3687,7 +3696,7 @@ async function loadRetention() {
     document.getElementById('ret-orders').textContent = data.orders.toLocaleString('ru');
     document.querySelector('#cohort-table tbody').innerHTML = data.cohorts.map(c => `
       <tr>
-        <td>${c.name}</td><td>${c.size}</td>
+        <td>${escHtml(c.name)}</td><td>${escHtml(c.size)}</td>
         <td>${c.jan !== null ? `<span class="cohort-badge">${c.jan}%</span>` : '<span class="cohort-na">—</span>'}</td>
         <td>${c.feb !== null ? `<span class="cohort-badge">${c.feb}%</span>` : '<span class="cohort-na">—</span>'}</td>
         <td>${c.mar !== null ? `<span class="cohort-badge">${c.mar}%</span>` : '<span class="cohort-na">—</span>'}</td>
@@ -3717,6 +3726,7 @@ async function loadStopList() {
   const orgId = state.restaurant.organization_id;
   try {
     const data = await apiGet(`/api/stoplist/${orgId}`);
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
     document.getElementById('stoplist-count').textContent = data.total;
     document.getElementById('stoplist-updated').textContent = 'Обновлено: ' + data.updated_at;
     if (!data.items || data.items.length === 0) {
@@ -3726,8 +3736,8 @@ async function loadStopList() {
       document.getElementById('stoplist-items').innerHTML = data.items.map(item => `
         <div class="stoplist-item">
           <div>
-            <div class="stoplist-name">${item.name}</div>
-            <div class="stoplist-cat">${item.category || ''}</div>
+            <div class="stoplist-name">${escHtml(item.name)}</div>
+            <div class="stoplist-cat">${escHtml(item.category)}</div>
           </div>
           <div class="stoplist-badge ${item.status}">${item.status === 'stop' ? 'Стоп' : 'Мало'}</div>
         </div>
