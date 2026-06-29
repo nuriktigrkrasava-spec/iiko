@@ -28,6 +28,8 @@ import uvicorn
 from database import (
     init_db, get_user, create_user, set_demo_mode,
     get_demo_invoice_count, inc_demo_invoice_count,
+    start_demo_trial, get_demo_trial,
+    get_trials_due_for_sales, mark_trial_sales_sent,
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
@@ -100,6 +102,8 @@ DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 # Срок годности Telegram initData (сек). По умолчанию сутки.
 INIT_DATA_MAX_AGE = int(os.getenv("INIT_DATA_MAX_AGE_SEC", "86400"))
+# Демо-бот: длительность триала с реальными данными (часов).
+DEMO_TRIAL_HOURS = int(os.getenv("DEMO_TRIAL_HOURS", "24"))
 # DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
@@ -494,22 +498,13 @@ DEMO_NOMENCLATURE = [
 # Продающее сообщение демо-бота — после первого (и единственного) распознавания.
 # Лимит «До N накладных/мес» в платном тарифе:
 DEMO_PLAN_INVOICES = 300
-DEMO_UPSELL_TEXT = (
-    "✨ Готово — за 10 секунд бот распознал вашу накладную и подготовил к загрузке в iiko. "
-    "Ни одной цифры руками.\n\n"
-    "А теперь представьте, что так — каждая накладная, каждый день, сама. "
-    "Кладовщик просто фотографирует.\n\n"
-    "📦 Что входит:\n"
-    "• Распознавание с фото + автосопоставление с вашей номенклатурой\n"
-    "• Загрузка прихода в один тап\n"
-    "• Настройка под ваших поставщиков и сеть\n"
-    "• До 300 накладных/мес\n\n"
-    "💰 Обычно: 300 000 ₸ подключение + 40 000 ₸/мес.\n"
-    "Первым 5 заведениям:\n"
-    "• Подключение 150 000 ₸\n"
-    "• 30 000 ₸/мес — цена закреплена за вами навсегда\n"
-    "• Не подойдёт за месяц — верну подключение полностью\n\n"
-    "👉 Осталось 5 мест. Напишите — настрою под вас."
+DEMO_OFFER_TEXT = (
+    "⏳ Ваш 24-часовой доступ к данным закончился.\n\n"
+    "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
+    "💰 Разработка и настройка под ваше заведение — <b>200 000 ₸</b> (под вашу номенклатуру, "
+    "поставщиков, сеть). Дальше подписка — <b>30 000 ₸/мес</b>.\n"
+    "Не подойдёт за первый месяц — верну подключение полностью.\n\n"
+    "👉 Напишите — подключу за день."
 )
 
 def _demo_upsell_kb() -> dict:
@@ -798,6 +793,8 @@ async def startup():
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
+    if DEMO_ONLY:
+        asyncio.create_task(_demo_sales_scheduler())
 
 
 @app.get("/")
@@ -832,6 +829,14 @@ async def version():
 async def get_config():
     """Публичный конфиг для фронта. demo_only=True — это демо-бот."""
     return {"demo_only": DEMO_ONLY}
+
+
+@app.get("/api/demo/trial")
+async def demo_trial(user: Dict = Depends(get_current_user)):
+    """Статус 24ч-триала для текущего демо-юзера (фронт ветвится по state)."""
+    if not DEMO_ONLY:
+        return {"state": "disabled"}
+    return _demo_trial_state(int(user.get("id", 0) or 0))
 
 
 @app.post("/api/setup/validate")
@@ -905,8 +910,36 @@ def _is_demo_user(user: Dict) -> bool:
     return DEMO_ONLY
 
 
+def _demo_trial_state(telegram_id: int) -> Dict[str, Any]:
+    """Состояние 24ч-триала: none | active | ended (+ org_id, остаток секунд)."""
+    row = get_demo_trial(telegram_id)
+    if not row:
+        return {"state": "none"}
+    now = datetime.now(timezone.utc).timestamp()
+    left = int(row["started_ts"] + DEMO_TRIAL_HOURS * 3600 - now)
+    if left > 0:
+        return {"state": "active", "org_id": row["org_id"],
+                "seconds_left": left, "hours_left": round(left / 3600, 1)}
+    return {"state": "ended", "org_id": row["org_id"], "seconds_left": 0}
+
+
+def _trial_active(telegram_id: int) -> bool:
+    return DEMO_ONLY and _demo_trial_state(telegram_id).get("state") == "active"
+
+
+def _use_demo_data(user: Dict, org_id: str) -> bool:
+    """Отдавать ли демо-сэмпл вместо реальных данных.
+    - demo-org-1 → всегда демо;
+    - демо-юзер без активного триала → демо;
+    - демо-юзер с активным триалом → НЕ демо (его реальные данные).
+    На основном боте `_is_demo_user` = False → возвращает False без обращения к БД."""
+    if org_id == "demo-org-1":
+        return True
+    return _is_demo_user(user) and not _trial_active(int(user.get("id", 0) or 0))
+
+
 def _get_org_id(org_id: str, user: Dict) -> str:
-    if org_id == "demo-org-1" or _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return "demo"
     rests = get_restaurants(user.get("id", 0))
     for r in rests:
@@ -917,7 +950,7 @@ def _get_org_id(org_id: str, user: Dict) -> str:
 
 def _get_restaurant_info(org_id: str, user: Dict) -> Dict[str, Any]:
     """Возвращает api_login, iiko_server, api_password, org_name для ресторана."""
-    if org_id == "demo" or _is_demo_user(user):
+    if org_id == "demo" or _use_demo_data(user, org_id):
         return {"api_login": "demo", "iiko_server": None, "api_password": None, "org_name": ""}
     rests = get_restaurants(user.get("id", 0))
     for r in rests:
@@ -1036,7 +1069,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
                     user: Dict = Depends(get_current_user)):
     # webview не должен кешировать выручку (показывал старую цифру после фикса)
     response.headers["Cache-Control"] = "no-store"
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_DASHBOARD
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1121,7 +1154,7 @@ async def revenue(org_id: str, response: Response, period: str = "today",
     её для шапки дашборда вместо OLAP-суммы (та считается по дате открытия и
     расходится с кассой). Гости/чеки/график остаются на OLAP."""
     response.headers["Cache-Control"] = "no-store"
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"revenue": DEMO_DASHBOARD["revenue_today"], "ok": False, "source": "demo"}
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1223,7 +1256,7 @@ async def sales(org_id: str, period: str = "today",
                 to: Optional[str] = Query(None),
                 org_ids: Optional[str] = Query(None),
                 user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_SALES
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1340,7 +1373,7 @@ async def sales(org_id: str, period: str = "today",
 @app.get("/api/shifts/{org_id}")
 async def shifts(org_id: str, user: Dict = Depends(get_current_user)):
     """Сотрудники на смене сегодня с временем начала."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"staff": [
             {"name": "Виктория Ким", "since": "10:00", "revenue": 1250000, "orders": 48},
             {"name": "Артём Волков",  "since": "10:00", "revenue": 980000,  "orders": 38},
@@ -1398,7 +1431,7 @@ async def couriers(org_id: str, period: str = "month",
                    user: Dict = Depends(get_current_user)):
     """Аналитика курьеров: доставок, ср. время в пути, ср. опоздание, % опозданий.
     Один DELIVERIES OLAP на филиал (курьер×опоздание), агрегируем по курьеру."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_COURIERS
     orgs = _parse_org_ids(org_ids, org_id, user)
     if from_ and to:
@@ -1469,7 +1502,7 @@ async def couriers(org_id: str, period: str = "month",
 
 @app.get("/api/staff/{org_id}")
 async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_STAFF
 
     real_org = _get_org_id(org_id, user)
@@ -1516,7 +1549,7 @@ async def load_heatmap(org_id: str, period: str = "month",
                        user: Dict = Depends(get_current_user)):
     """Загрузка по дням недели × часам (heatmap «Час пик»). Метрика — кол-во заказов.
     Поддерживает «Все филиалы» через org_ids (агрегация по всем филиалам)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_HEATMAP
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -1608,7 +1641,7 @@ async def chaspik_export(
 
 @app.get("/api/foodcost/{org_id}")
 async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_FOODCOST
 
     real_org = _get_org_id(org_id, user)
@@ -1693,7 +1726,7 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
 
 @app.get("/api/expenses/{org_id}")
 async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_EXPENSES
 
     real_org = _get_org_id(org_id, user)
@@ -1756,7 +1789,7 @@ async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_c
 
 @app.get("/api/invoices/{org_id}")
 async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"invoices": DEMO_INVOICES}
 
     real_org = _get_org_id(org_id, user)
@@ -1860,7 +1893,7 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
     Источник: iiko export invoice_incoming + локальные bot_invoices.
     """
     import time
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_price_stats(product_id, days)
 
     real_org = _get_org_id(org_id, user)
@@ -1950,7 +1983,7 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
 
 @app.get("/api/writeoffs/{org_id}")
 async def writeoffs(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_WRITEOFFS
 
     real_org = _get_org_id(org_id, user)
@@ -2029,7 +2062,7 @@ async def weekly_report_preview(
 @app.get("/api/withdrawals/{org_id}")
 async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
     """Изъятия наличных из кассы (выемка/инкассация) за период."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_WITHDRAWALS
 
     real_org = _get_org_id(org_id, user)
@@ -2057,7 +2090,7 @@ async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(g
 
 @app.get("/api/cancels/{org_id}")
 async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_CANCELS
 
     real_org = _get_org_id(org_id, user)
@@ -2088,7 +2121,7 @@ async def cancels(org_id: str, period: str = "today", user: Dict = Depends(get_c
 @app.get("/api/companions/{org_id}")
 async def companions(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     """Анализ компаньонов — блюда которые покупают вместе."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_COMPANIONS
 
     real_org = _get_org_id(org_id, user)
@@ -2150,7 +2183,7 @@ async def companions(org_id: str, period: str = "week", user: Dict = Depends(get
 
 @app.get("/api/retention/{org_id}")
 async def retention(org_id: str, user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return DEMO_RETENTION
     return {"clients": 0, "orders": 0, "cohorts": [], "frequency": []}
 
@@ -2160,7 +2193,7 @@ async def comparison(org_id: str,
                      org_ids: Optional[str] = Query(None),
                      user: Dict = Depends(get_current_user)):
     """YoY сравнение по неделям и месяцам с разбивкой по каналам."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_comparison()
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -2383,7 +2416,7 @@ def _parse_plan_csv(text: str, org_name: str):
 async def plan_set_link(org_id: str, payload: Dict[str, Any],
                         user: Dict = Depends(get_current_user)):
     """Сохранить ссылку на таблицу с планом для филиала."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
@@ -2398,7 +2431,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
                           user: Dict = Depends(get_current_user)):
     """План/факт/% по 3 корзинам, понедельно. Факт — 1 OLAP-запрос на филиал.
     Недели берём из таблицы клиента, чтобы план и факт делились одинаково."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return _demo_plan()
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -2628,7 +2661,7 @@ def _parse_clients_csv(text: str, org_name: str) -> Dict[str, Dict[str, float]]:
 async def clients_set_link(org_id: str, payload: Dict[str, Any],
                            user: Dict = Depends(get_current_user)):
     """Сохранить ссылку на таблицу клиентов (для source=table)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
@@ -2645,7 +2678,7 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
                           org_ids: Optional[str] = Query(None),
                           user: Dict = Depends(get_current_user)):
     """Лояльность клиентов: source=iiko (из доставок iiko) или source=table (из ссылки)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         agg = _demo_clients_agg()
         segments, top_vip = _clients_segments(agg)
         return {"segments": segments, "top_vip": top_vip,
@@ -2725,7 +2758,7 @@ async def olap_raw(org_id: str, period: str = "today",
                    org_ids: Optional[str] = Query(None),
                    user: Dict = Depends(get_current_user)):
     """Один большой OLAP-запрос — фронтенд сам фильтрует."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"data": [], "demo": True}
 
     orgs = _parse_org_ids(org_ids, org_id, user)
@@ -2762,7 +2795,7 @@ async def olap_raw(org_id: str, period: str = "today",
 
 @app.get("/api/stoplist/{org_id}")
 async def get_stoplist(org_id: str, user: Dict = Depends(get_current_user)):
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         demo = dict(DEMO_STOPLIST)
         demo["updated_at"] = local_now().strftime("%H:%M")
         return demo
@@ -2984,7 +3017,7 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
                                limit: int = Query(30, le=50),
                                user: Dict = Depends(get_current_user)):
     """Поиск товаров по имени в номенклатуре iiko (для редактора накладных)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         ql = (q or "").strip().lower()
         items = [p for p in DEMO_NOMENCLATURE if not ql or ql in p["name"].lower()]
         return {"products": [
@@ -3027,7 +3060,7 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
 @app.get("/api/stores/{org_id}")
 async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Склады филиала из iiko (для выбора склада накладной в редакторе)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"stores": [{"id": "d1", "name": "Основной склад"}]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -3045,7 +3078,7 @@ async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
 @app.get("/api/suppliers/{org_id}")
 async def suppliers_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Список поставщиков из iiko (для редактора)."""
-    if _is_demo_user(user) or org_id == "demo-org-1":
+    if _use_demo_data(user, org_id):
         return {"suppliers": [{"id": "demo-sup-1", "name": "ТОО «Демо-Поставщик»"}]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
@@ -3250,12 +3283,15 @@ _pending_by_id: Dict[str, int] = {}
 _demo_reg: Dict[int, dict] = {}
 
 DEMO_REG_PROMPTS = {
-    "server": ("🔌 Подключим ваш iiko — и накладная улетит прямо к вам.\n\n"
-               "Шаг 1/3 — пришлите адрес вашего iiko-сервера "
-               "(например <code>https://ваш-сервер.iiko.it/resto</code> или адрес iikoWeb).\n\n"
-               "Отменить — /cancel"),
-    "login": "Шаг 2/3 — логин API-пользователя iiko:",
-    "password": ("Шаг 3/3 — пароль API-пользователя iiko:\n\n"
+    "server": ("🔌 Подключим ваш iiko — и накладная улетит к вам, плюс на 24 часа откроется "
+               "ваша реальная аналитика.\n\n"
+               "Шаг 1/3 — пришлите адрес вашего iiko-сервера. Это адрес, по которому вы открываете "
+               "iikoWeb/iikoOffice в браузере (например <code>https://ваш-сервер.iiko.it/resto</code>) — "
+               "скопируйте из адресной строки.\n\nОтменить — /cancel"),
+    "login": ("Шаг 2/3 — логин API-пользователя iiko.\n"
+              "Создаётся в iikoOffice → Администрирование → Сотрудники/Права: нужна роль с доступом к "
+              "OLAP/REST API. Если не уверены — спросите вашего iiko-админа."),
+    "password": ("Шаг 3/3 — пароль этого API-пользователя.\n\n"
                  "🔒 Сообщение с паролем удалю сразу после проверки."),
 }
 
@@ -3597,6 +3633,25 @@ async def _send_weekly_report() -> bool:
     return True
 
 
+async def _demo_sales_scheduler():
+    """Демо-бот: через DEMO_TRIAL_HOURS после подключения шлёт оффер в чат — один раз на юзера.
+    В личке Telegram chat_id == telegram_id."""
+    if not DEMO_ONLY:
+        return
+    while True:
+        try:
+            now = int(datetime.now(timezone.utc).timestamp())
+            for tid in get_trials_due_for_sales(now, DEMO_TRIAL_HOURS * 3600):
+                try:
+                    await _tg_send(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
+                    mark_trial_sales_sent(tid)
+                except Exception as e:
+                    logger.warning(f"[demo_sales] {tid}: {e}")
+        except Exception as e:
+            logger.warning(f"[demo_sales] loop: {e}")
+        await asyncio.sleep(300)
+
+
 async def _weekly_report_scheduler():
     """Фоновый цикл: по воскресеньям после REPORT_HOUR_LOCAL шлёт отчёт один раз."""
     while True:
@@ -3737,7 +3792,20 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
 
     if status == "preview":
         lines.append("\n⚠️ <i>Распознано ИИ — могут быть ошибки. Проверь перед отправкой.</i>")
-        lines.append("<i>Выбери действие ниже:</i>")
+        if DEMO_ONLY:
+            lines.append(
+                "\n<b>Кнопки ниже — что делают:</b>\n"
+                "📤 <b>Отправить в iiko</b> — здесь нужно подключить ваш iiko (быстрая регистрация "
+                "в чате: сервер → логин → пароль). После этого накладная реально уйдёт к вам в учётку, "
+                "и откроется доступ к вашей аналитике на 24 часа.\n"
+                "➕ <b>Добавить фото</b> — накладная на нескольких листах? Дошлите ещё фото — "
+                "бот объединит их в одну.\n"
+                "✏️ <b>Редактировать</b> — открыть в приложении: поправить позиции, количество и "
+                "суммы, сопоставить с вашей номенклатурой.\n"
+                "❌ <b>Отменить</b> — сбросить эту накладную."
+            )
+        else:
+            lines.append("<i>Выбери действие ниже:</i>")
     elif status == "adding":
         lines.append("\n<i>Пришли ещё фото или файлом, потом нажми «✅ Готово»</i>")
     elif status == "sent":
@@ -4306,33 +4374,22 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     _drop_pending(chat_id)
 
 
-async def _send_demo_upsell(chat_id: int) -> None:
-    await _tg_send(chat_id, DEMO_UPSELL_TEXT, _demo_upsell_kb())
-
-
-async def _delayed_demo_upsell(chat_id: int, delay: float = 10.0) -> None:
-    """Шлём продающее сообщение через паузу после распознавания — чтобы клиент
-    успел увидеть результат, а потом получил оффер."""
-    try:
-        await asyncio.sleep(delay)
-        await _send_demo_upsell(chat_id)
-    except Exception as e:
-        logger.warning(f"[demo upsell] {e}")
-
-
 async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
-    """Демо-бот: если юзер уже распознал свою 1 накладную — шлём апселл и блокируем."""
+    """Демо-бот: после 1-го распознавания — мягкий нудж подключить iiko (НЕ оффер)."""
     if DEMO_ONLY and get_demo_invoice_count(telegram_id) >= 1:
-        await _send_demo_upsell(chat_id)
+        await _tg_send(chat_id,
+            "Вы уже попробовали распознавание 👍\n\n"
+            "Чтобы загрузить эту накладную к себе и открыть доступ к вашей аналитике на 24 часа — "
+            "в распознанной накладной выше нажмите «📤 Отправить в iiko»: подключим ваш iiko прямо в чате.")
         return True
     return False
 
 
 async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
-    """Демо-бот: после успешного распознавания фиксируем лимит и шлём апселл через 10с."""
+    """Демо-бот: фиксируем лимит распознавания. Оффер здесь НЕ шлём —
+    он уходит после 24ч-триала (см. _demo_sales_scheduler)."""
     if DEMO_ONLY:
         inc_demo_invoice_count(telegram_id)
-        asyncio.create_task(_delayed_demo_upsell(chat_id))
 
 
 async def _recognize_invoice_and_create_pending(
@@ -4452,7 +4509,14 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
         for o in orgs:
             add_restaurant(telegram_id, login, o["id"], o.get("name") or "iiko", server, password)
         _demo_reg.pop(chat_id, None)
+        start_demo_trial(telegram_id, orgs[0]["id"],
+                         int(datetime.now(timezone.utc).timestamp()))
         await _tg_edit(chat_id, status, f"✅ iiko подключён ({orgs[0].get('name') or 'организация'}).")
+        await _tg_send(chat_id,
+            "🎁 На <b>24 часа</b> открыл вам полный доступ к <b>вашей</b> аналитике в Mini App — "
+            "реальная выручка, фудкост, смены, всё по-настоящему. Откройте и посмотрите свои цифры 👇\n\n"
+            "Через сутки доступ закроется.",
+            {"inline_keyboard": [[{"text": "📊 Открыть мою аналитику", "web_app": {"url": f"{MINIAPP_URL}/"}}]]})
 
         pending = _get_pending_by_id(pending_id) if pending_id else _get_pending_by_chat(chat_id)
         if not pending:
@@ -4799,7 +4863,7 @@ async def branch_reviews(org_id: str, user: Dict = Depends(get_current_user)):
     from database import (get_review_link, set_review_link,
                           save_rating_snapshot, get_rating_history)
 
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"platforms": [
             {"platform": "2gis", "label": "2ГИС", "rating": 4.6, "scale": 5,
              "reviews_count": 1234, "delta": 0.1, "title": "Demo"},
@@ -4926,7 +4990,7 @@ def _payment_edits(payments: Dict[str, Any]) -> List[Dict[str, Any]]:
 @app.get("/api/cashshifts_day/{org_id}")
 async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_current_user)):
     """Смены филиала за дату: суммы, расхождения, исправленные платежи, кассиры."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"date": date, "shifts": [
             {"number": 12, "cash_reg": 1, "cashier": "Виктория Ким", "open": "10:02", "close": "23:48",
              "cash": 55970, "card": 276508, "credit": 8973, "total": 341451,
@@ -4992,7 +5056,7 @@ async def salary(org_id: str, response: Response,
                  from_: str = Query(..., alias="from"), to: str = Query(...),
                  user: Dict = Depends(get_current_user)):
     """Часы сотрудников филиала из явок iiko × ставка (хранится у нас)."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"rows": [
             {"employee_id": "d1", "name": "Виктория Ким", "hours": 142.5, "rate": 900, "total": 128250},
             {"employee_id": "d2", "name": "Артём Волков", "hours": 156.0, "rate": 800, "total": 124800},
@@ -5155,7 +5219,7 @@ async def _daily_shifts_scheduler():
 async def cashshifts_pending(org_id: str, days: int = 30,
                              user: Dict = Depends(get_current_user)):
     """Непринятые/незакрытые смены филиала за последние N дней (для счётчика)."""
-    if _is_demo_user(user):
+    if _use_demo_data(user, org_id):
         return {"count": 3, "items": [
             {"date": "2026-06-10", "number": 41, "status": "UNACCEPTED", "open_now": False},
             {"date": "2026-06-09", "number": 40, "status": "UNACCEPTED", "open_now": False},

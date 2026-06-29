@@ -618,6 +618,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="menu-btn" onclick="openSettings()">⋯</div>
     </div>
   </div>
+  <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 16px 8px;">Сводка за период: сколько заработали, средний чек, сколько заказов — главные цифры заведения на одном экране.</div>
   <div class="rest-selector" id="rest-selector"></div>
   <div class="date-filters" id="main-date-filters">
     <div class="date-chip" id="main-date-chip" onclick="openDateRangeModal('main')">📅 Даты</div>
@@ -719,6 +720,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
     </div>
   </div>
+  <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 16px 8px;">Откуда выручка: каналы (зал/доставка/самовывоз), топ-блюда, кто приносит больше денег.</div>
   <div class="date-filters" id="sales-date-filters">
     <div class="date-chip" id="sales-date-chip" onclick="openDateRangeModal('sales')">📅 Даты</div>
     <div class="date-chip active" onclick="setSalesPeriod('today', this)">Сегодня</div>
@@ -891,6 +893,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
     </div>
   </div>
+  <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 16px 8px;">Кто сколько продал и кто сейчас на смене — видно лучших и отстающих.</div>
   <div class="scroll-container" id="staff-scroll">
     <div class="demo-banner" id="staff-demo" style="display:none">
       <div class="icon">⚠️</div>
@@ -1001,6 +1004,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 
     <!-- Foodcost -->
     <div id="tab-foodcost">
+      <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:12px 0 4px;">Сколько себестоимость продуктов съедает от выручки. Норма ~30%; выше — теряете маржу.</div>
       <div class="warn-banner" id="foodcost-warning" style="display:none">
         <span>⚠</span> <span id="foodcost-warning-text"></span>
       </div>
@@ -1084,6 +1088,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 
     <!-- Invoices tab -->
     <div id="tab-invoices" style="display:none">
+      <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:12px 0 4px;">Приходы от поставщиков — те самые накладные, что бот грузит с фото.</div>
       <div style="margin-top:16px;"></div>
       <div class="inv-subview">
         <button class="inv-subview-pill active" id="inv-pill-list" onclick="switchInvoiceSubview('list')">📋 Список</button>
@@ -1112,6 +1117,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
 
     <!-- Writeoffs tab -->
     <div id="tab-writeoffs" style="display:none">
+      <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:12px 0 4px;">Что и на сколько списали (порча, брак) — где утекают продукты.</div>
       <div style="margin-top:16px;">
         <div class="date-filters" style="padding:0 0 12px;">
           <div class="date-chip active">Эта н...</div>
@@ -1225,6 +1231,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
     </div>
   </div>
+  <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 16px 8px;">Сравнение с прошлым годом по неделям/месяцам — растёте или падаете.</div>
   <div class="subtabs" style="padding:0 16px;flex-shrink:0">
     <div class="subtab active" id="comp-sub-yoy" onclick="setCompSubtab('yoy', this)">Год/год</div>
     <div class="subtab" id="comp-sub-plan" onclick="setCompSubtab('plan', this)">План</div>
@@ -1446,6 +1453,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <span style="font-size:12px;color:var(--text-secondary);">смены и расхождения за день</span>
     </div>
   </div>
+  <div class="tab-hint" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 16px 8px;">Кассовые смены и расхождения — где в кассе недостача.</div>
   <div class="scroll-container">
     <div class="card" id="cs-pending-card" style="display:none;cursor:pointer;" onclick="togglePending()">
       <div style="display:flex;justify-content:space-between;align-items:center;">
@@ -1659,7 +1667,17 @@ async function initApp() {
     demoOnly = !!(cfg && cfg.demo_only);
   } catch(e) {}
   if (demoOnly) {
-    startDemo();
+    state.isDemoBot = true;
+    document.querySelectorAll('.tab-hint').forEach(el => el.style.display = '');
+    let trial = { state: 'none' };
+    try { trial = await apiGet('/api/demo/trial'); } catch(e) {}
+    if (trial.state === 'active') {
+      await enterTrialMode(trial);
+    } else if (trial.state === 'ended') {
+      showTrialPaywall();
+    } else {
+      startDemo();
+    }
     return;
   }
   document.querySelectorAll('.js-demo-btn').forEach(b => b.style.display = 'none');
@@ -1987,6 +2005,51 @@ async function saveOrg() {
 function finishOnboarding() {
   state.onboardingComplete = true;
   loadRestaurants().then(() => startDataRefresh());
+}
+
+let _trialTimer = null;
+
+async function enterTrialMode(trial) {
+  // Ведём как обычного подключённого юзера: грузим реальный филиал и данные.
+  document.querySelectorAll('.js-demo-btn').forEach(b => b.style.display = 'none');
+  await checkExistingUser();
+  // Баннер с обратным отсчётом поверх контента.
+  let banner = document.getElementById('trial-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'trial-banner';
+    banner.style.cssText = 'position:sticky; top:0; z-index:50; background:#1B3A6B; color:#fff; text-align:center; padding:8px 12px; font-size:13px; font-weight:600;';
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+  banner.style.display = 'block';
+  startTrialCountdown(trial.seconds_left || 0);
+}
+
+function startTrialCountdown(seconds) {
+  const banner = document.getElementById('trial-banner');
+  if (_trialTimer) clearInterval(_trialTimer);
+  let left = seconds;
+  const tick = () => {
+    if (left <= 0) {
+      clearInterval(_trialTimer);
+      if (banner) banner.style.display = 'none';
+      showTrialPaywall();
+      return;
+    }
+    const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60);
+    if (banner) banner.textContent = `⏳ Демо-доступ к вашим данным: осталось ${h} ч ${m} мин`;
+    left -= 1;
+  };
+  tick();
+  _trialTimer = setInterval(tick, 1000);
+}
+
+function showTrialPaywall() {
+  if (_trialTimer) clearInterval(_trialTimer);
+  document.getElementById('navbar')?.classList.remove('visible');
+  const tb = document.getElementById('trial-banner');
+  if (tb) tb.style.display = 'none';
+  document.getElementById('screen-trial-end').style.display = 'block';
 }
 
 async function startDemo() {
@@ -5158,6 +5221,25 @@ if (typeof apiPost === 'undefined') {
       <button class="btn-full btn-primary" onclick="saveManualExpense()">Сохранить</button>
       <button class="btn-full" style="background:var(--bg-secondary);color:var(--text);border:none;padding:14px;border-radius:14px;font-size:16px;cursor:pointer;" onclick="document.getElementById('add-expense-modal').classList.remove('active')">Отмена</button>
     </div>
+  </div>
+</div>
+
+<div class="screen" id="screen-trial-end" style="display:none; position:fixed; inset:0; z-index:9999; background:var(--bg); overflow-y:auto; padding:24px 20px calc(24px + env(safe-area-inset-bottom));">
+  <div style="max-width:520px; margin:0 auto;">
+    <div style="font-size:40px; text-align:center; margin-top:24px;">⏳</div>
+    <h2 style="text-align:center; margin:12px 0 4px;">Доступ к вашим данным закончился</h2>
+    <p style="text-align:center; color:var(--text-secondary); margin-bottom:20px;">
+      Вы сутки смотрели свои реальные цифры. Хотите оставить их навсегда — выручку, фудкост, смены, аналитику — каждый день?</p>
+    <div class="card" style="padding:16px;">
+      <div style="font-size:14px; line-height:1.6;">
+        💰 Разработка и настройка под ваше заведение — <b>200 000 ₸</b><br>
+        (под вашу номенклатуру, поставщиков, сеть)<br>
+        Дальше подписка — <b>30 000 ₸/мес</b><br>
+        <span style="color:var(--text-secondary)">Не подойдёт за первый месяц — верну подключение полностью.</span>
+      </div>
+    </div>
+    <button onclick="contactSupport()" style="margin-top:18px; width:100%; padding:15px; background:var(--accent); color:var(--bg); border:none; border-radius:12px; font-weight:700; font-size:16px; cursor:pointer;">
+      💬 Подключить — написать менеджеру</button>
   </div>
 </div>
 

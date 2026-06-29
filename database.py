@@ -130,6 +130,13 @@ def init_db():
         count INTEGER DEFAULT 0,
         updated_at TEXT
     );
+
+    -- Демо-бот: 24ч триал с реальными данными (старт при подключении iiko)
+    CREATE TABLE IF NOT EXISTS demo_trial (
+        telegram_id INTEGER PRIMARY KEY,
+        org_id      TEXT,
+        started_ts  INTEGER
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -158,6 +165,11 @@ def init_db():
             pass
     try:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bot_invoices_dedup ON bot_invoices(dedup_hash)")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE demo_trial ADD COLUMN sales_sent INTEGER DEFAULT 0")
         conn.commit()
     except Exception:
         pass
@@ -212,6 +224,47 @@ def inc_demo_invoice_count(telegram_id: int) -> int:
     ).fetchone()
     conn.close()
     return int(row["count"]) if row else 1
+
+
+def start_demo_trial(telegram_id: int, org_id: str, started_ts: int) -> None:
+    """Фиксирует старт 24ч-триала. INSERT OR IGNORE — первое подключение побеждает,
+    повторное НЕ перезапускает (нет вечного бесплатного доступа)."""
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO demo_trial (telegram_id, org_id, started_ts) VALUES (?, ?, ?)",
+        (telegram_id, org_id, started_ts)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_demo_trial(telegram_id: int):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT org_id, started_ts FROM demo_trial WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return {"org_id": row["org_id"], "started_ts": int(row["started_ts"])} if row else None
+
+
+def get_trials_due_for_sales(now_ts: int, trial_seconds: int):
+    """Триалы, которым стукнуло trial_seconds и оффер ещё не слали."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT telegram_id FROM demo_trial "
+        "WHERE started_ts + ? <= ? AND COALESCE(sales_sent, 0) = 0",
+        (trial_seconds, now_ts)
+    ).fetchall()
+    conn.close()
+    return [int(r["telegram_id"]) for r in rows]
+
+
+def mark_trial_sales_sent(telegram_id: int) -> None:
+    conn = get_db()
+    conn.execute("UPDATE demo_trial SET sales_sent = 1 WHERE telegram_id = ?", (telegram_id,))
+    conn.commit()
+    conn.close()
+
 
 def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
     conn = get_db()
