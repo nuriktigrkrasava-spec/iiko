@@ -1975,7 +1975,7 @@ async def weekly_report_preview(
     (получателю REPORT_RECIPIENT_USERNAME) или по секретному токену. Обычный клиент
     НЕ должен видеть выручку чужих филиалов."""
     authed = bool(REPORT_PREVIEW_TOKEN and token
-                  and hmac.compare_digest(token, REPORT_PREVIEW_TOKEN))
+                  and hmac.compare_digest(token.encode(), REPORT_PREVIEW_TOKEN.encode()))
     if not authed:
         try:
             u = await get_current_user(x_telegram_init_data)
@@ -5037,9 +5037,16 @@ class SalaryOverrideIn(BaseModel):
     amount: Optional[float] = None  # None = убрать ручную правку
 
 
+# ВНИМАНИЕ (остаточный зазор, задокументирован): таблицы salary_rates/salary_overrides
+# ключуются только по employee_id (без org). Проверки ниже не дают писать демо-юзеру
+# и не-владельцу филиала, но владелец org A, узнавший employee_id из org B (iiko-UUID,
+# не перечисляем), технически может записать ставку для чужого сотрудника. Полный фикс —
+# добавить org_id в схему salary и/или проверять employee_id ∈ employees(real_org).
 @app.post("/api/salary/rate")
 async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
-    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
+    real_org = _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец
+    if real_org == "demo" or _is_demo_user(user):
+        raise HTTPException(status_code=403, detail="Salary write not allowed in demo")
     from database import set_salary_rate
     set_salary_rate(payload.employee_id, payload.rate)
     return {"ok": True}
@@ -5048,7 +5055,9 @@ async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_us
 @app.post("/api/salary/override")
 async def salary_override(payload: SalaryOverrideIn, user: Dict = Depends(get_current_user)):
     """Ручная правка итоговой зарплаты за период (None — вернуть авторасчёт)."""
-    _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец этого филиала
+    real_org = _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец
+    if real_org == "demo" or _is_demo_user(user):
+        raise HTTPException(status_code=403, detail="Salary write not allowed in demo")
     from database import set_salary_override
     set_salary_override(payload.employee_id, payload.period_key, payload.amount)
     return {"ok": True}
