@@ -130,6 +130,13 @@ def init_db():
         count INTEGER DEFAULT 0,
         updated_at TEXT
     );
+
+    -- Демо-бот: 24ч триал с реальными данными (старт при подключении iiko)
+    CREATE TABLE IF NOT EXISTS demo_trial (
+        telegram_id INTEGER PRIMARY KEY,
+        org_id      TEXT,
+        started_ts  INTEGER
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -212,6 +219,27 @@ def inc_demo_invoice_count(telegram_id: int) -> int:
     ).fetchone()
     conn.close()
     return int(row["count"]) if row else 1
+
+
+def start_demo_trial(telegram_id: int, org_id: str, started_ts: int) -> None:
+    """Фиксирует старт 24ч-триала. INSERT OR IGNORE — первое подключение побеждает,
+    повторное НЕ перезапускает (нет вечного бесплатного доступа)."""
+    conn = get_db()
+    conn.execute(
+        "INSERT OR IGNORE INTO demo_trial (telegram_id, org_id, started_ts) VALUES (?, ?, ?)",
+        (telegram_id, org_id, started_ts)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_demo_trial(telegram_id: int):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT org_id, started_ts FROM demo_trial WHERE telegram_id = ?", (telegram_id,)
+    ).fetchone()
+    conn.close()
+    return {"org_id": row["org_id"], "started_ts": int(row["started_ts"])} if row else None
 
 def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
     conn = get_db()
