@@ -4930,7 +4930,9 @@ async function ieSave() {
 function ieMaybeShowHint() {
   const hint = document.getElementById('ie-hint');
   if (!hint) return;
-  hint.style.display = localStorage.getItem('ie_hint_seen') ? 'none' : 'block';
+  let seen = false;
+  try { seen = !!localStorage.getItem('ie_hint_seen'); } catch (e) {}
+  hint.style.display = seen ? 'none' : 'block';
 }
 
 function ieDismissHint() {

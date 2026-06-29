@@ -4318,7 +4318,14 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
     reg = _demo_reg.get(chat_id)
     if not reg:
         return False
+    # Сохранение из Mini App-редактора не перехватываем — пусть идёт по своему пути.
+    if message.get("web_app_data"):
+        return False
     text = (message.get("text") or "").strip()
+    # /start выходит из регистрации и показывает обычное приветствие.
+    if text == "/start":
+        _demo_reg.pop(chat_id, None)
+        return False
     if text.lower() in ("/cancel", "отмена", "cancel"):
         _demo_reg.pop(chat_id, None)
         await _tg_send(chat_id, "Окей, подключение отменено. Нажми «Отправить в iiko» в накладной, когда будешь готов.")
