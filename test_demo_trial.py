@@ -76,10 +76,19 @@ def test_get_org_id_no_trial_is_demo():
     print("  [OK] _get_org_id без триала → demo")
 
 
+def test_demo_trial_endpoint_active():
+    tid = 888
+    database.start_demo_trial(tid, "org-888", int(time.time()))
+    out = asyncio.run(api.demo_trial(user={"id": tid}))
+    assert out["state"] == "active" and out["org_id"] == "org-888", out
+    print("  [OK] /api/demo/trial → active с org_id")
+
+
 if __name__ == "__main__":
     tests = [test_trial_insert_and_get, test_trial_not_reset_on_second_connect, test_get_trial_none,
              test_use_demo_data_active_trial, test_use_demo_data_ended_trial, test_use_demo_data_no_trial,
-             test_get_org_id_trial_returns_real, test_get_org_id_no_trial_is_demo]
+             test_get_org_id_trial_returns_real, test_get_org_id_no_trial_is_demo,
+             test_demo_trial_endpoint_active]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")

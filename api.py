@@ -837,6 +837,14 @@ async def get_config():
     return {"demo_only": DEMO_ONLY}
 
 
+@app.get("/api/demo/trial")
+async def demo_trial(user: Dict = Depends(get_current_user)):
+    """Статус 24ч-триала для текущего демо-юзера (фронт ветвится по state)."""
+    if not DEMO_ONLY:
+        return {"state": "disabled"}
+    return _demo_trial_state(int(user.get("id", 0) or 0))
+
+
 @app.post("/api/setup/validate")
 @limiter.limit("5/15 minutes")
 async def setup_validate(request: Request, payload: SetupValidate, user: Dict = Depends(get_current_user)):
@@ -3281,12 +3289,15 @@ _pending_by_id: Dict[str, int] = {}
 _demo_reg: Dict[int, dict] = {}
 
 DEMO_REG_PROMPTS = {
-    "server": ("🔌 Подключим ваш iiko — и накладная улетит прямо к вам.\n\n"
-               "Шаг 1/3 — пришлите адрес вашего iiko-сервера "
-               "(например <code>https://ваш-сервер.iiko.it/resto</code> или адрес iikoWeb).\n\n"
-               "Отменить — /cancel"),
-    "login": "Шаг 2/3 — логин API-пользователя iiko:",
-    "password": ("Шаг 3/3 — пароль API-пользователя iiko:\n\n"
+    "server": ("🔌 Подключим ваш iiko — и накладная улетит к вам, плюс на 24 часа откроется "
+               "ваша реальная аналитика.\n\n"
+               "Шаг 1/3 — пришлите адрес вашего iiko-сервера. Это адрес, по которому вы открываете "
+               "iikoWeb/iikoOffice в браузере (например <code>https://ваш-сервер.iiko.it/resto</code>) — "
+               "скопируйте из адресной строки.\n\nОтменить — /cancel"),
+    "login": ("Шаг 2/3 — логин API-пользователя iiko.\n"
+              "Создаётся в iikoOffice → Администрирование → Сотрудники/Права: нужна роль с доступом к "
+              "OLAP/REST API. Если не уверены — спросите вашего iiko-админа."),
+    "password": ("Шаг 3/3 — пароль этого API-пользователя.\n\n"
                  "🔒 Сообщение с паролем удалю сразу после проверки."),
 }
 
@@ -4495,7 +4506,14 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
         for o in orgs:
             add_restaurant(telegram_id, login, o["id"], o.get("name") or "iiko", server, password)
         _demo_reg.pop(chat_id, None)
+        start_demo_trial(telegram_id, orgs[0]["id"],
+                         int(datetime.now(timezone.utc).timestamp()))
         await _tg_edit(chat_id, status, f"✅ iiko подключён ({orgs[0].get('name') or 'организация'}).")
+        await _tg_send(chat_id,
+            "🎁 На <b>24 часа</b> открыл вам полный доступ к <b>вашей</b> аналитике в Mini App — "
+            "реальная выручка, фудкост, смены, всё по-настоящему. Откройте и посмотрите свои цифры 👇\n\n"
+            "Через сутки доступ закроется.",
+            {"inline_keyboard": [[{"text": "📊 Открыть мою аналитику", "web_app": {"url": f"{MINIAPP_URL}/"}}]]})
 
         pending = _get_pending_by_id(pending_id) if pending_id else _get_pending_by_chat(chat_id)
         if not pending:
