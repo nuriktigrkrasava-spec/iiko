@@ -3260,6 +3260,24 @@ def _start_kb() -> dict:
     }
 
 
+# Демо-бот: приветствие с призывом распознать первую накладную (без техтекста iiko).
+DEMO_WELCOME_TEXT = (
+    "👋 Это бот, который распознаёт накладные с фото и грузит приход в iiko.\n\n"
+    "📸 <b>Распознайте свою первую накладную</b> — просто пришлите фото накладной "
+    "(или картинкой-файлом). Бот за ~10 секунд вытащит все позиции, единицы и суммы.\n\n"
+    "Попробуйте прямо сейчас 👇"
+)
+
+
+def _demo_start_kb() -> dict:
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 Открыть аналитику (демо)", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "💬 Написать менеджеру", "url": "https://t.me/wiregroup"}],
+        ]
+    }
+
+
 # Каждый раздел: label, опциональный photo (имя файла в docs/screenshots),
 # и caption — короткий текст-подпись (Telegram лимит — 1024 символа на caption).
 # Если photo=None, шлём как обычное текстовое сообщение.
@@ -4438,7 +4456,10 @@ async def telegram_webhook(request: Request):
                     await _tg_edit(chat_id, msg_id, text, kb)
 
             if action == "info:start":
-                await _show_text(WELCOME_TEXT, _start_kb())
+                if DEMO_ONLY:
+                    await _show_text(DEMO_WELCOME_TEXT, _demo_start_kb())
+                else:
+                    await _show_text(WELCOME_TEXT, _start_kb())
                 return {"ok": True}
             if action == "info:faq":
                 await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
@@ -4644,7 +4665,10 @@ async def telegram_webhook(request: Request):
         # === TEXT ===
         text = message.get("text") or ""
         if text == "/start":
-            await _tg_send(chat_id, WELCOME_TEXT, _start_kb())
+            if DEMO_ONLY:
+                await _tg_send(chat_id, DEMO_WELCOME_TEXT, _demo_start_kb())
+            else:
+                await _tg_send(chat_id, WELCOME_TEXT, _start_kb())
             return {"ok": True}
         if text in ("/faq", "/help"):
             await _tg_send(chat_id, FAQ_MENU_TEXT, _faq_menu_kb())
