@@ -417,27 +417,58 @@ git commit -m "feat(demo-trial): старт триала при подключе
 
 ---
 
-### Task 5: Backend — обновить оффер/апселл под новую цену
+### Task 5: Backend — перестроить воронку (убрать 10-сек апселл, нудж, объяснение кнопки, текст оффера)
+
+Новая воронка: после распознавания оффер НЕ шлём; оффер уходит ПОСЛЕ 24ч-триала (Task 6).
 
 **Files:**
-- Modify: `api.py` (`DEMO_UPSELL_TEXT` ~строка 487)
+- Modify: `api.py` (`_demo_after_recognition`, `_demo_block_if_used`, объяснение кнопки в `_format_invoice_v2`, `DEMO_UPSELL_TEXT`→`DEMO_OFFER_TEXT`)
 
-**Interfaces:** нет (только текст).
+**Interfaces:**
+- Produces: `DEMO_OFFER_TEXT: str` (используется планировщиком в Task 6 и пейволлом в Task 7).
 
-- [ ] **Step 1: Обновить текст апселла**
+- [ ] **Step 1: Убрать 10-сек апселл после распознавания**
 
-Заменить тело `DEMO_UPSELL_TEXT = (...)` на (новая цена: разработка 200 000 ₸ + подписка 30 000 ₸/мес):
+Заменить `_demo_after_recognition`:
 ```python
-DEMO_UPSELL_TEXT = (
-    "✨ Готово — за 10 секунд бот распознал вашу накладную и подготовил к загрузке в iiko. "
-    "Ни одной цифры руками.\n\n"
-    "А теперь представьте, что так — каждая накладная, каждый день, сама. "
-    "Кладовщик просто фотографирует.\n\n"
-    "📦 Что входит:\n"
-    "• Распознавание с фото + автосопоставление с вашей номенклатурой\n"
-    "• Загрузка прихода в один тап\n"
-    "• Аналитика: выручка, фудкост, смены — всё по вашему iiko\n"
-    "• Настройка под ваших поставщиков и сеть\n\n"
+async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
+    """Демо-бот: фиксируем лимит распознавания. Оффер здесь НЕ шлём —
+    он уходит после 24ч-триала (см. _demo_sales_scheduler)."""
+    if DEMO_ONLY:
+        inc_demo_invoice_count(telegram_id)
+```
+
+- [ ] **Step 2: Мягкий нудж вместо оффера на лимите**
+
+Заменить `_demo_block_if_used`:
+```python
+async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
+    """Демо-бот: после 1-го распознавания — мягкий нудж подключить iiko (НЕ оффер)."""
+    if DEMO_ONLY and get_demo_invoice_count(telegram_id) >= 1:
+        await _tg_send(chat_id,
+            "Вы уже попробовали распознавание 👍\n\n"
+            "Чтобы загрузить эту накладную к себе и открыть доступ к вашей аналитике на 24 часа — "
+            "в распознанной накладной выше нажмите «📤 Отправить в iiko»: подключим ваш iiko прямо в чате.")
+        return True
+    return False
+```
+
+- [ ] **Step 3: Объяснение кнопки «Отправить в iiko» — явно про регистрацию**
+
+В `_format_invoice_v2` (демо-блок объяснения кнопок) заменить строку про «📤 Отправить в iiko» на:
+```python
+                "📤 <b>Отправить в iiko</b> — здесь нужно подключить ваш iiko (быстрая регистрация "
+                "в чате: сервер → логин → пароль). После этого накладная реально уйдёт к вам в учётку, "
+                "и откроется доступ к вашей аналитике на 24 часа.\n"
+```
+
+- [ ] **Step 4: Текст оффера (пост-24ч) — переименовать `DEMO_UPSELL_TEXT` → `DEMO_OFFER_TEXT`**
+
+Заменить определение `DEMO_UPSELL_TEXT = (...)` на:
+```python
+DEMO_OFFER_TEXT = (
+    "⏳ Ваш 24-часовой доступ к данным закончился.\n\n"
+    "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
     "💰 Разработка и настройка под ваше заведение — <b>200 000 ₸</b> (под вашу номенклатуру, "
     "поставщиков, сеть). Дальше подписка — <b>30 000 ₸/мес</b>.\n"
     "Не подойдёт за первый месяц — верну подключение полностью.\n\n"
@@ -445,20 +476,146 @@ DEMO_UPSELL_TEXT = (
 )
 ```
 
-- [ ] **Step 2: Проверка синтаксиса**
+- [ ] **Step 5: Убрать мёртвый код**
 
-Run: `python3 -c "import ast; ast.parse(open('api.py').read()); print('OK')"`
-Expected: OK.
+`DEMO_UPSELL_TEXT`, `_send_demo_upsell`, `_delayed_demo_upsell` после правок выше становятся неиспользуемыми. Проверить и удалить, если нет других ссылок:
+```bash
+grep -n "DEMO_UPSELL_TEXT\|_send_demo_upsell\|_delayed_demo_upsell" api.py
+```
+Удалить определения, на которые больше нет ссылок (НЕ трогать `_demo_upsell_kb` — он переиспользуется как клавиатура оффера).
 
-- [ ] **Step 3: Коммит**
+- [ ] **Step 6: Проверка**
+
+Run: `python3 -c "import ast; ast.parse(open('api.py').read()); print('OK')"` → OK.
+Run: `python3 test_demo_trial.py` → `ВСЕ ТЕСТЫ ОК` (не сломано).
+
+- [ ] **Step 7: Коммит**
 ```bash
 git add api.py
-git commit -m "feat(demo-trial): апселл-текст под новую цену (разработка 200к + 30к/мес)"
+git commit -m "feat(demo-trial): воронка — убрать 10с-апселл, нудж на лимите, объяснение кнопки про регу, DEMO_OFFER_TEXT"
 ```
 
 ---
 
-### Task 6: Фронт — ветвление initApp + режим триала + полноэкранный замок
+### Task 6: Backend — пуш оффера в бот через 24ч (планировщик)
+
+**Files:**
+- Modify: `database.py` (миграция `sales_sent` + хелперы рядом с `get_demo_trial`)
+- Modify: `api.py` (импорт хелперов; `_demo_sales_scheduler`; регистрация в `startup`)
+- Test: `test_demo_trial.py` (дополнить)
+
+**Interfaces:**
+- Consumes: `get_demo_trial`/`start_demo_trial` (Task 1), `DEMO_TRIAL_HOURS` (Task 2), `DEMO_OFFER_TEXT`/`_demo_upsell_kb` (Task 5), `_tg_send`.
+- Produces: `get_trials_due_for_sales(now_ts, trial_seconds) -> List[int]`, `mark_trial_sales_sent(telegram_id) -> None`.
+
+- [ ] **Step 1: Падающий тест** (дополнить `test_demo_trial.py` перед `if __name__`)
+```python
+def test_trials_due_for_sales():
+    database.start_demo_trial(1001, "o", 1000)            # давно — должен попасть
+    database.start_demo_trial(1002, "o", int(time.time()))  # только что — не должен
+    due = database.get_trials_due_for_sales(int(time.time()), 24 * 3600)
+    assert 1001 in due and 1002 not in due, due
+    database.mark_trial_sales_sent(1001)
+    due2 = database.get_trials_due_for_sales(int(time.time()), 24 * 3600)
+    assert 1001 not in due2, "после mark_trial_sales_sent не должен повторяться"
+    print("  [OK] get_trials_due_for_sales + mark_trial_sales_sent")
+```
+Добавить в раннер: `test_trials_due_for_sales`.
+
+- [ ] **Step 2: Запустить — падает** (`get_trials_due_for_sales` нет)
+
+Run: `python3 test_demo_trial.py` → ERROR.
+
+- [ ] **Step 3: Миграция `sales_sent`**
+
+В `database.py` в секции миграций `init_db` (рядом с другими `ALTER TABLE ... try/except`) добавить:
+```python
+    try:
+        conn.execute("ALTER TABLE demo_trial ADD COLUMN sales_sent INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+```
+
+- [ ] **Step 4: DB-хелперы** (после `get_demo_trial`):
+```python
+def get_trials_due_for_sales(now_ts: int, trial_seconds: int):
+    """Триалы, которым стукнуло trial_seconds и оффер ещё не слали."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT telegram_id FROM demo_trial "
+        "WHERE started_ts + ? <= ? AND COALESCE(sales_sent, 0) = 0",
+        (trial_seconds, now_ts)
+    ).fetchall()
+    conn.close()
+    return [int(r["telegram_id"]) for r in rows]
+
+
+def mark_trial_sales_sent(telegram_id: int) -> None:
+    conn = get_db()
+    conn.execute("UPDATE demo_trial SET sales_sent = 1 WHERE telegram_id = ?", (telegram_id,))
+    conn.commit()
+    conn.close()
+```
+
+- [ ] **Step 5: Планировщик в `api.py`**
+
+Добавить `get_trials_due_for_sales, mark_trial_sales_sent` в `from database import (...)`. Рядом с `_weekly_report_scheduler` добавить:
+```python
+async def _demo_sales_scheduler():
+    """Демо-бот: через DEMO_TRIAL_HOURS после подключения шлёт оффер в чат — один раз на юзера.
+    В личке Telegram chat_id == telegram_id."""
+    if not DEMO_ONLY:
+        return
+    while True:
+        try:
+            now = int(datetime.now(timezone.utc).timestamp())
+            for tid in get_trials_due_for_sales(now, DEMO_TRIAL_HOURS * 3600):
+                try:
+                    await _tg_send(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
+                    mark_trial_sales_sent(tid)
+                except Exception as e:
+                    logger.warning(f"[demo_sales] {tid}: {e}")
+        except Exception as e:
+            logger.warning(f"[demo_sales] loop: {e}")
+        await asyncio.sleep(300)
+```
+
+- [ ] **Step 6: Регистрация в `startup`**
+
+В `startup()` после существующих `asyncio.create_task(...)` добавить:
+```python
+    if DEMO_ONLY:
+        asyncio.create_task(_demo_sales_scheduler())
+```
+
+- [ ] **Step 7: Проверка**
+
+Run: `python3 test_demo_trial.py` → `ВСЕ ТЕСТЫ ОК`.
+Run: `python3 -c "import ast; ast.parse(open('api.py').read()); print('OK')"`
+
+- [ ] **Step 8: Коммит**
+```bash
+git add api.py database.py test_demo_trial.py
+git commit -m "feat(demo-trial): пуш оффера в бот через 24ч (sales_sent + планировщик)"
+```
+
+---
+
+### Task 7: Фронт — режим триала, замок + объяснения демо-вкладок
+
+> Дополнительно к шагам ниже — добавить **короткое объяснение под заголовком каждой демо-вкладки** (видно на демо-боте: в `initApp` при `demoOnly` выставить `state.isDemoBot = true`; рендерить серую подпись под заголовком вкладки, если `state.isDemoBot`). Тексты (verbatim):
+> - 🏠 Главная: «Сводка за период: сколько заработали, средний чек, сколько заказов — главные цифры заведения на одном экране.»
+> - 🛒 Продажи: «Откуда выручка: каналы (зал/доставка/самовывоз), топ-блюда, кто приносит больше денег.»
+> - 👥 Сотрудники: «Кто сколько продал и кто сейчас на смене — видно лучших и отстающих.»
+> - 💰 Фудкост: «Сколько себестоимость продуктов съедает от выручки. Норма ~30%; выше — теряете маржу.»
+> - 🧾 Накладные: «Приходы от поставщиков — те самые накладные, что бот грузит с фото.»
+> - 🗑 Списания: «Что и на сколько списали (порча, брак) — где утекают продукты.»
+> - 📈 Год/год: «Сравнение с прошлым годом по неделям/месяцам — растёте или падаете.»
+> - 🧾 Смены: «Кассовые смены и расхождения — где в кассе недостача.»
+> Закоммитить вместе с фронтом триала.
+
+#### Базовая часть: ветвление initApp + режим триала + полноэкранный замок
 
 **Files:**
 - Modify: `index.html` (`initApp` демо-ветка ~строка где `if (demoOnly) { startDemo(); return; }`; новый экран-замок в HTML; новые JS-функции рядом с `startDemo`)
@@ -594,7 +751,7 @@ git commit -m "feat(demo-trial): фронт — режим триала (реа�
 
 ---
 
-### Task 7: Деплой-конфигурация и прод-проверка
+### Task 8: Деплой-конфигурация и прод-проверка
 
 **Files:** нет кода — операционное.
 
