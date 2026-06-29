@@ -28,6 +28,7 @@ import uvicorn
 from database import (
     init_db, get_user, create_user, set_demo_mode,
     get_demo_invoice_count, inc_demo_invoice_count,
+    start_demo_trial, get_demo_trial,
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
@@ -100,6 +101,8 @@ DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET")
 # Срок годности Telegram initData (сек). По умолчанию сутки.
 INIT_DATA_MAX_AGE = int(os.getenv("INIT_DATA_MAX_AGE_SEC", "86400"))
+# Демо-бот: длительность триала с реальными данными (часов).
+DEMO_TRIAL_HOURS = int(os.getenv("DEMO_TRIAL_HOURS", "24"))
 # DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
@@ -903,6 +906,34 @@ def _is_demo_user(user: Dict) -> bool:
     # Демо живёт только на демо-боте (DEMO_ONLY=1): там все юзеры демо.
     # На основном боте демо-режима нет вообще.
     return DEMO_ONLY
+
+
+def _demo_trial_state(telegram_id: int) -> Dict[str, Any]:
+    """Состояние 24ч-триала: none | active | ended (+ org_id, остаток секунд)."""
+    row = get_demo_trial(telegram_id)
+    if not row:
+        return {"state": "none"}
+    now = datetime.now(timezone.utc).timestamp()
+    left = int(row["started_ts"] + DEMO_TRIAL_HOURS * 3600 - now)
+    if left > 0:
+        return {"state": "active", "org_id": row["org_id"],
+                "seconds_left": left, "hours_left": round(left / 3600, 1)}
+    return {"state": "ended", "org_id": row["org_id"], "seconds_left": 0}
+
+
+def _trial_active(telegram_id: int) -> bool:
+    return DEMO_ONLY and _demo_trial_state(telegram_id).get("state") == "active"
+
+
+def _use_demo_data(user: Dict, org_id: str) -> bool:
+    """Отдавать ли демо-сэмпл вместо реальных данных.
+    - demo-org-1 → всегда демо;
+    - демо-юзер без активного триала → демо;
+    - демо-юзер с активным триалом → НЕ демо (его реальные данные).
+    На основном боте `_is_demo_user` = False → возвращает False без обращения к БД."""
+    if org_id == "demo-org-1":
+        return True
+    return _is_demo_user(user) and not _trial_active(int(user.get("id", 0) or 0))
 
 
 def _get_org_id(org_id: str, user: Dict) -> str:
