@@ -527,6 +527,22 @@ def _wiregroup_kb() -> dict:
     ]}
 
 
+def _build_stats_text() -> str:
+    a = acquisition_stats()
+    q = quota_stats()
+    src = " · ".join(f"{s} {c}" for s, c in a["by_source"]) or "—"
+    return (
+        f"👥 Юзеры демо-бота\n"
+        f"Всего: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
+        f"Источники: {src}\n\n"
+        f"📦 Накладные (платные аккаунты)\n"
+        f"Активных аккаунтов: {q['accounts']}\n"
+        f"Распознано в этом месяце: {q['used']}\n"
+        f"Докуплено (баланс): {q['extra']}\n"
+        f"Упёрлись в лимит: {q['at_limit']} аккаунтов"
+    )
+
+
 # ============ DEMO DATA для остальных вкладок (курьеры/клиенты/год-год/план/…) ============
 # Чтобы демо-бот показывал заполненными ВСЕ вкладки, как основной. Формы 1-в-1 с реальными
 # ветками эндпоинтов. avg_way/avg_delay у курьеров — в минутах (так их рисует фронт).
@@ -4803,14 +4819,27 @@ async def telegram_webhook(request: Request):
 
         # === TEXT ===
         text = message.get("text") or ""
-        if text == "/start":
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            source = parts[1].strip() if len(parts) > 1 else "direct"
             if DEMO_ONLY:
+                if record_acquisition(telegram_id, username, source):
+                    try:
+                        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+                        uname = f"@{username}" if username else "(без username)"
+                        await _tg_send(OWNER_CHAT_ID,
+                                       f"🆕 Новый юзер {uname}\nИсточник: {source}\n{ts}")
+                    except Exception as e:
+                        logger.warning(f"[acq] owner notify {telegram_id}: {e}")
                 await _tg_send(chat_id, DEMO_WELCOME_TEXT, _demo_start_kb())
             else:
                 await _tg_send(chat_id, WELCOME_TEXT, _start_kb())
             return {"ok": True}
         if text in ("/faq", "/help"):
             await _tg_send(chat_id, FAQ_MENU_TEXT, _faq_menu_kb())
+            return {"ok": True}
+        if text == "/stats" and chat_id == OWNER_CHAT_ID:
+            await _tg_send(chat_id, _build_stats_text())
             return {"ok": True}
         if text.startswith("/"):
             return {"ok": True}
