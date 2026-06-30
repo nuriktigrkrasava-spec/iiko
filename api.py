@@ -40,6 +40,9 @@ from database import (
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
     get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
+    record_acquisition, acquisition_stats,
+    get_quota, quota_available, consume_quota, add_quota_extra,
+    reset_quota_if_due, should_notify_limit, quota_stats,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -107,6 +110,11 @@ DEMO_TRIAL_HOURS = int(os.getenv("DEMO_TRIAL_HOURS", "24"))
 # DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "8727082281"))  # владелец — пуши и /stats
+# Рубильник блокировки по лимиту. По умолчанию 0 — лимит только считается
+# (кнопка «Лимит»/статистика показывают расход), но распознавание НЕ блокируется.
+# Поставить 1, когда владелец убедится в корректности цифр — тогда лимит блокирует.
+QUOTA_ENFORCE = os.getenv("QUOTA_ENFORCE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # ── saya-kds (внешняя аналитика доставки/кухни) ──
 # Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
@@ -497,13 +505,12 @@ DEMO_NOMENCLATURE = [
 
 # Продающее сообщение демо-бота — после первого (и единственного) распознавания.
 # Лимит «До N накладных/мес» в платном тарифе:
-DEMO_PLAN_INVOICES = 300
+DEMO_PLAN_INVOICES = 130  # базовый месячный лимит накладных на аккаунт (default base_limit)
 DEMO_OFFER_TEXT = (
     "⏳ Ваш 24-часовой доступ к данным закончился.\n\n"
     "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
     "💰 Разработка и настройка под ваше заведение — <b>200 000 ₸</b> (под вашу номенклатуру, "
-    "поставщиков, сеть). Дальше подписка — <b>30 000 ₸/мес</b>.\n"
-    "Не подойдёт за первый месяц — верну подключение полностью.\n\n"
+    "поставщиков, сеть). Дальше подписка — <b>30 000 ₸/мес</b>.\n\n"
     "👉 Напишите — подключу за день."
 )
 
@@ -511,6 +518,48 @@ def _demo_upsell_kb() -> dict:
     return {"inline_keyboard": [
         [{"text": "💬 Подключить — написать менеджеру", "url": "https://t.me/wiregroup"}],
     ]}
+
+LIMIT_REACHED_TEXT = (
+    "📦 Лимит {limit} накладных в этом месяце исчерпан.\n"
+    "Докупить: +50 за 4 000 ₸ или +100 за 8 000 ₸ — напишите менеджеру.\n"
+    "Остаток докупленного переносится на следующий месяц."
+)
+
+def _wiregroup_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "💬 Написать менеджеру — докупить", "url": "https://t.me/wiregroup"}],
+    ]}
+
+
+def _build_stats_text() -> str:
+    a = acquisition_stats()
+    q = quota_stats()
+    src = " · ".join(f"{s} {c}" for s, c in a["by_source"]) or "—"
+    return (
+        f"👥 Юзеры демо-бота\n"
+        f"Всего: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
+        f"Источники: {src}\n\n"
+        f"📦 Накладные (платные аккаунты)\n"
+        f"Активных аккаунтов: {q['accounts']}\n"
+        f"Распознано в этом месяце: {q['used']}\n"
+        f"Докуплено (баланс): {q['extra']}\n"
+        f"Упёрлись в лимит: {q['at_limit']} аккаунтов"
+    )
+
+
+def _limit_text(telegram_id: int) -> str:
+    reset_quota_if_due(telegram_id)
+    q = get_quota(telegram_id)
+    base_left = max(0, q["base_limit"] - q["used"])
+    avail = base_left + q["extra"]
+    reset_date = datetime.fromtimestamp(q["period_start_ts"] + 30 * 86400).strftime("%d.%m.%Y")
+    return (
+        f"📦 Накладные\n"
+        f"По подписке в этом месяце: {base_left} из {q['base_limit']}\n"
+        f"Докуплено (баланс): {q['extra']}\n"
+        f"Доступно всего: {avail}\n"
+        f"Лимит обновится: {reset_date}"
+    )
 
 
 # ============ DEMO DATA для остальных вкладок (курьеры/клиенты/год-год/план/…) ============
@@ -794,6 +843,8 @@ async def startup():
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
     if DEMO_ONLY:
+        # Ежедневная сводка юзеров/квоты — только на демо-деплое, чтобы не слать дважды
+        asyncio.create_task(_daily_stats_scheduler())
         asyncio.create_task(_demo_sales_scheduler())
 
 
@@ -3348,6 +3399,7 @@ def _start_kb() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "📦 Лимит накладных", "callback_data": "limit:show"}],
             [{"text": "📖 FAQ / Инструкция", "callback_data": "info:faq"}],
             [{"text": "🔧 Как настроить iiko Server", "callback_data": "info:setup"}],
             [{"text": "💬 Связаться / Сообщить об ошибке", "url": "https://t.me/wiregroup"}],
@@ -3649,6 +3701,23 @@ async def _demo_sales_scheduler():
                     logger.warning(f"[demo_sales] {tid}: {e}")
         except Exception as e:
             logger.warning(f"[demo_sales] loop: {e}")
+        await asyncio.sleep(300)
+
+
+async def _daily_stats_scheduler():
+    """Раз в сутки после REPORT_HOUR_LOCAL шлёт владельцу сводку: юзеры + накладные.
+    Использует wall-clock (local_now) + app_state-дедупликацию — переживает рестарты Render."""
+    while True:
+        try:
+            now = local_now()
+            if now.hour >= REPORT_HOUR_LOCAL:
+                today_str = now.date().isoformat()
+                if get_app_state("daily_stats_last_sent") != today_str:
+                    await _tg_send(OWNER_CHAT_ID, _build_stats_text())
+                    set_app_state("daily_stats_last_sent", today_str)
+                    logger.info(f"[daily_stats] отправлена за {today_str}")
+        except Exception as e:
+            logger.warning(f"[daily_stats] {e}")
         await asyncio.sleep(300)
 
 
@@ -4392,6 +4461,41 @@ async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
         inc_demo_invoice_count(telegram_id)
 
 
+async def _quota_gate(chat_id: int, telegram_id: int, username: str) -> bool:
+    """Основной бот: месячный лимит накладных. True если распознавание блокировано."""
+    if DEMO_ONLY:
+        return False  # на демо-боте свой лимит — _demo_block_if_used
+    reset_quota_if_due(telegram_id)
+    if quota_available(telegram_id) > 0:
+        return False
+    if not QUOTA_ENFORCE:
+        return False  # рубильник выключен: лимит только считается, не блокируем
+    await _tg_send(chat_id, LIMIT_REACHED_TEXT.format(limit=DEMO_PLAN_INVOICES), _wiregroup_kb())
+    if should_notify_limit(telegram_id):
+        uname = f"@{username}" if username else "(без username)"
+        try:
+            await _tg_send(OWNER_CHAT_ID, f"🚫 Аккаунт упёрся в лимит\nid: {telegram_id} · {uname}")
+        except Exception as e:
+            logger.warning(f"[quota] owner notify {telegram_id}: {e}")
+    return True
+
+
+async def _invoice_gate(chat_id: int, telegram_id: int, username: str) -> bool:
+    """Единый гейт перед распознаванием: демо-лимит ИЛИ месячный лимит основного бота."""
+    if await _demo_block_if_used(chat_id, telegram_id):
+        return True
+    if await _quota_gate(chat_id, telegram_id, username):
+        return True
+    return False
+
+
+async def _after_recognition(chat_id: int, telegram_id: int) -> None:
+    """После успешного распознавания: демо-счётчик ИЛИ списание месячной квоты."""
+    await _demo_after_recognition(chat_id, telegram_id)
+    if not DEMO_ONLY:
+        consume_quota(telegram_id)
+
+
 async def _recognize_invoice_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     file_id: str, image_bytes: bytes, mime: str
@@ -4405,8 +4509,8 @@ async def _recognize_invoice_and_create_pending(
             f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
         return
 
-    # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
-    if await _demo_block_if_used(chat_id, telegram_id):
+    # Гейт: демо-лимит ИЛИ месячный лимит накладных основного бота.
+    if await _invoice_gate(chat_id, telegram_id, username):
         return
 
     status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
@@ -4443,7 +4547,7 @@ async def _recognize_invoice_and_create_pending(
         new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
         pending["message_id"] = new_id
 
-    await _demo_after_recognition(chat_id, telegram_id)
+    await _after_recognition(chat_id, telegram_id)
 
 
 async def _handle_demo_registration(chat_id: int, telegram_id: int, username: str,
@@ -4588,6 +4692,10 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
             if action == "info:faq":
                 await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
+                return {"ok": True}
+            if action == "limit:show":
+                tg_id = cb.get("from", {}).get("id", 0)
+                await _show_text(_limit_text(tg_id), _start_kb())
                 return {"ok": True}
             if action.startswith("info:faq:"):
                 key = action.split(":", 2)[2]
@@ -4789,14 +4897,49 @@ async def telegram_webhook(request: Request):
 
         # === TEXT ===
         text = message.get("text") or ""
-        if text == "/start":
+        if text == "/start" or text.startswith("/start "):
+            parts = text.split(maxsplit=1)
+            source = parts[1].strip() if len(parts) > 1 else "direct"
             if DEMO_ONLY:
+                try:
+                    is_new = record_acquisition(telegram_id, username, source)
+                except Exception as e:
+                    logger.warning(f"[acq] record_acquisition {telegram_id}: {e}")
+                    is_new = False
+                if is_new:
+                    try:
+                        ts = datetime.now().strftime("%d.%m.%Y %H:%M")
+                        uname = f"@{username}" if username else "(без username)"
+                        await _tg_send(OWNER_CHAT_ID,
+                                       f"🆕 Новый юзер {uname}\nИсточник: {source}\n{ts}")
+                    except Exception as e:
+                        logger.warning(f"[acq] owner notify {telegram_id}: {e}")
                 await _tg_send(chat_id, DEMO_WELCOME_TEXT, _demo_start_kb())
             else:
                 await _tg_send(chat_id, WELCOME_TEXT, _start_kb())
             return {"ok": True}
         if text in ("/faq", "/help"):
             await _tg_send(chat_id, FAQ_MENU_TEXT, _faq_menu_kb())
+            return {"ok": True}
+        if text == "/stats" and chat_id == OWNER_CHAT_ID:
+            try:
+                body = _build_stats_text()
+            except Exception as e:
+                body = f"⚠️ Ошибка сбора статистики: {e}"
+            await _tg_send(chat_id, body)
+            return {"ok": True}
+        if text in ("/limit", "📦 Лимит накладных") and not DEMO_ONLY:
+            await _tg_send(chat_id, _limit_text(telegram_id))
+            return {"ok": True}
+        if text.startswith("/addquota") and chat_id == OWNER_CHAT_ID:
+            parts = text.split()
+            if len(parts) == 3 and parts[1].isdigit() and parts[2].lstrip("-").isdigit():
+                tid, n = int(parts[1]), int(parts[2])
+                new_extra = add_quota_extra(tid, n)
+                await _tg_send(chat_id,
+                               f"✅ Аккаунту {tid} начислено {n}. Баланс докупленного: {new_extra}.")
+            else:
+                await _tg_send(chat_id, "Формат: /addquota <telegram_id> <кол-во>")
             return {"ok": True}
         if text.startswith("/"):
             return {"ok": True}
@@ -4807,8 +4950,8 @@ async def telegram_webhook(request: Request):
                     "📎 Пришли накладную — фото, файлом или текстом (минимум 20 символов с позициями и ценами).")
                 return {"ok": True}
 
-            # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
-            if await _demo_block_if_used(chat_id, telegram_id):
+            # Гейт: демо-лимит ИЛИ месячный лимит накладных основного бота.
+            if await _invoice_gate(chat_id, telegram_id, username):
                 return {"ok": True}
 
             status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную из текста...")
@@ -4841,7 +4984,7 @@ async def telegram_webhook(request: Request):
             await _tg_edit(chat_id, status_msg_id,
                            _format_invoice_v2(pending, "preview"),
                            _invoice_kb(pending["pending_id"]))
-            await _demo_after_recognition(chat_id, telegram_id)
+            await _after_recognition(chat_id, telegram_id)
             return {"ok": True}
 
     except Exception as e:
