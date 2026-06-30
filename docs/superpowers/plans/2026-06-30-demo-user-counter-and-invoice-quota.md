@@ -14,6 +14,7 @@
 - **Базовый месячный лимит:** 130 накладных на аккаунт (`base_limit` default 130).
 - **Пакеты докупки:** +50 (4 000 ₸) и +100 (8 000 ₸); докупленный `extra` **не сгорает**.
 - **Расход:** сперва месячный лимит (`used`), по исчерпании — `extra`.
+- **Рубильник:** `QUOTA_ENFORCE` (env, дефолт `0`). При `0` лимит только считается, распознавание НЕ блокируется; при `1` — блокирует и шлёт пуш о лимите. Расход (`consume_quota`) считается всегда, независимо от рубильника.
 - **Владелец:** `OWNER_CHAT_ID = 8727082281` (через env, дефолт этот id).
 - **Без платёжного шлюза.** Докупка — вручную через менеджера + `/addquota`.
 - **БД:** только через `get_db()` (Row factory); новые таблицы — в `init_db()` (`CREATE TABLE IF NOT EXISTS` + `ALTER ... ADD COLUMN` в try/except). Фреймворка миграций нет.
@@ -511,6 +512,17 @@ git commit -m "feat(demo): ежедневный пуш-сводка владел
 - Consumes: `reset_quota_if_due`, `quota_available`, `consume_quota`, `should_notify_limit` (Task 1), `OWNER_CHAT_ID`, `LIMIT_REACHED_TEXT`, `_wiregroup_kb`, `DEMO_PLAN_INVOICES` (Task 2), существующие `_demo_block_if_used`, `_demo_after_recognition`.
 - Produces: `_invoice_gate(chat_id, telegram_id, username) -> bool`, `_after_recognition(chat_id, telegram_id) -> None`.
 
+- [ ] **Step 0: Добавить рубильник `QUOTA_ENFORCE`**
+
+Рядом с `OWNER_CHAT_ID` (`api.py:113`) добавить константу:
+
+```python
+# Рубильник блокировки по лимиту. По умолчанию 0 — лимит только считается
+# (кнопка «Лимит»/статистика показывают расход), но распознавание НЕ блокируется.
+# Поставить 1, когда владелец убедится в корректности цифр — тогда лимит блокирует.
+QUOTA_ENFORCE = os.getenv("QUOTA_ENFORCE", "0").strip().lower() in ("1", "true", "yes", "on")
+```
+
 - [ ] **Step 1: Добавить гейт и пост-обработку**
 
 После `_demo_after_recognition` (`api.py:4392`) добавить:
@@ -523,6 +535,8 @@ async def _quota_gate(chat_id: int, telegram_id: int, username: str) -> bool:
     reset_quota_if_due(telegram_id)
     if quota_available(telegram_id) > 0:
         return False
+    if not QUOTA_ENFORCE:
+        return False  # рубильник выключен: лимит только считается, не блокируем
     await _tg_send(chat_id, LIMIT_REACHED_TEXT.format(limit=DEMO_PLAN_INVOICES), _wiregroup_kb())
     if should_notify_limit(telegram_id):
         uname = f"@{username}" if username else "(без username)"
