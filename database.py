@@ -327,13 +327,17 @@ def consume_quota(telegram_id: int) -> None:
     """Списывает 1 накладную: сперва месячный лимит (used), по исчерпании — extra."""
     get_quota(telegram_id)  # гарантирует наличие строки
     conn = get_db()
-    row = conn.execute("SELECT used, base_limit, extra FROM invoice_quota WHERE telegram_id = ?",
-                       (telegram_id,)).fetchone()
-    used, base, extra = int(row["used"]), int(row["base_limit"]), int(row["extra"])
-    if used < base:
-        conn.execute("UPDATE invoice_quota SET used = used + 1 WHERE telegram_id = ?", (telegram_id,))
-    elif extra > 0:
-        conn.execute("UPDATE invoice_quota SET extra = extra - 1 WHERE telegram_id = ?", (telegram_id,))
+    cur = conn.execute(
+        "UPDATE invoice_quota SET used = used + 1 "
+        "WHERE telegram_id = ? AND used < base_limit",
+        (telegram_id,)
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "UPDATE invoice_quota SET extra = extra - 1 "
+            "WHERE telegram_id = ? AND extra > 0",
+            (telegram_id,)
+        )
     conn.commit()
     conn.close()
 
@@ -356,7 +360,7 @@ def should_notify_limit(telegram_id: int) -> bool:
     row = conn.execute("SELECT limit_notified_ts FROM invoice_quota WHERE telegram_id = ?",
                        (telegram_id,)).fetchone()
     now = int(datetime.now().timestamp())
-    if row and now - int(row["limit_notified_ts"]) < 86400:
+    if now - int(row["limit_notified_ts"]) < 86400:
         conn.close()
         return False
     conn.execute("UPDATE invoice_quota SET limit_notified_ts = ? WHERE telegram_id = ?", (now, telegram_id))
