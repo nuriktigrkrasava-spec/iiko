@@ -40,6 +40,9 @@ from database import (
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
     get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
+    record_acquisition, acquisition_stats,
+    get_quota, quota_available, consume_quota, add_quota_extra,
+    reset_quota_if_due, should_notify_limit, quota_stats,
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
@@ -107,6 +110,7 @@ DEMO_TRIAL_HOURS = int(os.getenv("DEMO_TRIAL_HOURS", "24"))
 # DEMO_ONLY=1 — это отдельный демо-бот: все юзеры всегда видят фейковые данные.
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
+OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "8727082281"))  # владелец — пуши и /stats
 
 # ── saya-kds (внешняя аналитика доставки/кухни) ──
 # Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
@@ -497,7 +501,7 @@ DEMO_NOMENCLATURE = [
 
 # Продающее сообщение демо-бота — после первого (и единственного) распознавания.
 # Лимит «До N накладных/мес» в платном тарифе:
-DEMO_PLAN_INVOICES = 300
+DEMO_PLAN_INVOICES = 130  # базовый месячный лимит накладных на аккаунт (default base_limit)
 DEMO_OFFER_TEXT = (
     "⏳ Ваш 24-часовой доступ к данным закончился.\n\n"
     "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
@@ -509,6 +513,17 @@ DEMO_OFFER_TEXT = (
 def _demo_upsell_kb() -> dict:
     return {"inline_keyboard": [
         [{"text": "💬 Подключить — написать менеджеру", "url": "https://t.me/wiregroup"}],
+    ]}
+
+LIMIT_REACHED_TEXT = (
+    "📦 Лимит {limit} накладных в этом месяце исчерпан.\n"
+    "Докупить: +50 за 4 000 ₸ или +100 за 8 000 ₸ — напишите менеджеру.\n"
+    "Остаток докупленного переносится на следующий месяц."
+)
+
+def _wiregroup_kb() -> dict:
+    return {"inline_keyboard": [
+        [{"text": "💬 Написать менеджеру — докупить", "url": "https://t.me/wiregroup"}],
     ]}
 
 
