@@ -823,6 +823,7 @@ async def startup():
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
+    asyncio.create_task(_daily_stats_scheduler())
     if DEMO_ONLY:
         asyncio.create_task(_demo_sales_scheduler())
 
@@ -3680,6 +3681,16 @@ async def _demo_sales_scheduler():
         except Exception as e:
             logger.warning(f"[demo_sales] loop: {e}")
         await asyncio.sleep(300)
+
+
+async def _daily_stats_scheduler():
+    """Раз в сутки шлёт владельцу сводку: юзеры демо-бота + расход накладных."""
+    while True:
+        await asyncio.sleep(86400)
+        try:
+            await _tg_send(OWNER_CHAT_ID, _build_stats_text())
+        except Exception as e:
+            logger.warning(f"[daily_stats] {e}")
 
 
 async def _weekly_report_scheduler():
