@@ -148,6 +148,7 @@ def init_db():
 
     -- Лимит распознавания накладных (основной бот).
     -- extra — несгораемый докупленный баланс; used — расход месячного лимита.
+    -- period_recognized — несрезаемый счётчик реального трафика за период (не клипается у base_limit).
     CREATE TABLE IF NOT EXISTS invoice_quota (
         telegram_id       INTEGER PRIMARY KEY,
         period_start_ts   INTEGER,
@@ -155,7 +156,8 @@ def init_db():
         base_limit        INTEGER DEFAULT 130,
         extra             INTEGER DEFAULT 0,
         plan_active       INTEGER DEFAULT 0,
-        limit_notified_ts INTEGER DEFAULT 0
+        limit_notified_ts INTEGER DEFAULT 0,
+        period_recognized INTEGER DEFAULT 0
     );
     """)
     conn.commit()
@@ -195,6 +197,11 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE invoice_quota ADD COLUMN limit_notified_ts INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE invoice_quota ADD COLUMN period_recognized INTEGER DEFAULT 0")
         conn.commit()
     except Exception:
         pass
@@ -300,17 +307,18 @@ def get_quota(telegram_id: int) -> dict:
     return {"telegram_id": telegram_id, "period_start_ts": int(row["period_start_ts"]),
             "used": int(row["used"]), "base_limit": int(row["base_limit"]),
             "extra": int(row["extra"]), "plan_active": int(row["plan_active"]),
-            "limit_notified_ts": int(row["limit_notified_ts"])}
+            "limit_notified_ts": int(row["limit_notified_ts"]),
+            "period_recognized": int(row["period_recognized"])}
 
 
 def reset_quota_if_due(telegram_id: int) -> None:
-    """Ленивый месячный сброс: обнуляет used и сдвигает период. extra НЕ трогаем."""
+    """Ленивый месячный сброс: обнуляет used и period_recognized, сдвигает период. extra НЕ трогаем."""
     q = get_quota(telegram_id)
     now = int(datetime.now().timestamp())
     if now > q["period_start_ts"] + 30 * 86400:
         conn = get_db()
         conn.execute(
-            "UPDATE invoice_quota SET used = 0, period_start_ts = ?, limit_notified_ts = 0 "
+            "UPDATE invoice_quota SET used = 0, period_recognized = 0, period_start_ts = ?, limit_notified_ts = 0 "
             "WHERE telegram_id = ?",
             (now, telegram_id)
         )
@@ -324,7 +332,8 @@ def quota_available(telegram_id: int) -> int:
 
 
 def consume_quota(telegram_id: int) -> None:
-    """Списывает 1 накладную: сперва месячный лимит (used), по исчерпании — extra."""
+    """Списывает 1 накладную: сперва месячный лимит (used), по исчерпании — extra.
+    period_recognized инкрементируется безусловно (несрезаемый счётчик реального трафика)."""
     get_quota(telegram_id)  # гарантирует наличие строки
     conn = get_db()
     cur = conn.execute(
@@ -338,15 +347,23 @@ def consume_quota(telegram_id: int) -> None:
             "WHERE telegram_id = ? AND extra > 0",
             (telegram_id,)
         )
+    # Безусловный счётчик — не клипается у base_limit, отражает реальный трафик.
+    conn.execute(
+        "UPDATE invoice_quota SET period_recognized = period_recognized + 1 WHERE telegram_id = ?",
+        (telegram_id,)
+    )
     conn.commit()
     conn.close()
 
 
 def add_quota_extra(telegram_id: int, n: int) -> int:
-    """Начисляет n накладных в несгораемый extra. Возвращает новый extra."""
+    """Начисляет n накладных в несгораемый extra. Возвращает новый extra.
+    Отрицательный n (коррекция) не может опустить баланс ниже нуля."""
     get_quota(telegram_id)
     conn = get_db()
     conn.execute("UPDATE invoice_quota SET extra = extra + ? WHERE telegram_id = ?", (n, telegram_id))
+    # Защита от отрицательного баланса при коррекциях.
+    conn.execute("UPDATE invoice_quota SET extra = 0 WHERE telegram_id = ? AND extra < 0", (telegram_id,))
     conn.commit()
     row = conn.execute("SELECT extra FROM invoice_quota WHERE telegram_id = ?", (telegram_id,)).fetchone()
     conn.close()
@@ -372,7 +389,8 @@ def should_notify_limit(telegram_id: int) -> bool:
 def quota_stats() -> dict:
     conn = get_db()
     accounts = conn.execute("SELECT COUNT(*) c FROM invoice_quota").fetchone()["c"]
-    used = conn.execute("SELECT COALESCE(SUM(used),0) s FROM invoice_quota").fetchone()["s"]
+    # "used" здесь — реальный трафик за период (несрезаемый period_recognized), не клипированный used.
+    used = conn.execute("SELECT COALESCE(SUM(period_recognized),0) s FROM invoice_quota").fetchone()["s"]
     extra = conn.execute("SELECT COALESCE(SUM(extra),0) s FROM invoice_quota").fetchone()["s"]
     at_limit = conn.execute(
         "SELECT COUNT(*) c FROM invoice_quota WHERE (base_limit - used) + extra <= 0"

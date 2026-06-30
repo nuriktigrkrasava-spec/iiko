@@ -842,8 +842,9 @@ async def startup():
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
-    asyncio.create_task(_daily_stats_scheduler())
     if DEMO_ONLY:
+        # Ежедневная сводка юзеров/квоты — только на демо-деплое, чтобы не слать дважды
+        asyncio.create_task(_daily_stats_scheduler())
         asyncio.create_task(_demo_sales_scheduler())
 
 
@@ -3704,13 +3705,20 @@ async def _demo_sales_scheduler():
 
 
 async def _daily_stats_scheduler():
-    """Раз в сутки шлёт владельцу сводку: юзеры демо-бота + расход накладных."""
+    """Раз в сутки после REPORT_HOUR_LOCAL шлёт владельцу сводку: юзеры + накладные.
+    Использует wall-clock (local_now) + app_state-дедупликацию — переживает рестарты Render."""
     while True:
-        await asyncio.sleep(86400)
         try:
-            await _tg_send(OWNER_CHAT_ID, _build_stats_text())
+            now = local_now()
+            if now.hour >= REPORT_HOUR_LOCAL:
+                today_str = now.date().isoformat()
+                if get_app_state("daily_stats_last_sent") != today_str:
+                    await _tg_send(OWNER_CHAT_ID, _build_stats_text())
+                    set_app_state("daily_stats_last_sent", today_str)
+                    logger.info(f"[daily_stats] отправлена за {today_str}")
         except Exception as e:
             logger.warning(f"[daily_stats] {e}")
+        await asyncio.sleep(300)
 
 
 async def _weekly_report_scheduler():
@@ -4687,7 +4695,7 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
             if action == "limit:show":
                 tg_id = cb.get("from", {}).get("id", 0)
-                await _tg_send(chat_id, _limit_text(tg_id))
+                await _show_text(_limit_text(tg_id), _start_kb())
                 return {"ok": True}
             if action.startswith("info:faq:"):
                 key = action.split(":", 2)[2]
@@ -4889,7 +4897,7 @@ async def telegram_webhook(request: Request):
 
         # === TEXT ===
         text = message.get("text") or ""
-        if text.startswith("/start"):
+        if text == "/start" or text.startswith("/start "):
             parts = text.split(maxsplit=1)
             source = parts[1].strip() if len(parts) > 1 else "direct"
             if DEMO_ONLY:
