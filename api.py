@@ -547,6 +547,21 @@ def _build_stats_text() -> str:
     )
 
 
+def _limit_text(telegram_id: int) -> str:
+    reset_quota_if_due(telegram_id)
+    q = get_quota(telegram_id)
+    base_left = max(0, q["base_limit"] - q["used"])
+    avail = base_left + q["extra"]
+    reset_date = datetime.fromtimestamp(q["period_start_ts"] + 30 * 86400).strftime("%d.%m.%Y")
+    return (
+        f"📦 Накладные\n"
+        f"По подписке в этом месяце: {base_left} из {q['base_limit']}\n"
+        f"Докуплено (баланс): {q['extra']}\n"
+        f"Доступно всего: {avail}\n"
+        f"Лимит обновится: {reset_date}"
+    )
+
+
 # ============ DEMO DATA для остальных вкладок (курьеры/клиенты/год-год/план/…) ============
 # Чтобы демо-бот показывал заполненными ВСЕ вкладки, как основной. Формы 1-в-1 с реальными
 # ветками эндпоинтов. avg_way/avg_delay у курьеров — в минутах (так их рисует фронт).
@@ -3383,6 +3398,7 @@ def _start_kb() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "📦 Лимит накладных", "callback_data": "limit:show"}],
             [{"text": "📖 FAQ / Инструкция", "callback_data": "info:faq"}],
             [{"text": "🔧 Как настроить iiko Server", "callback_data": "info:setup"}],
             [{"text": "💬 Связаться / Сообщить об ошибке", "url": "https://t.me/wiregroup"}],
@@ -4669,6 +4685,10 @@ async def telegram_webhook(request: Request):
             if action == "info:faq":
                 await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
                 return {"ok": True}
+            if action == "limit:show":
+                tg_id = cb.get("from", {}).get("id", 0)
+                await _tg_send(chat_id, _limit_text(tg_id))
+                return {"ok": True}
             if action.startswith("info:faq:"):
                 key = action.split(":", 2)[2]
                 section = FAQ_SECTIONS.get(key)
@@ -4899,6 +4919,19 @@ async def telegram_webhook(request: Request):
             except Exception as e:
                 body = f"⚠️ Ошибка сбора статистики: {e}"
             await _tg_send(chat_id, body)
+            return {"ok": True}
+        if text in ("/limit", "📦 Лимит накладных") and not DEMO_ONLY:
+            await _tg_send(chat_id, _limit_text(telegram_id))
+            return {"ok": True}
+        if text.startswith("/addquota") and chat_id == OWNER_CHAT_ID:
+            parts = text.split()
+            if len(parts) == 3 and parts[1].isdigit() and parts[2].lstrip("-").isdigit():
+                tid, n = int(parts[1]), int(parts[2])
+                new_extra = add_quota_extra(tid, n)
+                await _tg_send(chat_id,
+                               f"✅ Аккаунту {tid} начислено {n}. Баланс докупленного: {new_extra}.")
+            else:
+                await _tg_send(chat_id, "Формат: /addquota <telegram_id> <кол-во>")
             return {"ok": True}
         if text.startswith("/"):
             return {"ok": True}
