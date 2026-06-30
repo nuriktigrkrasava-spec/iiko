@@ -137,6 +137,26 @@ def init_db():
         org_id      TEXT,
         started_ts  INTEGER
     );
+
+    -- Атрибуция: первый контакт юзера с демо-ботом и источник (deep-link ?start=)
+    CREATE TABLE IF NOT EXISTS user_acquisition (
+        telegram_id   INTEGER PRIMARY KEY,
+        username      TEXT,
+        source        TEXT,
+        first_seen_ts INTEGER
+    );
+
+    -- Лимит распознавания накладных (основной бот).
+    -- extra — несгораемый докупленный баланс; used — расход месячного лимита.
+    CREATE TABLE IF NOT EXISTS invoice_quota (
+        telegram_id       INTEGER PRIMARY KEY,
+        period_start_ts   INTEGER,
+        used              INTEGER DEFAULT 0,
+        base_limit        INTEGER DEFAULT 130,
+        extra             INTEGER DEFAULT 0,
+        plan_active       INTEGER DEFAULT 0,
+        limit_notified_ts INTEGER DEFAULT 0
+    );
     """)
     conn.commit()
     # Миграция для существующих БД
@@ -170,6 +190,11 @@ def init_db():
         pass
     try:
         conn.execute("ALTER TABLE demo_trial ADD COLUMN sales_sent INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE invoice_quota ADD COLUMN limit_notified_ts INTEGER DEFAULT 0")
         conn.commit()
     except Exception:
         pass
@@ -224,6 +249,132 @@ def inc_demo_invoice_count(telegram_id: int) -> int:
     ).fetchone()
     conn.close()
     return int(row["count"]) if row else 1
+
+
+# === Атрибуция юзеров демо-бота ===
+
+def record_acquisition(telegram_id: int, username: str, source: str) -> bool:
+    """Фиксирует первый контакт юзера с демо-ботом. True, если строка создана (новый юзер)."""
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO user_acquisition (telegram_id, username, source, first_seen_ts) "
+        "VALUES (?, ?, ?, ?)",
+        (telegram_id, username, source, int(datetime.now().timestamp()))
+    )
+    conn.commit()
+    created = cur.rowcount > 0
+    conn.close()
+    return created
+
+
+def acquisition_stats() -> dict:
+    conn = get_db()
+    now = int(datetime.now().timestamp())
+    total = conn.execute("SELECT COUNT(*) c FROM user_acquisition").fetchone()["c"]
+    today = conn.execute("SELECT COUNT(*) c FROM user_acquisition WHERE first_seen_ts >= ?",
+                         (now - 86400,)).fetchone()["c"]
+    week = conn.execute("SELECT COUNT(*) c FROM user_acquisition WHERE first_seen_ts >= ?",
+                        (now - 7 * 86400,)).fetchone()["c"]
+    rows = conn.execute(
+        "SELECT source, COUNT(*) c FROM user_acquisition GROUP BY source ORDER BY c DESC"
+    ).fetchall()
+    conn.close()
+    return {"total": int(total), "today": int(today), "week": int(week),
+            "by_source": [(r["source"] or "direct", int(r["c"])) for r in rows]}
+
+
+# === Квота накладных (основной бот) ===
+
+def get_quota(telegram_id: int) -> dict:
+    """Возвращает квоту аккаунта, создавая строку с дефолтами при первом обращении."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM invoice_quota WHERE telegram_id = ?", (telegram_id,)).fetchone()
+    if not row:
+        conn.execute(
+            "INSERT OR IGNORE INTO invoice_quota (telegram_id, period_start_ts) VALUES (?, ?)",
+            (telegram_id, int(datetime.now().timestamp()))
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM invoice_quota WHERE telegram_id = ?", (telegram_id,)).fetchone()
+    conn.close()
+    return {"telegram_id": telegram_id, "period_start_ts": int(row["period_start_ts"]),
+            "used": int(row["used"]), "base_limit": int(row["base_limit"]),
+            "extra": int(row["extra"]), "plan_active": int(row["plan_active"]),
+            "limit_notified_ts": int(row["limit_notified_ts"])}
+
+
+def reset_quota_if_due(telegram_id: int) -> None:
+    """Ленивый месячный сброс: обнуляет used и сдвигает период. extra НЕ трогаем."""
+    q = get_quota(telegram_id)
+    now = int(datetime.now().timestamp())
+    if now > q["period_start_ts"] + 30 * 86400:
+        conn = get_db()
+        conn.execute(
+            "UPDATE invoice_quota SET used = 0, period_start_ts = ?, limit_notified_ts = 0 "
+            "WHERE telegram_id = ?",
+            (now, telegram_id)
+        )
+        conn.commit()
+        conn.close()
+
+
+def quota_available(telegram_id: int) -> int:
+    q = get_quota(telegram_id)
+    return (q["base_limit"] - q["used"]) + q["extra"]
+
+
+def consume_quota(telegram_id: int) -> None:
+    """Списывает 1 накладную: сперва месячный лимит (used), по исчерпании — extra."""
+    get_quota(telegram_id)  # гарантирует наличие строки
+    conn = get_db()
+    row = conn.execute("SELECT used, base_limit, extra FROM invoice_quota WHERE telegram_id = ?",
+                       (telegram_id,)).fetchone()
+    used, base, extra = int(row["used"]), int(row["base_limit"]), int(row["extra"])
+    if used < base:
+        conn.execute("UPDATE invoice_quota SET used = used + 1 WHERE telegram_id = ?", (telegram_id,))
+    elif extra > 0:
+        conn.execute("UPDATE invoice_quota SET extra = extra - 1 WHERE telegram_id = ?", (telegram_id,))
+    conn.commit()
+    conn.close()
+
+
+def add_quota_extra(telegram_id: int, n: int) -> int:
+    """Начисляет n накладных в несгораемый extra. Возвращает новый extra."""
+    get_quota(telegram_id)
+    conn = get_db()
+    conn.execute("UPDATE invoice_quota SET extra = extra + ? WHERE telegram_id = ?", (n, telegram_id))
+    conn.commit()
+    row = conn.execute("SELECT extra FROM invoice_quota WHERE telegram_id = ?", (telegram_id,)).fetchone()
+    conn.close()
+    return int(row["extra"])
+
+
+def should_notify_limit(telegram_id: int) -> bool:
+    """True, если владельцу не слали пуш о лимите последние 24ч; помечает время отправки."""
+    get_quota(telegram_id)
+    conn = get_db()
+    row = conn.execute("SELECT limit_notified_ts FROM invoice_quota WHERE telegram_id = ?",
+                       (telegram_id,)).fetchone()
+    now = int(datetime.now().timestamp())
+    if row and now - int(row["limit_notified_ts"]) < 86400:
+        conn.close()
+        return False
+    conn.execute("UPDATE invoice_quota SET limit_notified_ts = ? WHERE telegram_id = ?", (now, telegram_id))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def quota_stats() -> dict:
+    conn = get_db()
+    accounts = conn.execute("SELECT COUNT(*) c FROM invoice_quota").fetchone()["c"]
+    used = conn.execute("SELECT COALESCE(SUM(used),0) s FROM invoice_quota").fetchone()["s"]
+    extra = conn.execute("SELECT COALESCE(SUM(extra),0) s FROM invoice_quota").fetchone()["s"]
+    at_limit = conn.execute(
+        "SELECT COUNT(*) c FROM invoice_quota WHERE (base_limit - used) + extra <= 0"
+    ).fetchone()["c"]
+    conn.close()
+    return {"accounts": int(accounts), "used": int(used), "extra": int(extra), "at_limit": int(at_limit)}
 
 
 def start_demo_trial(telegram_id: int, org_id: str, started_ts: int) -> None:
