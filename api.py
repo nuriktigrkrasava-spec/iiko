@@ -111,6 +111,10 @@ DEMO_TRIAL_HOURS = int(os.getenv("DEMO_TRIAL_HOURS", "24"))
 # Пусто (основной бот) — демо-режим полностью выключен (нет кнопки, /api/demo даёт 404).
 DEMO_ONLY = os.getenv("DEMO_ONLY", "").strip().lower() in ("1", "true", "yes", "on")
 OWNER_CHAT_ID = int(os.getenv("OWNER_CHAT_ID", "8727082281"))  # владелец — пуши и /stats
+# Рубильник блокировки по лимиту. По умолчанию 0 — лимит только считается
+# (кнопка «Лимит»/статистика показывают расход), но распознавание НЕ блокируется.
+# Поставить 1, когда владелец убедится в корректности цифр — тогда лимит блокирует.
+QUOTA_ENFORCE = os.getenv("QUOTA_ENFORCE", "0").strip().lower() in ("1", "true", "yes", "on")
 
 # ── saya-kds (внешняя аналитика доставки/кухни) ──
 # Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
@@ -4433,6 +4437,41 @@ async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
         inc_demo_invoice_count(telegram_id)
 
 
+async def _quota_gate(chat_id: int, telegram_id: int, username: str) -> bool:
+    """Основной бот: месячный лимит накладных. True если распознавание блокировано."""
+    if DEMO_ONLY:
+        return False  # на демо-боте свой лимит — _demo_block_if_used
+    reset_quota_if_due(telegram_id)
+    if quota_available(telegram_id) > 0:
+        return False
+    if not QUOTA_ENFORCE:
+        return False  # рубильник выключен: лимит только считается, не блокируем
+    await _tg_send(chat_id, LIMIT_REACHED_TEXT.format(limit=DEMO_PLAN_INVOICES), _wiregroup_kb())
+    if should_notify_limit(telegram_id):
+        uname = f"@{username}" if username else "(без username)"
+        try:
+            await _tg_send(OWNER_CHAT_ID, f"🚫 Аккаунт упёрся в лимит\nid: {telegram_id} · {uname}")
+        except Exception as e:
+            logger.warning(f"[quota] owner notify {telegram_id}: {e}")
+    return True
+
+
+async def _invoice_gate(chat_id: int, telegram_id: int, username: str) -> bool:
+    """Единый гейт перед распознаванием: демо-лимит ИЛИ месячный лимит основного бота."""
+    if await _demo_block_if_used(chat_id, telegram_id):
+        return True
+    if await _quota_gate(chat_id, telegram_id, username):
+        return True
+    return False
+
+
+async def _after_recognition(chat_id: int, telegram_id: int) -> None:
+    """После успешного распознавания: демо-счётчик ИЛИ списание месячной квоты."""
+    await _demo_after_recognition(chat_id, telegram_id)
+    if not DEMO_ONLY:
+        consume_quota(telegram_id)
+
+
 async def _recognize_invoice_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     file_id: str, image_bytes: bytes, mime: str
@@ -4446,8 +4485,8 @@ async def _recognize_invoice_and_create_pending(
             f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
         return
 
-    # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
-    if await _demo_block_if_used(chat_id, telegram_id):
+    # Гейт: демо-лимит ИЛИ месячный лимит накладных основного бота.
+    if await _invoice_gate(chat_id, telegram_id, username):
         return
 
     status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
@@ -4484,7 +4523,7 @@ async def _recognize_invoice_and_create_pending(
         new_id = await _tg_send(chat_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
         pending["message_id"] = new_id
 
-    await _demo_after_recognition(chat_id, telegram_id)
+    await _after_recognition(chat_id, telegram_id)
 
 
 async def _handle_demo_registration(chat_id: int, telegram_id: int, username: str,
@@ -4870,8 +4909,8 @@ async def telegram_webhook(request: Request):
                     "📎 Пришли накладную — фото, файлом или текстом (минимум 20 символов с позициями и ценами).")
                 return {"ok": True}
 
-            # Демо-бот: лимит — 1 распознавание, дальше только продающее сообщение.
-            if await _demo_block_if_used(chat_id, telegram_id):
+            # Гейт: демо-лимит ИЛИ месячный лимит накладных основного бота.
+            if await _invoice_gate(chat_id, telegram_id, username):
                 return {"ok": True}
 
             status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную из текста...")
@@ -4904,7 +4943,7 @@ async def telegram_webhook(request: Request):
             await _tg_edit(chat_id, status_msg_id,
                            _format_invoice_v2(pending, "preview"),
                            _invoice_kb(pending["pending_id"]))
-            await _demo_after_recognition(chat_id, telegram_id)
+            await _after_recognition(chat_id, telegram_id)
             return {"ok": True}
 
     except Exception as e:
