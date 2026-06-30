@@ -4823,7 +4823,12 @@ async def telegram_webhook(request: Request):
             parts = text.split(maxsplit=1)
             source = parts[1].strip() if len(parts) > 1 else "direct"
             if DEMO_ONLY:
-                if record_acquisition(telegram_id, username, source):
+                try:
+                    is_new = record_acquisition(telegram_id, username, source)
+                except Exception as e:
+                    logger.warning(f"[acq] record_acquisition {telegram_id}: {e}")
+                    is_new = False
+                if is_new:
                     try:
                         ts = datetime.now().strftime("%d.%m.%Y %H:%M")
                         uname = f"@{username}" if username else "(без username)"
@@ -4839,7 +4844,11 @@ async def telegram_webhook(request: Request):
             await _tg_send(chat_id, FAQ_MENU_TEXT, _faq_menu_kb())
             return {"ok": True}
         if text == "/stats" and chat_id == OWNER_CHAT_ID:
-            await _tg_send(chat_id, _build_stats_text())
+            try:
+                body = _build_stats_text()
+            except Exception as e:
+                body = f"⚠️ Ошибка сбора статистики: {e}"
+            await _tg_send(chat_id, body)
             return {"ok": True}
         if text.startswith("/"):
             return {"ok": True}
