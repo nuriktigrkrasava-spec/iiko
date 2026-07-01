@@ -717,6 +717,76 @@ class IikoWebClient:
     async def get_nomenclature(self, org_id: str) -> Dict[str, Any]:
         return {"products": []}
 
+    @staticmethod
+    def _aggregate_stock_prices(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Из строк balance/stores → {productId: средняя себестоимость = Σsum/Σamount}."""
+        acc: Dict[str, List[float]] = {}
+        for r in rows or []:
+            pid = r.get("product")
+            amt = float(r.get("amount", 0) or 0)
+            summ = float(r.get("sum", 0) or 0)
+            if not pid or amt <= 0:
+                continue
+            a = acc.setdefault(pid, [0.0, 0.0])
+            a[0] += summ
+            a[1] += amt
+        return {pid: (s / a) for pid, (s, a) in acc.items() if a > 0}
+
+    @staticmethod
+    def _products_name_map(products: List[Dict[str, Any]]) -> Dict[str, str]:
+        """{имя блюда в нижнем регистре: productId} только для type==DISH."""
+        out: Dict[str, str] = {}
+        for p in products or []:
+            if (p.get("type") == "DISH") and p.get("id") and p.get("name"):
+                out[str(p["name"]).strip().lower()] = p["id"]
+        return out
+
+    async def get_products(self) -> List[Dict[str, Any]]:
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v2/entities/products/list",
+                params={"key": token, "includeDeleted": "false"}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else data.get("data", [])
+
+    async def get_dish_name_map(self) -> Dict[str, str]:
+        return self._products_name_map(await self.get_products())
+
+    async def get_assembly_prepared(self, product_id: str, date: str) -> List[Dict[str, Any]]:
+        """Развёрнутая техкарта блюда на дату → [{productId, amount(норма на 1 порцию)}]."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v2/assemblyCharts/getPrepared",
+                params={"key": token, "date": date, "productId": product_id}
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            charts = (resp.json() or {}).get("preparedCharts") or []
+            if not charts:
+                return []
+            items = charts[0].get("items") or []
+            return [{"productId": it.get("productId"), "amount": float(it.get("amount", 0) or 0)}
+                    for it in items if it.get("productId")]
+
+    async def get_stock_prices(self) -> Dict[str, float]:
+        """Учётная себестоимость по ингредиентам из остатков складов."""
+        token = await self._ensure_token()
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(
+                f"{self.base_url}/api/v2/reports/balance/stores",
+                params={"key": token, "timestamp": ts}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            rows = data if isinstance(data, list) else data.get("data", [])
+            return self._aggregate_stock_prices(rows)
+
     async def get_expense_acts(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Расходы через OLAP TRANSACTIONS — INCOME_EXPENSES счета."""
         filters: Dict[str, Any] = {
