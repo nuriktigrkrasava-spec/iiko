@@ -46,6 +46,7 @@ from database import (
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
+from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -768,6 +769,49 @@ async def _foodcost_month(client, org_id: str, date_from: str, date_to: str):
             "cost_pct": (round(cost / rev * 100, 1) if rev else 0.0) if cost_available else None
         })
     return dishes, total_rev, total_cost, cost_available
+
+
+# кеш техкарт: {(base_url, productId): (ts, items)}; техкарты меняются редко
+_recipe_cache: Dict[tuple, tuple] = {}
+_RECIPE_TTL = 24 * 3600
+
+# кеш готового результата расчёта фудкоста по техкартам: {(org_id, period): (ts, resp)}
+_foodcost_result_cache: Dict[tuple, tuple] = {}
+_FOODCOST_RESULT_TTL = 24 * 3600
+
+async def _get_recipe_cached(client, product_id: str, date: str) -> list:
+    ck = (getattr(client, "base_url", ""), product_id)
+    hit = _recipe_cache.get(ck)
+    now = int(datetime.now().timestamp())
+    if hit and now - hit[0] < _RECIPE_TTL:
+        return hit[1]
+    items = await client.get_assembly_prepared(product_id, date)
+    _recipe_cache[ck] = (now, items)
+    return items
+
+
+async def _foodcost_from_recipes(client, dishes_sold: list, date_to: str) -> dict:
+    """dishes_sold — уже полученный список проданных блюд из _foodcost_month (results[0][0])."""
+    # карта имя->productId и цены (параллельно)
+    name_map, prices = await asyncio.gather(client.get_dish_name_map(), client.get_stock_prices())
+    # собираем sales с productId и тянем техкарты только по проданным
+    date_for_recipe = date_to[:10]
+    sales = []
+    for d in dishes_sold:
+        pid = name_map.get(str(d.get("name", "")).strip().lower())
+        sales.append({"productId": pid, "name": d.get("name", ""),
+                      "category": d.get("category", ""),
+                      "revenue": d.get("revenue", 0), "count": d.get("count", 0)})
+    recipes = {}
+    pids = [s["productId"] for s in sales if s["productId"]]
+    # пачками по 6 параллельно
+    for i in range(0, len(pids), 6):
+        batch = pids[i:i + 6]
+        got = await asyncio.gather(*[_get_recipe_cached(client, p, date_for_recipe) for p in batch],
+                                   return_exceptions=True)
+        for p, items in zip(batch, got):
+            recipes[p] = [] if isinstance(items, Exception) else items
+    return compute_recipe_foodcost(sales, recipes, prices)
 
 
 # ============ MODELS ============
@@ -1691,7 +1735,7 @@ async def chaspik_export(
 
 
 @app.get("/api/foodcost/{org_id}")
-async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
+async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
         return DEMO_FOODCOST
 
@@ -1754,20 +1798,37 @@ async def foodcost(org_id: str, period: str = "month", user: Dict = Depends(get_
                 "dishes": dishes[:20]
             }
         else:
-            # Себестоимости нет на этой лицензии — не врём «0% / −30», честно помечаем.
+            # Самохостед iikoWeb: считаем теоретический фудкост по техкартам.
+            rc_key = (real_org, period)
+            hit = _foodcost_result_cache.get(rc_key)
+            now_ts = int(datetime.now().timestamp())
+            if not compute:
+                if hit and now_ts - hit[0] < _FOODCOST_RESULT_TTL:
+                    return hit[1]
+                resp = {
+                    "norm_pct": NORM_PCT, "fact_pct": None, "diff_pct": None,
+                    "norm_sum": round(total_rev * NORM_PCT / 100), "fact_sum": None,
+                    "warning": None, "cost_available": False, "needs_compute": True,
+                    "method": "recipes", "trend": trend, "dishes": dishes[:20],
+                }
+                return resp  # НЕ кешируем «заглушку» — расчёт по кнопке
+            rec = await _foodcost_from_recipes(client, dishes, date_to)
+            fpct = rec["fact_pct"]
+            cov = rec["coverage_pct"]
             resp = {
                 "norm_pct": NORM_PCT,
-                "fact_pct": None,
-                "diff_pct": None,
-                "norm_sum": round(total_rev * NORM_PCT / 100),
-                "fact_sum": None,
-                "warning": "Себестоимость недоступна на вашей лицензии iiko "
-                           "(iikoWeb без отдельной лицензии не отдаёт DishCostSumInt). "
-                           "Показываем выручку и продажи по блюдам; фудкост-% посчитать нельзя.",
-                "cost_available": False,
-                "trend": trend,
-                "dishes": dishes[:20]
+                "fact_pct": fpct,
+                "diff_pct": (round(fpct - NORM_PCT, 1) if fpct is not None else None),
+                "norm_sum": round((rec["base_rev"] or total_rev) * NORM_PCT / 100),
+                "fact_sum": round(rec["fact_sum"]),
+                "coverage_pct": cov,
+                "warning": ("Нет продаж за период" if cov is None else
+                            (None if cov >= 70 else
+                             f"Оценка неполная: посчитано {cov}% выручки. Добавьте приходные цены/техкарты в iiko.")),
+                "cost_available": True, "method": "recipes",
+                "trend": trend, "dishes": rec["dishes"][:20],
             }
+            _foodcost_result_cache[rc_key] = (now_ts, resp)
         _set_cached(key, resp)
         return resp
     except Exception as e:
