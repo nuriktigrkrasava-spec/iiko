@@ -1876,7 +1876,7 @@ function switchTab(tab) {
   document.getElementById('screen-' + tab).classList.add('active');
   if (tab === 'cashshifts') { loadCashshifts(); loadSalary(); loadPendingShifts(); }
   const navItems = document.querySelectorAll('.nav-item');
-  const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4 };
+  const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4, cashshifts: 5 };
   if (navItems[tabMap[tab]]) navItems[tabMap[tab]].classList.add('active');
 
   state.currentTab = tab;
