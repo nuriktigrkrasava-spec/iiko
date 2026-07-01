@@ -1067,8 +1067,10 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <!-- Expenses tab -->
     <div id="tab-expenses" style="display:none">
       <div style="margin-top:16px;">
-        <div class="date-filters" style="padding:0 0 12px;">
-          <div class="date-chip active">Эта н...</div>
+        <div class="subtabs" id="exp-period-tabs" style="padding:0 0 12px;">
+          <div class="subtab" data-p="day" onclick="setExpensePeriod('day', this)">День</div>
+          <div class="subtab" data-p="week" onclick="setExpensePeriod('week', this)">Неделя</div>
+          <div class="subtab active" data-p="month" onclick="setExpensePeriod('month', this)">Месяц</div>
         </div>
       </div>
       <div class="card">
@@ -3486,7 +3488,7 @@ async function loadExpenses() {
 
   if (state.expenseTab === 'expenses') {
     try {
-      const data = await apiGet(`/api/expenses/${orgId}?period=week`);
+      const data = await apiGet(`/api/expenses/${orgId}?period=${state.expensePeriod || 'month'}`);
       state.expensesData = data.operations || [];
       document.getElementById('exp-total').textContent = formatMoney(data.total);
       const maxCat = Math.max(...data.categories.map(c => c.amount));
@@ -3626,6 +3628,15 @@ function setWithdrawalPeriod(p, el) {
 state.invoiceSubview = state.invoiceSubview || 'list';
 state.priceSearch = state.priceSearch || { query: '', timer: null };
 state.invoicePeriod = state.invoicePeriod || 'month';
+state.expensePeriod = state.expensePeriod || 'month';
+
+function setExpensePeriod(p, el) {
+  haptic();
+  state.expensePeriod = p;
+  document.querySelectorAll('#exp-period-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  loadExpenses();
+}
 
 function setInvoicePeriod(p, el) {
   haptic();
