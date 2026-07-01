@@ -3456,7 +3456,12 @@ async function loadExpenses() {
         document.getElementById('foodcost-warning').style.display = 'flex';
         document.getElementById('foodcost-warning-text').textContent = data.warning;
       } else { document.getElementById('foodcost-warning').style.display = 'none'; }
-      renderFcTrend(data.trend);
+      // Тренд по месяцам есть только когда по месяцам есть числовой fact (облачный путь).
+      // На фудкосте по техкартам истории нет → прячем пустой график, иначе кривые столбцы.
+      const _trendCard = document.getElementById('chart-fc-trend').closest('.card');
+      const _hasTrend = Array.isArray(data.trend) && data.trend.some(t => typeof t.fact === 'number');
+      if (_hasTrend) { if (_trendCard) _trendCard.style.display = ''; renderFcTrend(data.trend); }
+      else if (_trendCard) { _trendCard.style.display = 'none'; }
       document.querySelector('#fc-dishes-table tbody').innerHTML = data.dishes.map(d => {
         const cp = d.cost_pct;
         let cls = 'cost-green';
