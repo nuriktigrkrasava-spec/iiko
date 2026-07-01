@@ -290,6 +290,19 @@ def acquisition_stats() -> dict:
             "by_source": [(r["source"] or "direct", int(r["c"])) for r in rows]}
 
 
+def acquisitions_today() -> list:
+    """Юзеры за последние 24ч: [{telegram_id, username, source, ts}], новые сверху."""
+    conn = get_db()
+    since = int(datetime.now().timestamp()) - 86400
+    rows = conn.execute(
+        "SELECT telegram_id, username, source, first_seen_ts FROM user_acquisition "
+        "WHERE first_seen_ts >= ? ORDER BY first_seen_ts DESC", (since,)
+    ).fetchall()
+    conn.close()
+    return [{"telegram_id": int(r["telegram_id"]), "username": r["username"] or "",
+             "source": r["source"] or "direct", "ts": int(r["first_seen_ts"])} for r in rows]
+
+
 # === Квота накладных (основной бот) ===
 
 def get_quota(telegram_id: int) -> dict:
