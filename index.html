@@ -4539,7 +4539,7 @@ function filterExpenses(filter, el) {
   ops.forEach(op => {
     const type = op.dataset.type || 'orders';
     if (filter === 'all') op.style.display = '';
-    else if (filter === 'orders') op.style.display = type === 'order' ? '' : 'none';
+    else if (filter === 'orders') op.style.display = type !== 'manual' ? '' : 'none';
     else if (filter === 'manual') op.style.display = type === 'manual' ? '' : 'none';
   });
 }
