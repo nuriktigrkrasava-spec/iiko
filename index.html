@@ -1074,9 +1074,15 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card">
         <div class="metric-label" style="margin-bottom:8px;">📄 Итого расходов</div>
         <div class="metric-value" id="exp-total">0 ₸</div>
-        <div style="display:flex;gap:8px;margin-top:12px;">
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
           <button class="excel-btn" onclick="exportReport('expenses')">↓ Excel</button>
           <button class="btn btn-primary" onclick="showAddExpenseModal()">+ Добавить</button>
+        </div>
+        <button class="excel-btn" style="margin-top:8px;width:100%;" onclick="exportReport('expenses-bookkeeper')">📄 Сводка для бухгалтера</button>
+        <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;margin-top:10px;">
+          💡 Денежные расходы (зарплата, аренда, коммуналка) iiko не принимает автоматически —
+          в отличие от накладных на товар. Порядок: скачайте сводку → бухгалтер вносит расходы
+          в iikoOffice по указанным в файле счетам. Категории уже сгруппированы.
         </div>
       </div>
       <div class="subtabs">
@@ -4491,6 +4497,28 @@ async function exportReport(type) {
     const data = state.expensesData || [];
     csv = '﻿Название;Категория;Сумма;Дата\n' +
       data.map(e => `${e.name || ''};${e.cat || ''};${Math.round(e.amount || 0)};${e.date || ''}`).join('\n');
+
+  } else if (type === 'expenses-bookkeeper') {
+    const manual = (state.expensesData || []).filter(e => e.type === 'manual');
+    if (!manual.length) { showToast('Нет ручных расходов за период'); return; }
+    const byCat = {};
+    let total = 0;
+    manual.forEach(e => {
+      const k = e.cat || 'Без категории';
+      const a = Number(e.amount) || 0;
+      byCat[k] = (byCat[k] || 0) + a; total += a;
+    });
+    const clean = s => String(s || '').replace(/[;\n\r]/g, ' ').trim();
+    const summary = Object.entries(byCat).sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${clean(k)};${Math.round(v)}`).join('\n');
+    const detail = manual.map(e =>
+      `${e.date || ''};${clean(e.cat) || 'Без категории'};${Math.round(e.amount || 0)};${clean(e.name)}`).join('\n');
+    const accounts = ['Прочие расходы', 'Расход продуктов', 'Маркетинговые расходы',
+      'Коммунальные расходы', 'Расходы и ремонт на авто'].join('\n');
+    csv = '﻿СВОДКА ПО КАТЕГОРИЯМ\nКатегория;Сумма\n' + summary + `\nИТОГО;${Math.round(total)}\n\n` +
+      'ДЕТАЛЬНО\nДата;Категория;Сумма;Комментарий\n' + detail + '\n\n' +
+      'СПРАВОЧНИК РАСХОДНЫХ СЧЕТОВ IIKO (куда проводить)\nРасходный счёт iiko\n' + accounts;
+    filename = 'bookkeeper-expenses.csv';
 
   } else if (type === 'writeoffs') {
     const data = state.writeoffsData || [];
