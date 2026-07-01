@@ -40,7 +40,7 @@ from database import (
     get_plan_url, set_plan_url,
     get_client_url, set_client_url,
     get_all_restaurants, get_user_by_username, get_app_state, set_app_state,
-    record_acquisition, acquisition_stats,
+    record_acquisition, acquisition_stats, acquisitions_today,
     get_quota, quota_available, consume_quota, add_quota_extra,
     reset_quota_if_due, should_notify_limit, quota_stats,
 )
@@ -546,6 +546,18 @@ def _build_stats_text() -> str:
         f"Докуплено (баланс): {q['extra']}\n"
         f"Упёрлись в лимит: {q['at_limit']} аккаунтов"
     )
+
+
+def _build_today_text() -> str:
+    rows = acquisitions_today()
+    if not rows:
+        return "За сегодня новых юзеров нет."
+    lines = [f"🆕 За сегодня: {len(rows)}"]
+    for r in rows:
+        t = datetime.fromtimestamp(r["ts"]).strftime("%H:%M")
+        uname = f"@{r['username']}" if r["username"] else "(без username)"
+        lines.append(f"{t} · id {r['telegram_id']} · {uname} · {r['source']}")
+    return "\n".join(lines)
 
 
 def _limit_text(telegram_id: int) -> str:
@@ -4972,7 +4984,7 @@ async def telegram_webhook(request: Request):
                         ts = datetime.now().strftime("%d.%m.%Y %H:%M")
                         uname = f"@{username}" if username else "(без username)"
                         await _tg_send(OWNER_CHAT_ID,
-                                       f"🆕 Новый юзер {uname}\nИсточник: {source}\n{ts}")
+                                       f"🆕 Новый юзер {uname}\nid: {telegram_id}\nИсточник: {source}\n{ts}")
                     except Exception as e:
                         logger.warning(f"[acq] owner notify {telegram_id}: {e}")
                 await _tg_send(chat_id, DEMO_WELCOME_TEXT, _demo_start_kb())
@@ -4987,6 +4999,13 @@ async def telegram_webhook(request: Request):
                 body = _build_stats_text()
             except Exception as e:
                 body = f"⚠️ Ошибка сбора статистики: {e}"
+            await _tg_send(chat_id, body)
+            return {"ok": True}
+        if text == "/today" and chat_id == OWNER_CHAT_ID:
+            try:
+                body = _build_today_text()
+            except Exception as e:
+                body = f"⚠️ Ошибка: {e}"
             await _tg_send(chat_id, body)
             return {"ok": True}
         if text in ("/limit", "📦 Лимит накладных") and not DEMO_ONLY:
