@@ -775,6 +775,10 @@ async def _foodcost_month(client, org_id: str, date_from: str, date_to: str):
 _recipe_cache: Dict[tuple, tuple] = {}
 _RECIPE_TTL = 24 * 3600
 
+# кеш готового результата расчёта фудкоста по техкартам: {(org_id, period): (ts, resp)}
+_foodcost_result_cache: Dict[tuple, tuple] = {}
+_FOODCOST_RESULT_TTL = 24 * 3600
+
 async def _get_recipe_cached(client, product_id: str, date: str) -> list:
     ck = (getattr(client, "base_url", ""), product_id)
     hit = _recipe_cache.get(ck)
@@ -786,14 +790,11 @@ async def _get_recipe_cached(client, product_id: str, date: str) -> list:
     return items
 
 
-async def _foodcost_from_recipes(client, org_id: str, date_from: str, date_to: str) -> dict:
-    """Теоретический фудкост для самохостед iikoWeb: продажи×техкарты×цены."""
-    # 1) продажи по блюдам за период
-    sales_raw = await _foodcost_month(client, org_id, date_from, date_to)
-    dishes_sold = sales_raw[0]        # [{name, category, revenue, count, cost_pct=None}]
-    # 2) карта имя->productId и цены (параллельно)
+async def _foodcost_from_recipes(client, dishes_sold: list, date_to: str) -> dict:
+    """dishes_sold — уже полученный список проданных блюд из _foodcost_month (results[0][0])."""
+    # карта имя->productId и цены (параллельно)
     name_map, prices = await asyncio.gather(client.get_dish_name_map(), client.get_stock_prices())
-    # 3) собираем sales с productId и тянем техкарты только по проданным
+    # собираем sales с productId и тянем техкарты только по проданным
     date_for_recipe = date_to[:10]
     sales = []
     for d in dishes_sold:
@@ -1798,7 +1799,12 @@ async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: D
             }
         else:
             # Самохостед iikoWeb: считаем теоретический фудкост по техкартам.
+            rc_key = (real_org, period)
+            hit = _foodcost_result_cache.get(rc_key)
+            now_ts = int(datetime.now().timestamp())
             if not compute:
+                if hit and now_ts - hit[0] < _FOODCOST_RESULT_TTL:
+                    return hit[1]
                 resp = {
                     "norm_pct": NORM_PCT, "fact_pct": None, "diff_pct": None,
                     "norm_sum": round(total_rev * NORM_PCT / 100), "fact_sum": None,
@@ -1806,21 +1812,23 @@ async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: D
                     "method": "recipes", "trend": trend, "dishes": dishes[:20],
                 }
                 return resp  # НЕ кешируем «заглушку» — расчёт по кнопке
-            rec = await _foodcost_from_recipes(client, _olap_dept(real_org, info), date_from, date_to)
+            rec = await _foodcost_from_recipes(client, dishes, date_to)
             fpct = rec["fact_pct"]
+            cov = rec["coverage_pct"]
             resp = {
                 "norm_pct": NORM_PCT,
                 "fact_pct": fpct,
                 "diff_pct": (round(fpct - NORM_PCT, 1) if fpct is not None else None),
                 "norm_sum": round((rec["base_rev"] or total_rev) * NORM_PCT / 100),
                 "fact_sum": round(rec["fact_sum"]),
-                "coverage_pct": rec["coverage_pct"],
-                "warning": (None if rec["coverage_pct"] >= 70 else
-                            f"Оценка неполная: посчитано {rec['coverage_pct']}% выручки. "
-                            f"Добавьте приходные цены/техкарты в iiko."),
+                "coverage_pct": cov,
+                "warning": ("Нет продаж за период" if cov is None else
+                            (None if cov >= 70 else
+                             f"Оценка неполная: посчитано {cov}% выручки. Добавьте приходные цены/техкарты в iiko.")),
                 "cost_available": True, "method": "recipes",
                 "trend": trend, "dishes": rec["dishes"][:20],
             }
+            _foodcost_result_cache[rc_key] = (now_ts, resp)
         _set_cached(key, resp)
         return resp
     except Exception as e:

@@ -734,7 +734,9 @@ class IikoWebClient:
 
     @staticmethod
     def _products_name_map(products: List[Dict[str, Any]]) -> Dict[str, str]:
-        """{имя блюда в нижнем регистре: productId} только для type==DISH."""
+        """{имя блюда в нижнем регистре: productId} только для type==DISH.
+        Дубликаты имён схлопываются (последний в списке побеждает); правильнее было бы
+        сопоставлять по DishId измерению OLAP-отчёта, когда оно станет доступно."""
         out: Dict[str, str] = {}
         for p in products or []:
             if (p.get("type") == "DISH") and p.get("id") and p.get("name"):
