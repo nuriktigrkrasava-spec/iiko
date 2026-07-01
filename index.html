@@ -1009,10 +1009,11 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
         <span>⚠</span> <span id="foodcost-warning-text"></span>
       </div>
       <div id="fc-compute-box" style="display:none; text-align:center; margin:16px 0;">
-        <button class="excel-btn" style="padding:12px 20px; font-size:15px;"
+        <button id="fc-compute-btn" class="excel-btn" style="padding:12px 20px; font-size:15px;"
                 onclick="computeFoodcost()">📊 Посчитать фудкост по техкартам</button>
         <div style="font-size:12px; color:var(--text-secondary); margin-top:8px;">
           Считается из ваших техкарт и приходных цен. Займёт несколько секунд.</div>
+        <div id="fc-compute-status" style="font-size:12px; margin-top:8px;"></div>
       </div>
       <div id="fc-coverage" style="display:none; font-size:12px; color:var(--text-secondary); margin:4px 0 12px; text-align:center;"></div>
       <div style="text-align:center;font-size:15px;font-weight:600;margin:16px 0 12px;" id="fc-month">Май 2026</div>
@@ -3410,14 +3411,17 @@ function sortStaff(field) {
 async function computeFoodcost() {
   const orgId = window._fcOrgId || (state.restaurant && state.restaurant.organization_id);
   if (!orgId) return;
-  const box = document.getElementById('fc-compute-box');
-  box.innerHTML = '<div style="padding:12px; color:var(--text-secondary);">⏳ Считаю фудкост по техкартам…</div>';
+  const btn = document.getElementById('fc-compute-btn');
+  const status = document.getElementById('fc-compute-status');
+  if (btn) btn.disabled = true;
+  if (status) status.innerHTML = '<span style="color:var(--text-secondary)">⏳ Считаю фудкост по техкартам…</span>';
   try {
     const data = await apiGet(`/api/foodcost/${orgId}?period=month&compute=1`);
-    if (data && data._iiko_error) { showIikoError(data._iiko_error); return; }
+    if (data && data._iiko_error) { showIikoError(data._iiko_error); if (btn) btn.disabled = false; if (status) status.innerHTML = ''; return; }
     await loadExpenses();  // перерисует уже с посчитанными данными (из кеша)
   } catch (e) {
-    box.innerHTML = '<div style="padding:12px; color:var(--red);">Не удалось посчитать. Попробуйте ещё раз.</div>';
+    if (status) status.innerHTML = '<span style="color:var(--red)">Не удалось посчитать. Попробуйте ещё раз.</span>';
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3432,6 +3436,10 @@ async function loadExpenses() {
       window._fcOrgId = orgId;
       const needsCompute = data.needs_compute === true;
       document.getElementById('fc-compute-box').style.display = needsCompute ? 'block' : 'none';
+      if (needsCompute) {
+        const _b = document.getElementById('fc-compute-btn'); if (_b) _b.disabled = false;
+        const _s = document.getElementById('fc-compute-status'); if (_s) _s.innerHTML = '';
+      }
       const cov = document.getElementById('fc-coverage');
       if (!needsCompute && typeof data.coverage_pct === 'number') {
         cov.style.display = 'block';
