@@ -510,8 +510,8 @@ DEMO_PLAN_INVOICES = 130  # базовый месячный лимит накл�
 DEMO_OFFER_TEXT = (
     "⏳ Ваш 24-часовой доступ к данным закончился.\n\n"
     "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
-    "💰 Разработка и настройка под ваше заведение — <b>200 000 ₸</b> (под вашу номенклатуру, "
-    "поставщиков, сеть). Дальше подписка — <b>30 000 ₸/мес</b>.\n\n"
+    "💰 Разработка и настройка под ваше заведение — <b>300 000 ₸</b> (под вашу номенклатуру, "
+    "поставщиков, сеть). Дальше обслуживание — <b>30 000 ₸/мес</b>.\n\n"
     "👉 Напишите — подключу за день."
 )
 
@@ -3407,7 +3407,7 @@ _pending_by_id: Dict[str, int] = {}
 _demo_reg: Dict[int, dict] = {}
 
 DEMO_REG_PROMPTS = {
-    "server": ("🔌 Подключим ваш iiko — и накладная улетит к вам, плюс на 24 часа откроется "
+    "server": ("🔌 Подключим ваш iiko — сразу после этого на 24 часа откроется "
                "ваша реальная аналитика.\n\n"
                "Шаг 1/3 — пришлите адрес вашего iiko-сервера. Это адрес, по которому вы открываете "
                "iikoWeb/iikoOffice в браузере (например <code>https://ваш-сервер.iiko.it/resto</code>) — "
@@ -3482,17 +3482,21 @@ def _start_kb() -> dict:
 
 # Демо-бот: приветствие с призывом распознать первую накладную (без техтекста iiko).
 DEMO_WELCOME_TEXT = (
-    "👋 Это бот, который распознаёт накладные с фото и грузит приход в iiko.\n\n"
-    "📸 <b>Распознайте свою первую накладную</b> — просто пришлите фото накладной "
-    "(или картинкой-файлом). Бот за ~10 секунд вытащит все позиции, единицы и суммы.\n\n"
-    "Попробуйте прямо сейчас 👇"
+    "👋 Это бот ресторанной аналитики iiko + распознавание накладных с фото.\n\n"
+    "🔌 <b>Подключите свой iiko</b> — прямо здесь, в чате, 3 коротких шага. "
+    "Сразу после подключения на <b>24 часа</b> открою вашу реальную аналитику в Mini App: "
+    "выручка, фудкост, смены, расходы — всё по вашему заведению.\n\n"
+    "📸 А накладные бот распознаёт с фото за ~10 секунд и складывает в Mini App → "
+    "вкладка <b>«Расходы» → «Накладные»</b>, откуда вы отправляете приход в iiko.\n\n"
+    "Начнём — нажмите <b>«🔌 Подключить iiko»</b> 👇"
 )
 
 
 def _demo_start_kb() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "📊 Открыть аналитику (демо)", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "🔌 Подключить iiko", "callback_data": "demo:connect"}],
+            [{"text": "📊 Посмотреть демо (тестовые данные)", "web_app": {"url": f"{MINIAPP_URL}/"}}],
             [{"text": "💬 Написать менеджеру", "url": "https://t.me/wiregroup"}],
         ]
     }
@@ -4641,7 +4645,7 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
         return False
     if text.lower() in ("/cancel", "отмена", "cancel"):
         _demo_reg.pop(chat_id, None)
-        await _tg_send(chat_id, "Окей, подключение отменено. Нажми «Отправить в iiko» в накладной, когда будешь готов.")
+        await _tg_send(chat_id, "Окей, подключение отменено. Нажмите «🔌 Подключить iiko» в /start, когда будете готовы.")
         return True
     if not text:
         await _tg_send(chat_id, "Заверши подключение iiko — пришли ответ текстом по шагам, или /cancel.")
@@ -4697,7 +4701,12 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
 
         pending = _get_pending_by_id(pending_id) if pending_id else _get_pending_by_chat(chat_id)
         if not pending:
-            await _tg_send(chat_id, "Накладная устарела — пришли её заново и нажми «Отправить в iiko».")
+            if pending_id:
+                await _tg_send(chat_id, "Накладная устарела — пришли её заново и нажми «Отправить в iiko».")
+            else:
+                await _tg_send(chat_id,
+                    "📸 Теперь просто присылайте накладные фото — бот распознает их и положит в "
+                    "Mini App → <b>Расходы → Накладные</b>, откуда вы отправите приход в iiko.")
             return True
         rests = [r for r in _get_user_orgs(telegram_id) if r.get("api_login") != "demo"]
         send_msg = await _tg_send(chat_id, "➡️ Отправляю накладную в iiko...")
@@ -4765,6 +4774,11 @@ async def telegram_webhook(request: Request):
                 return {"ok": True}
             if action == "info:faq":
                 await _show_text(FAQ_MENU_TEXT, _faq_menu_kb())
+                return {"ok": True}
+            if action == "demo:connect" and DEMO_ONLY:
+                # Демо-бот: подключение iiko — первым шагом, без накладной.
+                _demo_reg[chat_id] = {"step": "server"}
+                await _tg_send(chat_id, DEMO_REG_PROMPTS["server"])
                 return {"ok": True}
             if action == "limit:show":
                 tg_id = cb.get("from", {}).get("id", 0)
