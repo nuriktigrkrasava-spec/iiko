@@ -560,6 +560,24 @@ def delete_all_restaurants(telegram_id: int) -> int:
     conn.close()
     return n
 
+
+def wipe_demo_user(telegram_id: int) -> dict:
+    """Полностью удалить юзера из всех таблиц по telegram_id — для чистого
+    перетеста демо (триал/подключение/лимит начинаются с нуля).
+    Возвращает {таблица: кол-во удалённых строк}."""
+    tables = [
+        "users", "restaurants", "demo_invoice_usage", "demo_trial",
+        "user_acquisition", "invoice_quota",
+    ]
+    conn = get_db()
+    result = {}
+    for t in tables:
+        cur = conn.execute(f"DELETE FROM {t} WHERE telegram_id = ?", (telegram_id,))
+        result[t] = cur.rowcount
+    conn.commit()
+    conn.close()
+    return result
+
 def get_ai_cache(query_hash: str, org_id: str, date_str: str) -> Optional[str]:
     conn = get_db()
     row = conn.execute(
