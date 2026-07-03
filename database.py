@@ -413,7 +413,7 @@ def quota_stats() -> dict:
 
 
 def start_demo_trial(telegram_id: int, org_id: str, started_ts: int) -> None:
-    """Фиксирует старт 24ч-триала. INSERT OR IGNORE — первое подключение побеждает,
+    """Фиксирует старт триала. INSERT OR IGNORE — первое подключение побеждает,
     повторное НЕ перезапускает (нет вечного бесплатного доступа)."""
     conn = get_db()
     conn.execute(
@@ -581,11 +581,21 @@ def wipe_demo_user(telegram_id: int) -> dict:
         cur = conn.execute(f"DELETE FROM {t} WHERE telegram_id = ?", (telegram_id,))
         result[t] = cur.rowcount
     if org_ids:
+        # Тот же iiko-сервер может быть подключён у другого telegram-аккаунта
+        # (владелец + управляющий) — его ручные расходы трогать нельзя. Чистим
+        # только орги, на которые после удаления restaurants никто не ссылается.
         placeholders = ",".join("?" * len(org_ids))
-        cur = conn.execute(
-            f"DELETE FROM expenses_manual WHERE organization_id IN ({placeholders})", org_ids
-        )
-        result["expenses_manual"] = cur.rowcount
+        still_used = {r["organization_id"] for r in conn.execute(
+            f"SELECT DISTINCT organization_id FROM restaurants "
+            f"WHERE organization_id IN ({placeholders})", org_ids
+        ).fetchall()}
+        orphan = [o for o in org_ids if o not in still_used]
+        if orphan:
+            ph = ",".join("?" * len(orphan))
+            cur = conn.execute(
+                f"DELETE FROM expenses_manual WHERE organization_id IN ({ph})", orphan
+            )
+            result["expenses_manual"] = cur.rowcount
     conn.commit()
     conn.close()
     return result
