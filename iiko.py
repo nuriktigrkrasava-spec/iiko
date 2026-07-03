@@ -834,10 +834,15 @@ class IikoWebClient:
     def _tx_date_filter(self, date_from: str, date_to: str) -> Dict[str, Any]:
         d_from = date_from[:10]
         d_to = date_to[:10]
+        include_high = "true"
         if d_from == d_to:
+            # Единственный день: сдвигаем to на +1 и делаем НЕвключительным (как _date_filter).
             dt = datetime.strptime(d_to, "%Y-%m-%d") + timedelta(days=1)
             d_to = dt.strftime("%Y-%m-%d")
-        return {"filterType": "DateRange", "periodType": "CUSTOM", "from": d_from, "to": d_to}
+            include_high = "false"
+        return {"filterType": "DateRange", "periodType": "CUSTOM",
+                "from": d_from, "to": d_to,
+                "includeLow": "true", "includeHigh": include_high}
 
     async def get_writeoffs(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Списания через OLAP TRANSACTIONS — возвращает {"writeoffs": [{"items": [...]}]}"""
