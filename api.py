@@ -1223,9 +1223,9 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
     try:
         results = await asyncio.gather(*(fetch_one(o) for o in orgs))
         all_rows = [row for batch in results for row in batch]
-        olap_total = sum(r.get("DishAmountSum", 0) for r in all_rows)
-        guests = sum(r.get("GuestNum", 0) for r in all_rows)
-        orders = sum(r.get("OrdersCount", 0) for r in all_rows)
+        olap_total = sum(float(r.get("DishAmountSum") or 0) for r in all_rows)
+        guests = sum(float(r.get("GuestNum") or 0) for r in all_rows)
+        orders = sum(float(r.get("OrdersCount") or 0) for r in all_rows)
 
         rev_results = await asyncio.gather(*(fetch_revenue(o) for o in orgs))
         revs = [r for r in rev_results if r is not None]
@@ -4095,8 +4095,9 @@ def _bot_iiko_client(rest: Dict[str, Any]):
 
 
 def _compute_dedup_hash(supplier: str, date_str: str, total: float,
-                        items: List[Dict[str, Any]]) -> str:
-    """Стабильный хеш накладной для защиты от дублей."""
+                        items: List[Dict[str, Any]], org_id: str = "") -> str:
+    """Стабильный хеш накладной для защиты от дублей. Включает филиал (org_id):
+    одинаковая закупка в разные филиалы — не дубль."""
     sig_items = sorted([
         (str(it.get("name", "")).strip().lower(),
          round(float(it.get("quantity") or 0), 3),
@@ -4104,6 +4105,7 @@ def _compute_dedup_hash(supplier: str, date_str: str, total: float,
         for it in (items or [])
     ])
     payload = json.dumps({
+        "o": (org_id or "").strip(),
         "s": (supplier or "").strip().lower(),
         "d": (date_str or "").strip(),
         "t": round(float(total or 0), 2),
@@ -4462,7 +4464,7 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     date_str = result.get("date") or local_now().strftime("%Y-%m-%d")
 
     # ---- Dedup ----
-    dedup_hash = _compute_dedup_hash(supplier_name, date_str, total, items)
+    dedup_hash = _compute_dedup_hash(supplier_name, date_str, total, items, org_id)
     pending["dedup_hash"] = dedup_hash
     if not force:
         existing = find_invoice_by_dedup(dedup_hash, pending["telegram_id"], days=30)
@@ -4591,6 +4593,43 @@ async def _after_recognition(chat_id: int, telegram_id: int) -> None:
         consume_quota(telegram_id)
 
 
+# Буфер альбомов Telegram: несколько фото с одним media_group_id — это ОДНА
+# многостраничная накладная. Иначе каждое фото распозналось бы отдельно =
+# N превью и N× списание лимита. Собираем все фото группы и распознаём один раз.
+_album_buffers: Dict[str, Dict[str, Any]] = {}
+_ALBUM_DEBOUNCE_SEC = 2.0
+
+
+async def _buffer_album_photo(chat_id: int, telegram_id: int, username: str,
+                              media_group_id: str, image: Dict[str, Any]) -> None:
+    """Копит фото альбома и через дебаунс распознаёт всю группу разом."""
+    key = f"{chat_id}:{media_group_id}"
+    buf = _album_buffers.get(key)
+    if not buf:
+        buf = {"chat_id": chat_id, "telegram_id": telegram_id, "username": username,
+               "images": [], "task": None}
+        _album_buffers[key] = buf
+    buf["images"].append(image)
+    if buf.get("task"):
+        buf["task"].cancel()
+    buf["task"] = asyncio.create_task(_flush_album_after_delay(key))
+
+
+async def _flush_album_after_delay(key: str) -> None:
+    try:
+        await asyncio.sleep(_ALBUM_DEBOUNCE_SEC)
+    except asyncio.CancelledError:
+        return  # пришло ещё фото группы — таймер перезапущен
+    buf = _album_buffers.pop(key, None)
+    if not buf or not buf["images"]:
+        return
+    try:
+        await _recognize_images_and_create_pending(
+            buf["chat_id"], buf["telegram_id"], buf["username"], buf["images"])
+    except Exception as e:
+        logger.warning(f"[album] flush {key}: {e}")
+
+
 async def _recognize_invoice_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     file_id: str, image_bytes: bytes, mime: str
@@ -4603,13 +4642,26 @@ async def _recognize_invoice_and_create_pending(
         await _tg_send(chat_id,
             f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
         return
+    await _recognize_images_and_create_pending(
+        chat_id, telegram_id, username,
+        [{"file_id": file_id, "bytes": image_bytes, "mime": mime}])
 
+
+async def _recognize_images_and_create_pending(
+    chat_id: int, telegram_id: int, username: str,
+    images: List[Dict[str, Any]]
+) -> None:
+    """Распознаёт набор фото (1 или несколько страниц) как ОДНУ накладную:
+    один гейт лимита, один запрос к модели, одно списание."""
+    if not images:
+        return
     # Гейт: демо-лимит ИЛИ месячный лимит накладных основного бота.
     if await _invoice_gate(chat_id, telegram_id, username):
         return
 
-    status_msg_id = await _tg_send(chat_id, "🔍 Распознаю накладную...")
-    result = await analyze_invoice_photos([(image_bytes, mime)])
+    suffix = f" ({len(images)} фото)" if len(images) > 1 else ""
+    status_msg_id = await _tg_send(chat_id, f"🔍 Распознаю накладную{suffix}...")
+    result = await analyze_invoice_photos([(im["bytes"], im["mime"]) for im in images])
     if "error" in result:
         msg = f"❌ Не удалось распознать: {result['error']}\n\nПопробуй сфотографировать чётче."
         if status_msg_id:
@@ -4626,7 +4678,7 @@ async def _recognize_invoice_and_create_pending(
         "chat_id": chat_id,
         "message_id": status_msg_id,
         "state": "preview",
-        "images": [{"file_id": file_id, "bytes": image_bytes, "mime": mime}],
+        "images": images,
         "result": result,
         "supplier_id": None,
         "organization_id": None,
@@ -4980,7 +5032,12 @@ async def telegram_webhook(request: Request):
                 await _tg_send(chat_id, "❌ Не удалось скачать файл.")
                 return {"ok": True}
             image_bytes, mime = file_data
-            await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
+            mgid = message.get("media_group_id")
+            if mgid:
+                await _buffer_album_photo(chat_id, telegram_id, username, mgid,
+                                          {"file_id": file_id, "bytes": image_bytes, "mime": mime})
+            else:
+                await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
             return {"ok": True}
 
         # === DOCUMENT (не-image — PDF и пр.) ===
@@ -5000,7 +5057,12 @@ async def telegram_webhook(request: Request):
             image_bytes, mime = file_data
             if not mime:
                 mime = "image/jpeg"
-            await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
+            mgid = message.get("media_group_id")
+            if mgid:
+                await _buffer_album_photo(chat_id, telegram_id, username, mgid,
+                                          {"file_id": file_id, "bytes": image_bytes, "mime": mime})
+            else:
+                await _recognize_invoice_and_create_pending(chat_id, telegram_id, username, file_id, image_bytes, mime)
             return {"ok": True}
 
         # === TEXT ===

@@ -1491,12 +1491,19 @@ class IikoWebClient:
 
         async def _post(xml_body: bytes) -> Dict[str, Any]:
             import logging
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-                resp = await client.post(
-                    f"{self.base_url}/api/documents/import/incomingInvoice",
-                    params={"key": token},
-                    headers={"Content-Type": "application/xml"},
-                    content=xml_body)
+            # На 401 (протухшая сессия iikoServer) — сбрасываем токен и повторяем 1 раз.
+            for attempt in range(2):
+                tok = await self._ensure_token()
+                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/api/documents/import/incomingInvoice",
+                        params={"key": tok},
+                        headers={"Content-Type": "application/xml"},
+                        content=xml_body)
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                break
             if resp.status_code != 200:
                 pids = [str(it.get("productId") or "") for it in (items or [])]
                 empty = sum(1 for p in pids if not p)
@@ -1580,28 +1587,40 @@ class IikoWebClient:
           2) PUT  /api/documents/{id}/status?status=...
         """
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-            # Попытка 1: POST setStatus
-            try:
-                resp = await client.post(
-                    f"{self.base_url}/api/documents/{document_id}/setStatus",
-                    params={"key": token, "status": status}
-                )
-                if resp.status_code == 200:
-                    return {"ok": True, "raw": resp.text[:300]}
-            except Exception:
-                pass
-            # Попытка 2: PUT /status
-            try:
-                resp = await client.put(
-                    f"{self.base_url}/api/documents/{document_id}/status",
-                    params={"key": token, "status": status}
-                )
-                if resp.status_code == 200:
-                    return {"ok": True, "raw": resp.text[:300]}
-            except Exception:
-                pass
-            return {"ok": False,
-                    "error": "iikoServer не принял setStatus ни на одном из путей "
-                             "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
-                             "другой эндпоинт — пришли точный URL из iiko-докуменации."}
+        # На 401 (протухшая сессия) — сбрасываем токен и повторяем оба пути 1 раз.
+        for attempt in range(2):
+            got_401 = False
+            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                # Попытка 1: POST setStatus
+                try:
+                    resp = await client.post(
+                        f"{self.base_url}/api/documents/{document_id}/setStatus",
+                        params={"key": token, "status": status}
+                    )
+                    if resp.status_code == 200:
+                        return {"ok": True, "raw": resp.text[:300]}
+                    if resp.status_code == 401:
+                        got_401 = True
+                except Exception:
+                    pass
+                # Попытка 2: PUT /status
+                try:
+                    resp = await client.put(
+                        f"{self.base_url}/api/documents/{document_id}/status",
+                        params={"key": token, "status": status}
+                    )
+                    if resp.status_code == 200:
+                        return {"ok": True, "raw": resp.text[:300]}
+                    if resp.status_code == 401:
+                        got_401 = True
+                except Exception:
+                    pass
+            if got_401 and attempt == 0:
+                await self._invalidate_token()
+                token = await self._ensure_token()
+                continue
+            break
+        return {"ok": False,
+                "error": "iikoServer не принял setStatus ни на одном из путей "
+                         "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
+                         "другой эндпоинт — пришли точный URL из iiko-докуменации."}
