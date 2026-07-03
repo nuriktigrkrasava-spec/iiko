@@ -124,7 +124,7 @@ def test_filter_never_emits_empty_productid():
         {"name": "Apple", "quantity": 2, "price_per_unit": 50, "total": 100},
         {"name": "Mystery", "quantity": 1, "price_per_unit": 10, "total": 10},  # не найдётся
     ]
-    sendable, unmatched = asyncio.run(api._auto_match_items(FakeClient(), "ORG-1", items))
+    sendable, unmatched, _warnings = asyncio.run(api._auto_match_items(FakeClient(), "ORG-1", items))
     assert unmatched == ["Mystery"], unmatched
     assert all(s.get("productId") for s in sendable), sendable
     assert len(sendable) == 1, sendable

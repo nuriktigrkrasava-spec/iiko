@@ -1,4 +1,4 @@
-"""Тесты 24ч-триала демо-бота.
+"""Тесты триала демо-бота (длительность DEMO_TRIAL_HOURS, сейчас 7 дней).
 Запуск: python3 test_demo_trial.py
 """
 import os, tempfile, asyncio, time
@@ -43,7 +43,8 @@ def test_use_demo_data_active_trial():
 
 def test_use_demo_data_ended_trial():
     tid = 444
-    database.start_demo_trial(tid, "org-real", int(time.time()) - 26 * 3600)  # сутки прошли
+    database.start_demo_trial(tid, "org-real",
+                              int(time.time()) - (api.DEMO_TRIAL_HOURS + 2) * 3600)  # триал истёк
     assert api._use_demo_data({"id": tid}, "org-real") is True  # ended → демо
     st = api._demo_trial_state(tid)
     assert st["state"] == "ended", st
@@ -84,6 +85,35 @@ def test_demo_trial_endpoint_active():
     print("  [OK] /api/demo/trial → active с org_id")
 
 
+def test_block_recognition_after_trial_ended():
+    """Подключённый юзер с истёкшим триалом НЕ распознаёт бесплатно (гейт),
+    с активным — распознаёт свободно. БОТ_TOKEN в тестах пуст — _tg_send no-op."""
+    tid_ended, tid_active = 2001, 2002
+    for tid in (tid_ended, tid_active):
+        database.add_restaurant(tid, "real_login", f"org-{tid}", "Ресторан", "https://x.iiko.it")
+    database.start_demo_trial(tid_ended, f"org-{tid_ended}",
+                              int(time.time()) - (api.DEMO_TRIAL_HOURS + 2) * 3600)
+    database.start_demo_trial(tid_active, f"org-{tid_active}", int(time.time()))
+    assert asyncio.run(api._demo_block_if_used(tid_ended, tid_ended)) is True
+    assert asyncio.run(api._demo_block_if_used(tid_active, tid_active)) is False
+    print("  [OK] истёкший триал блокирует распознавание, активный — нет")
+
+
+def test_wipe_keeps_other_users_expenses():
+    """/resetuser не должен стирать ручные расходы другого юзера на той же орге."""
+    org = "org-shared"
+    database.add_restaurant(3001, "real_login", org, "Ресторан", "https://x.iiko.it")
+    database.add_restaurant(3002, "real_login", org, "Ресторан", "https://x.iiko.it")
+    database.add_manual_expense(org, "Аренда", "прочее", 100000, "касса", "2026-07-01")
+    database.wipe_demo_user(3001)
+    left = database.get_manual_expenses(org, "2026-01-01", "2026-12-31")
+    assert len(left) == 1, left  # орга ещё у 3002 — расходы целы
+    database.wipe_demo_user(3002)
+    left2 = database.get_manual_expenses(org, "2026-01-01", "2026-12-31")
+    assert left2 == [], left2  # последний владелец орги — теперь чистим
+    print("  [OK] wipe щадит чужие расходы, чистит осиротевшие")
+
+
 def test_trials_due_for_sales():
     database.start_demo_trial(1001, "o", 1000)            # давно — должен попасть
     database.start_demo_trial(1002, "o", int(time.time()))  # только что — не должен
@@ -99,7 +129,8 @@ if __name__ == "__main__":
     tests = [test_trial_insert_and_get, test_trial_not_reset_on_second_connect, test_get_trial_none,
              test_use_demo_data_active_trial, test_use_demo_data_ended_trial, test_use_demo_data_no_trial,
              test_get_org_id_trial_returns_real, test_get_org_id_no_trial_is_demo,
-             test_demo_trial_endpoint_active, test_trials_due_for_sales]
+             test_demo_trial_endpoint_active, test_block_recognition_after_trial_ended,
+             test_wipe_keeps_other_users_expenses, test_trials_due_for_sales]
     failed = 0
     for t in tests:
         print(f"\n>>> {t.__name__}")

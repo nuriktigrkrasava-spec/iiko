@@ -535,13 +535,21 @@ def _wiregroup_kb() -> dict:
 
 
 def _build_stats_text() -> str:
-    a = acquisition_stats()
+    """Дайджест владельцу. Демо-бот и основной — разные Render-сервисы с разными
+    SQLite: юзеры (user_acquisition) есть только у демо, квоты (invoice_quota) —
+    только у основного. Поэтому каждый деплой шлёт СВОЮ половину, иначе чужая
+    секция всегда была бы нулями."""
+    if DEMO_ONLY:
+        a = acquisition_stats()
+        # escape — на случай старых source, записанных до санитизации
+        src = " · ".join(f"{html.escape(s)} {c}" for s, c in a["by_source"]) or "—"
+        return (
+            f"👥 Юзеры демо-бота\n"
+            f"Всего: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
+            f"Источники: {src}"
+        )
     q = quota_stats()
-    src = " · ".join(f"{s} {c}" for s, c in a["by_source"]) or "—"
     return (
-        f"👥 Юзеры демо-бота\n"
-        f"Всего: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
-        f"Источники: {src}\n\n"
         f"📦 Накладные (платные аккаунты)\n"
         f"Активных аккаунтов: {q['accounts']}\n"
         f"Распознано в этом месяце: {q['used']}\n"
@@ -558,7 +566,8 @@ def _build_today_text() -> str:
     for r in rows:
         t = datetime.fromtimestamp(r["ts"]).strftime("%H:%M")
         uname = f"@{r['username']}" if r["username"] else "(без username)"
-        lines.append(f"{t} · id {r['telegram_id']} · {uname} · {r['source']}")
+        # escape — на случай старых строк, записанных до санитизации source
+        lines.append(f"{t} · id {r['telegram_id']} · {uname} · {html.escape(r['source'])}")
     return "\n".join(lines)
 
 
@@ -900,9 +909,10 @@ async def startup():
     asyncio.create_task(_weekly_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
+    # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
+    # основной — квоты накладных (см. _build_stats_text, БД у сервисов разные).
+    asyncio.create_task(_daily_stats_scheduler())
     if DEMO_ONLY:
-        # Ежедневная сводка юзеров/квоты — только на демо-деплое, чтобы не слать дважды
-        asyncio.create_task(_daily_stats_scheduler())
         asyncio.create_task(_demo_sales_scheduler())
 
 
@@ -1020,7 +1030,7 @@ def _is_demo_user(user: Dict) -> bool:
 
 
 def _demo_trial_state(telegram_id: int) -> Dict[str, Any]:
-    """Состояние 24ч-триала: none | active | ended (+ org_id, остаток секунд)."""
+    """Состояние триала (DEMO_TRIAL_HOURS): none | active | ended (+ org_id, остаток секунд)."""
     row = get_demo_trial(telegram_id)
     if not row:
         return {"state": "none"}
@@ -3425,8 +3435,7 @@ def _invoice_kb(pending_id: str) -> dict:
     """Динамическая клавиатура превью — WebApp-кнопка редактирования с pending_id в URL."""
     return {
         "inline_keyboard": [
-            [{"text": "📤 Отправить в iiko", "callback_data": "act:send"},
-             {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
+            [{"text": "📤 Отправить в iiko", "callback_data": "act:send"}],
             [{"text": "✏️ Редактировать",   "web_app": {"url": f"{MINIAPP_URL}/?edit={pending_id}"}},
              {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
         ]
@@ -3436,17 +3445,9 @@ def _invoice_kb(pending_id: str) -> dict:
 # Backward-compat alias для мест где не нужна WebApp-кнопка
 INVOICE_KB_FALLBACK = {
     "inline_keyboard": [
-        [{"text": "📤 Отправить в iiko", "callback_data": "act:send"},
-         {"text": "➕ Добавить фото",     "callback_data": "act:add"}],
+        [{"text": "📤 Отправить в iiko", "callback_data": "act:send"}],
         [{"text": "✏️ Редактировать",   "callback_data": "act:edit"},
          {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
-    ]
-}
-
-ADD_PHOTOS_KB = {
-    "inline_keyboard": [
-        [{"text": "✅ Готово",  "callback_data": "add:done"}],
-        [{"text": "❌ Отмена", "callback_data": "act:cancel"}],
     ]
 }
 
@@ -3675,6 +3676,29 @@ async def _tg_send(chat_id: int, text: str, reply_markup: dict = None) -> Option
         return None
 
 
+async def _tg_send_status(chat_id: int, text: str, reply_markup: dict = None) -> str:
+    """Как _tg_send, но с различимым исходом: 'ok' — доставлено; 'blocked' —
+    постоянная недоставка (юзер заблокировал бота / чат не найден, 400/403 —
+    ретраить бессмысленно); 'error' — временная (сеть/5xx), имеет смысл ретраить.
+    Нужен там, где от факта доставки зависит состояние (см. _demo_sales_scheduler):
+    _tg_send глотает все ошибки и не даёт их различить."""
+    if not BOT_TOKEN:
+        return "error"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload)
+        if r.json().get("ok"):
+            return "ok"
+        logger.warning(f"[tg_send_status] {chat_id}: HTTP {r.status_code} {r.text[:200]}")
+        return "blocked" if r.status_code in (400, 403) else "error"
+    except Exception as e:
+        logger.warning(f"[tg_send_status] {chat_id}: {e}")
+        return "error"
+
+
 # ============ ВОСКРЕСНЫЙ ОТЧЁТ ГЕН.ДИРЕКТОРУ ============
 # Каждое воскресенье — одному получателю (@username), по каждому филиалу отдельно:
 # оборот неделя-к-неделе (рост/падение) и средний чек.
@@ -3774,7 +3798,15 @@ async def _demo_sales_scheduler():
             now = int(datetime.now(timezone.utc).timestamp())
             for tid in get_trials_due_for_sales(now, DEMO_TRIAL_HOURS * 3600):
                 try:
-                    await _tg_send(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
+                    # Единственный продающий пуш — терять нельзя. Временная ошибка
+                    # (сеть/5xx) → НЕ помечаем, ретрай следующим тиком. Заблокировал
+                    # бота (400/403) → помечаем, иначе бесконечный ретрай каждые 5 мин.
+                    status = await _tg_send_status(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
+                    if status == "error":
+                        logger.warning(f"[demo_sales] offer {tid}: временная ошибка, ретрай через 5 мин")
+                        continue
+                    if status == "blocked":
+                        logger.warning(f"[demo_sales] offer {tid}: юзер заблокировал бота, помечаю отправленным")
                     mark_trial_sales_sent(tid)
                     # Уведомляем владельца: у кого закончился пробный период.
                     try:
@@ -3917,7 +3949,7 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
     vat = float(result.get("vat_amount") or 0)
     n_photos = len(p.get("images") or [])
 
-    icon = {"preview": "📋", "adding": "📸", "recognizing": "🔍",
+    icon = {"preview": "📋", "recognizing": "🔍",
             "sent": "✅", "cancelled": "❌"}.get(status, "📋")
 
     lines = [f"{icon} <b>Накладная распознана</b>"]
@@ -3954,16 +3986,12 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
                 "📤 <b>Отправить в iiko</b> — здесь нужно подключить ваш iiko (быстрая регистрация "
                 "в чате: сервер → логин → пароль). После этого накладная реально уйдёт к вам в учётку, "
                 "и откроется доступ к вашей аналитике на 7 дней.\n"
-                "➕ <b>Добавить фото</b> — накладная на нескольких листах? Дошлите ещё фото — "
-                "бот объединит их в одну.\n"
                 "✏️ <b>Редактировать</b> — открыть в приложении: поправить позиции, количество и "
                 "суммы, сопоставить с вашей номенклатурой.\n"
                 "❌ <b>Отменить</b> — сбросить эту накладную."
             )
         else:
             lines.append("<i>Выбери действие ниже:</i>")
-    elif status == "adding":
-        lines.append("\n<i>Пришли ещё фото или файлом, потом нажми «✅ Готово»</i>")
     elif status == "sent":
         lines.append("\n<b>✅ Отправлено в iiko</b>")
     elif status == "cancelled":
@@ -4538,11 +4566,19 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
 
 
 async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
-    """Демо-бот: НЕподключённому юзеру после 1-го распознавания — мягкий нудж
-    подключить iiko (НЕ оффер). Подключённые (активный триал) распознают свободно
-    — их не блокируем, иначе клиент на триале не может пользоваться ядром продукта."""
-    if (DEMO_ONLY and not _has_real_iiko(telegram_id)
-            and get_demo_invoice_count(telegram_id) >= DEMO_FREE_RECOGNITIONS):
+    """Демо-бот: гейт распознавания.
+    - Подключённый юзер с АКТИВНЫМ триалом распознаёт свободно (ядро продукта).
+    - Подключённый с ИСТЁКШИМ триалом — блок + оффер: иначе платная фича
+      (распознавание + приход в iiko) остаётся бесплатной навсегда.
+    - НЕподключённый после DEMO_FREE_RECOGNITIONS — мягкий нудж подключить iiko."""
+    if not DEMO_ONLY:
+        return False
+    if _has_real_iiko(telegram_id):
+        if _demo_trial_state(telegram_id).get("state") == "ended":
+            await _tg_send(chat_id, DEMO_OFFER_TEXT, _demo_upsell_kb())
+            return True
+        return False
+    if get_demo_invoice_count(telegram_id) >= DEMO_FREE_RECOGNITIONS:
         await _tg_send(chat_id,
             f"Вы распознали {DEMO_FREE_RECOGNITIONS} накладных — лимит демо исчерпан 👍\n\n"
             "Чтобы грузить накладные к себе и открыть доступ к вашей аналитике на 7 дней — "
@@ -4553,7 +4589,7 @@ async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
 
 async def _demo_after_recognition(chat_id: int, telegram_id: int) -> None:
     """Демо-бот: фиксируем лимит распознавания. Оффер здесь НЕ шлём —
-    он уходит после 24ч-триала (см. _demo_sales_scheduler)."""
+    он уходит после окончания триала (см. _demo_sales_scheduler)."""
     if DEMO_ONLY:
         inc_demo_invoice_count(telegram_id)
 
@@ -4634,14 +4670,8 @@ async def _recognize_invoice_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     file_id: str, image_bytes: bytes, mime: str
 ) -> None:
-    """Распознаёт одно фото и создаёт pending invoice. Универсально для photo и document."""
-    pending = _pending_invoices.get(chat_id)
-    if pending and pending.get("state") == "adding_photos":
-        pending["images"].append({"file_id": file_id, "bytes": image_bytes, "mime": mime})
-        n = len(pending["images"])
-        await _tg_send(chat_id,
-            f"📸 Фото {n} добавлено. Нажми «✅ Готово» в верхнем сообщении когда все скинешь.")
-        return
+    """Распознаёт одно фото и создаёт pending invoice. Универсально для photo и document.
+    Многостраничные накладные — альбомом (media_group), см. _buffer_album_photo."""
     await _recognize_images_and_create_pending(
         chat_id, telegram_id, username,
         [{"file_id": file_id, "bytes": image_bytes, "mime": mime}])
@@ -4766,11 +4796,23 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
         start_demo_trial(telegram_id, orgs[0]["id"],
                          int(datetime.now(timezone.utc).timestamp()))
         await _tg_edit(chat_id, status, f"✅ iiko подключён ({orgs[0].get('name') or 'организация'}).")
-        await _tg_send(chat_id,
-            "🎁 На <b>7 дней</b> открыл вам полный доступ к <b>вашей</b> аналитике в Mini App — "
-            "реальная выручка, фудкост, смены, всё по-настоящему. Откройте и посмотрите свои цифры 👇\n\n"
-            "Через неделю доступ закроется.",
-            {"inline_keyboard": [[{"text": "📊 Открыть мою аналитику", "web_app": {"url": f"{MINIAPP_URL}/"}}]]})
+        # start_demo_trial — INSERT OR IGNORE: повторное подключение НЕ перезапускает
+        # триал (иначе вечный бесплатный доступ). Поэтому обещать «7 дней» можно
+        # только если триал реально активен — истёкшему честно шлём оффер.
+        if _demo_trial_state(telegram_id).get("state") == "ended":
+            await _tg_send(chat_id,
+                "Ваш пробный период уже был использован, поэтому повторно доступ "
+                "к аналитике не открылся.\n\n"
+                "💰 Подключение навсегда — разработка и настройка под ваше заведение "
+                "<b>300 000 ₸</b>, дальше обслуживание <b>30 000 ₸/мес</b>.\n\n"
+                "👉 Напишите — подключу за день.",
+                _demo_upsell_kb())
+        else:
+            await _tg_send(chat_id,
+                "🎁 На <b>7 дней</b> открыл вам полный доступ к <b>вашей</b> аналитике в Mini App — "
+                "реальная выручка, фудкост, смены, всё по-настоящему. Откройте и посмотрите свои цифры 👇\n\n"
+                "Через неделю доступ закроется.",
+                {"inline_keyboard": [[{"text": "📊 Открыть мою аналитику", "web_app": {"url": f"{MINIAPP_URL}/"}}]]})
 
         pending = _get_pending_by_id(pending_id) if pending_id else _get_pending_by_chat(chat_id)
         if not pending:
@@ -4877,36 +4919,12 @@ async def telegram_webhook(request: Request):
                                "⚠️ Данные устарели. Пришли накладную (фото, файлом или текстом) заново.")
                 return {"ok": True}
 
-            if action == "act:add":
-                pending["state"] = "adding_photos"
-                await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "adding"), ADD_PHOTOS_KB)
-                return {"ok": True}
-
             if action == "act:compare":
                 items = (pending.get("result") or {}).get("items") or []
                 rows = _compare_prices(pending["telegram_id"], items)
                 text = _format_price_comparison(rows)
                 # Шлём НОВЫМ сообщением — превью с кнопками остаётся доступным
                 await _tg_send(chat_id, text)
-                return {"ok": True}
-
-            if action == "add:done":
-                images = pending.get("images") or []
-                if not images:
-                    _drop_pending(chat_id)
-                    await _tg_edit(chat_id, msg_id, "⚠️ Ни одного фото нет. Отменено.")
-                    return {"ok": True}
-                await _tg_edit(chat_id, msg_id, f"🔍 Распознаю {_photo_count_text(len(images))}...")
-                payload = [(img["bytes"], img["mime"]) for img in images]
-                result = await analyze_invoice_photos(payload)
-                if "error" in result:
-                    await _tg_edit(chat_id, msg_id, f"❌ Не удалось распознать: {result['error']}")
-                    _drop_pending(chat_id)
-                    return {"ok": True}
-                pending["result"] = result
-                pending["state"] = "preview"
-                _persist_pending(pending)
-                await _tg_edit(chat_id, msg_id, _format_invoice_v2(pending, "preview"), _invoice_kb(pending["pending_id"]))
                 return {"ok": True}
 
             if action == "act:send":
@@ -5069,7 +5087,11 @@ async def telegram_webhook(request: Request):
         text = message.get("text") or ""
         if text == "/start" or text.startswith("/start "):
             parts = text.split(maxsplit=1)
-            source = parts[1].strip() if len(parts) > 1 else "direct"
+            # Вручную набранный «/start <текст>» может содержать HTML — неэкранированный
+            # источник, попав в user_acquisition, ломал бы parse_mode=HTML во всех
+            # пушах владельцу (/stats, /today, дайджест). Deep-link и так [A-Za-z0-9_-].
+            raw_source = parts[1].strip() if len(parts) > 1 else ""
+            source = re.sub(r"[^0-9A-Za-z_\-]", "", raw_source)[:64] or "direct"
             if DEMO_ONLY:
                 try:
                     is_new = record_acquisition(telegram_id, username, source)
@@ -5122,7 +5144,14 @@ async def telegram_webhook(request: Request):
             parts = text.split()
             if len(parts) == 2 and parts[1].isdigit():
                 tid = int(parts[1])
+                # Чистим и in-memory состояние (в личке chat_id == telegram_id),
+                # иначе досбросовый pending «приклеит» новое фото к старой накладной.
                 _demo_reg.pop(tid, None)  # на случай зависшей регистрации
+                _drop_pending(tid)
+                for k in [k for k in _album_buffers if k.startswith(f"{tid}:")]:
+                    buf = _album_buffers.pop(k, None)
+                    if buf and buf.get("task"):
+                        buf["task"].cancel()
                 res = wipe_demo_user(tid)
                 total = sum(res.values())
                 detail = ", ".join(f"{t}:{n}" for t, n in res.items() if n)
