@@ -31,6 +31,7 @@ from database import (
     start_demo_trial, get_demo_trial,
     get_trials_due_for_sales, mark_trial_sales_sent,
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
+    wipe_demo_user,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
@@ -5034,6 +5035,20 @@ async def telegram_webhook(request: Request):
                                f"✅ Аккаунту {tid} начислено {n}. Баланс докупленного: {new_extra}.")
             else:
                 await _tg_send(chat_id, "Формат: /addquota <telegram_id> <кол-во>")
+            return {"ok": True}
+        if text.startswith("/resetuser") and chat_id == OWNER_CHAT_ID:
+            parts = text.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                tid = int(parts[1])
+                _demo_reg.pop(tid, None)  # на случай зависшей регистрации
+                res = wipe_demo_user(tid)
+                total = sum(res.values())
+                detail = ", ".join(f"{t}:{n}" for t, n in res.items() if n)
+                await _tg_send(chat_id,
+                    f"🧹 Юзер {tid} удалён (строк: {total}). {detail or 'ничего не было'}.\n"
+                    f"Теперь он может начать заново: /start → «🔌 Подключить iiko».")
+            else:
+                await _tg_send(chat_id, "Формат: /resetuser <telegram_id>")
             return {"ok": True}
         if text.startswith("/"):
             return {"ok": True}
