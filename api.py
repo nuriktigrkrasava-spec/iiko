@@ -3775,6 +3775,14 @@ async def _demo_sales_scheduler():
                 try:
                     await _tg_send(tid, DEMO_OFFER_TEXT, _demo_upsell_kb())
                     mark_trial_sales_sent(tid)
+                    # Уведомляем владельца: у кого закончился пробный период.
+                    try:
+                        u = get_user(tid) or {}
+                        uname = f"@{u['username']}" if u.get("username") else "(без username)"
+                        await _tg_send(OWNER_CHAT_ID,
+                                       f"⌛ Пробный период закончился\n{uname}\nid: {tid}")
+                    except Exception as e:
+                        logger.warning(f"[demo_sales] owner notify {tid}: {e}")
                 except Exception as e:
                     logger.warning(f"[demo_sales] {tid}: {e}")
         except Exception as e:
