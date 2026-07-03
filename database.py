@@ -562,18 +562,30 @@ def delete_all_restaurants(telegram_id: int) -> int:
 
 
 def wipe_demo_user(telegram_id: int) -> dict:
-    """Полностью удалить юзера из всех таблиц по telegram_id — для чистого
-    перетеста демо (триал/подключение/лимит начинаются с нуля).
+    """Полностью удалить юзера из всех таблиц — для чистого перетеста демо
+    (триал/подключение/лимит/накладные начинаются с нуля). Важно чистить и
+    bot_invoices, иначе повторно загруженная тестовая накладная посчитается
+    дублем (find_invoice_by_dedup, окно 30 дней).
     Возвращает {таблица: кол-во удалённых строк}."""
-    tables = [
-        "users", "restaurants", "demo_invoice_usage", "demo_trial",
-        "user_acquisition", "invoice_quota",
-    ]
     conn = get_db()
     result = {}
-    for t in tables:
+    # Орг-иды юзера собираем ДО удаления restaurants — по ним чистим expenses_manual.
+    org_ids = [r["organization_id"] for r in conn.execute(
+        "SELECT organization_id FROM restaurants WHERE telegram_id = ?", (telegram_id,)
+    ).fetchall()]
+    tg_tables = [
+        "users", "restaurants", "demo_invoice_usage", "demo_trial",
+        "user_acquisition", "invoice_quota", "bot_invoices", "pending_invoices",
+    ]
+    for t in tg_tables:
         cur = conn.execute(f"DELETE FROM {t} WHERE telegram_id = ?", (telegram_id,))
         result[t] = cur.rowcount
+    if org_ids:
+        placeholders = ",".join("?" * len(org_ids))
+        cur = conn.execute(
+            f"DELETE FROM expenses_manual WHERE organization_id IN ({placeholders})", org_ids
+        )
+        result["expenses_manual"] = cur.rowcount
     conn.commit()
     conn.close()
     return result

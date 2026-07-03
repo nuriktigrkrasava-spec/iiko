@@ -1087,7 +1087,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
           в iikoOffice по указанным в файле счетам. Категории уже сгруппированы.
         </div>
       </div>
-      <div class="subtabs">
+      <div class="subtabs" id="exp-filter-tabs">
         <div class="subtab active" id="exp-sub-all" onclick="filterExpenses('all', this)">Все</div>
         <div class="subtab" id="exp-sub-orders" onclick="filterExpenses('orders', this)">Расх. ордера</div>
         <div class="subtab" id="exp-sub-manual" onclick="filterExpenses('manual', this)">Ручные</div>
@@ -3520,6 +3520,7 @@ async function loadExpenses() {
           </div>
         </div>
       `).join('');
+      applyExpenseFilter();  // сохранить активный фильтр (Ручные/Расх.ордера) после перерисовки
     } catch(e) { console.error(e); }
   }
 
@@ -4618,18 +4619,23 @@ async function deleteExpense(id, type) {
 let expenseFilter = 'all';
 let writeoffFilter = 'all';
 
-function filterExpenses(filter, el) {
-  haptic();
-  expenseFilter = filter;
-  document.querySelectorAll('#tab-expenses .subtab').forEach(t => t.classList.remove('active'));
-  if (el) el.classList.add('active');
+function applyExpenseFilter() {
   const ops = document.querySelectorAll('#exp-operations-list .op-item');
   ops.forEach(op => {
     const type = op.dataset.type || 'orders';
-    if (filter === 'all') op.style.display = '';
-    else if (filter === 'orders') op.style.display = type !== 'manual' ? '' : 'none';
-    else if (filter === 'manual') op.style.display = type === 'manual' ? '' : 'none';
+    if (expenseFilter === 'all') op.style.display = '';
+    else if (expenseFilter === 'orders') op.style.display = type !== 'manual' ? '' : 'none';
+    else if (expenseFilter === 'manual') op.style.display = type === 'manual' ? '' : 'none';
   });
+}
+
+function filterExpenses(filter, el) {
+  haptic();
+  expenseFilter = filter;
+  // Только строка фильтров, не задеваем период (День/Неделя/Месяц) в этой же вкладке.
+  document.querySelectorAll('#exp-filter-tabs .subtab').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  applyExpenseFilter();
 }
 
 function filterWriteoffs(filter, el) {

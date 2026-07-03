@@ -508,6 +508,7 @@ DEMO_NOMENCLATURE = [
 # Продающее сообщение демо-бота — после первого (и единственного) распознавания.
 # Лимит «До N накладных/мес» в платном тарифе:
 DEMO_PLAN_INVOICES = 130  # базовый месячный лимит накладных на аккаунт (default base_limit)
+DEMO_FREE_RECOGNITIONS = 5  # сколько накладных распознаёт НЕподключённый демо-юзер до нуджа
 DEMO_OFFER_TEXT = (
     "⏳ Ваш недельный доступ к данным закончился.\n\n"
     "Вы видели свои реальные цифры — выручку, фудкост, смены. Хотите оставить это навсегда, каждый день?\n\n"
@@ -4083,6 +4084,11 @@ def _get_user_orgs(telegram_id: int) -> List[Dict[str, Any]]:
     return get_restaurants(telegram_id) or []
 
 
+def _has_real_iiko(telegram_id: int) -> bool:
+    """Подключил ли юзер реальный iiko (не демо-заглушку)."""
+    return any(r.get("api_login") != "demo" for r in _get_user_orgs(telegram_id))
+
+
 def _bot_iiko_client(rest: Dict[str, Any]):
     """IikoClient/IikoWebClient для конкретной записи ресторана."""
     return get_client(rest["api_login"], rest.get("iiko_server"), rest.get("api_password"))
@@ -4530,11 +4536,14 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
 
 
 async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
-    """Демо-бот: после 1-го распознавания — мягкий нудж подключить iiko (НЕ оффер)."""
-    if DEMO_ONLY and get_demo_invoice_count(telegram_id) >= 1:
+    """Демо-бот: НЕподключённому юзеру после 1-го распознавания — мягкий нудж
+    подключить iiko (НЕ оффер). Подключённые (активный триал) распознают свободно
+    — их не блокируем, иначе клиент на триале не может пользоваться ядром продукта."""
+    if (DEMO_ONLY and not _has_real_iiko(telegram_id)
+            and get_demo_invoice_count(telegram_id) >= DEMO_FREE_RECOGNITIONS):
         await _tg_send(chat_id,
-            "Вы уже попробовали распознавание 👍\n\n"
-            "Чтобы загрузить эту накладную к себе и открыть доступ к вашей аналитике на 7 дней — "
+            f"Вы распознали {DEMO_FREE_RECOGNITIONS} накладных — лимит демо исчерпан 👍\n\n"
+            "Чтобы грузить накладные к себе и открыть доступ к вашей аналитике на 7 дней — "
             "в распознанной накладной выше нажмите «📤 Отправить в iiko»: подключим ваш iiko прямо в чате.")
         return True
     return False
@@ -4696,6 +4705,9 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
                 "❌ По этим доступам не нашлось организаций. Пришли адрес сервера заново, или /cancel.")
             return True
         create_user(telegram_id, username, username)
+        # Повторное подключение: сносим старые записи, чтобы обновились креды
+        # (add_restaurant всегда INSERT, а get_restaurants берёт старейшую строку).
+        delete_all_restaurants(telegram_id)
         for o in orgs:
             add_restaurant(telegram_id, login, o["id"], o.get("name") or "iiko", server, password)
         _demo_reg.pop(chat_id, None)
