@@ -1786,7 +1786,14 @@ async function apiPost(path, body) {
   const tg = window.Telegram?.WebApp;
   if (tg?.initData) headers['X-Telegram-Init-Data'] = tg.initData;
   const resp = await fetch(API_BASE + path, { method: 'POST', headers, body: JSON.stringify(body) });
-  return resp.json();
+  let data = null;
+  try { data = await resp.json(); } catch (e) {}
+  // fetch не реджектит на 4xx/5xx — иначе показывали «✅ успех» на ошибке бэка.
+  if (!resp.ok) {
+    const msg = (data && (data.detail || data.error)) || `HTTP ${resp.status}`;
+    throw new Error(typeof msg === 'string' ? msg : 'Ошибка запроса');
+  }
+  return data;
 }
 
 // ============ HELPERS: query-string и активные филиалы ============
@@ -2069,6 +2076,9 @@ function startTrialCountdown(seconds) {
 
 function showTrialPaywall() {
   if (_trialTimer) clearInterval(_trialTimer);
+  // Триал закончился — гасим фоновые опросы, иначе продолжаем тянуть данные.
+  try { stopDataRefresh(); } catch (e) {}
+  try { stopStoplistRefresh(); } catch (e) {}
   document.getElementById('navbar')?.classList.remove('visible');
   const tb = document.getElementById('trial-banner');
   if (tb) tb.style.display = 'none';
@@ -3477,6 +3487,7 @@ async function loadExpenses() {
       const _hasTrend = Array.isArray(data.trend) && data.trend.some(t => typeof t.fact === 'number');
       if (_hasTrend) { if (_trendCard) _trendCard.style.display = ''; renderFcTrend(data.trend); }
       else if (_trendCard) { _trendCard.style.display = 'none'; }
+      state.foodcostDishes = data.dishes || [];  // для экспорта «по блюдам»
       document.querySelector('#fc-dishes-table tbody').innerHTML = data.dishes.map(d => {
         const cp = d.cost_pct;
         let cls = 'cost-green';
@@ -3536,8 +3547,8 @@ async function loadExpenses() {
         if (raw === 'needs_mapping') return 'badge-orange';
         if (raw === 'iiko_error') return 'badge-red';
         if (raw === 'draft') return 'badge-gray';
-        // Старый поток (накладные из iiko напрямую)
-        return inv => inv === 'Проведена' ? 'badge-green' : 'badge-yellow';
+        // Неизвестный статус — нейтральный бейдж (раньше по ошибке возвращалась функция).
+        return 'badge-gray';
       };
       document.getElementById('invoices-list').innerHTML = data.invoices.map(inv => {
         const raw = inv.raw_status || '';
@@ -4508,9 +4519,11 @@ async function exportReport(type) {
       Object.entries(byDate).sort().map(([d,v]) => `${d};${Math.round(v)}`).join('\n');
 
   } else if (type === 'foodcost-dishes') {
-    const dishes = state.salesData?.top_dishes || [];
-    csv = '﻿Блюдо;Выручка;Кол-во\n' +
-      dishes.map(d => `${d.name};${Math.round(d.revenue)};${d.count}`).join('\n');
+    const dishes = state.foodcostDishes || [];
+    if (!dishes.length) { showToast('Сначала посчитайте фудкост'); return; }
+    const clean = s => String(s == null ? '' : s).replace(/[;\n\r]/g, ' ');
+    csv = '﻿Блюдо;Категория;Выручка;Кол-во;Фудкост %\n' +
+      dishes.map(d => `${clean(d.name)};${clean(d.category)};${Math.round(d.revenue||0)};${d.count||0};${d.cost_pct==null?'':d.cost_pct.toFixed(1)}`).join('\n');
 
   } else if (type === 'expenses') {
     const data = state.expensesData || [];
