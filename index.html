@@ -2052,8 +2052,15 @@ function startTrialCountdown(seconds) {
       showTrialPaywall();
       return;
     }
-    const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60);
-    if (banner) banner.textContent = `⏳ Демо-доступ к вашим данным: осталось ${h} ч ${m} мин`;
+    let leftLabel;
+    if (left >= 86400) {
+      const d = Math.floor(left / 86400), h = Math.floor((left % 86400) / 3600);
+      leftLabel = `${d} дн ${h} ч`;
+    } else {
+      const h = Math.floor(left / 3600), m = Math.floor((left % 3600) / 60);
+      leftLabel = `${h} ч ${m} мин`;
+    }
+    if (banner) banner.textContent = `⏳ Демо-доступ к вашим данным: осталось ${leftLabel}`;
     left -= 1;
   };
   tick();
@@ -5310,7 +5317,7 @@ if (typeof apiPost === 'undefined') {
     <div style="font-size:40px; text-align:center; margin-top:24px;">⏳</div>
     <h2 style="text-align:center; margin:12px 0 4px;">Доступ к вашим данным закончился</h2>
     <p style="text-align:center; color:var(--text-secondary); margin-bottom:20px;">
-      Вы сутки смотрели свои реальные цифры. Хотите оставить их навсегда — выручку, фудкост, смены, аналитику — каждый день?</p>
+      Вы неделю смотрели свои реальные цифры. Хотите оставить их навсегда — выручку, фудкост, смены, аналитику — каждый день?</p>
     <div class="card" style="padding:16px;">
       <div style="font-size:14px; line-height:1.6;">
         💰 Разработка и настройка под ваше заведение — <b>300 000 ₸</b><br>
