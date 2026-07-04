@@ -2300,7 +2300,7 @@ function renderRevenueChart(chartData) {
         backgroundColor: chartData.labels.map((_, i) =>
           i === chartData.labels.length - 1 ? '#333333' : '#5B9CF6'), // последний столбец = сегодня
         borderRadius: 6,
-        barThickness: 28
+        maxBarThickness: 28 // месяц = 30 столбцов, фикс-ширина не влезает
       }]
     },
     options: {
