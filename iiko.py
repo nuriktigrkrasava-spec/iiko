@@ -424,10 +424,13 @@ class IikoClient:
                     "raw": data}
 
     async def set_document_status(self, org_id: str, document_id: str,
-                                   status: str) -> Dict[str, Any]:
+                                   status: str, doc_number: str = None,
+                                   date: str = None, fallback: dict = None) -> Dict[str, Any]:
         """Изменить статус документа (NEW / PROCESSED / DELETED).
         Cloud API: POST /api/1/documents/setStatus
         Для проведения передать status="PROCESSED", для распроведения — "NEW".
+        doc_number/date/fallback игнорируются (нужны только iikoWeb-клиенту,
+        сигнатуры выровнены, чтобы вызывающий код не различал клиентов).
         """
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1592,50 +1595,176 @@ class IikoWebClient:
             return None
         return None
 
-    async def set_document_status(self, org_id: str, document_id: str,
-                                   status: str) -> Dict[str, Any]:
-        """Проводка/распроведение документа в iikoServer.
-        Cloud-статусы: NEW (черновик), PROCESSED (проведена). Здесь маппим как есть.
-
-        Точный путь зависит от версии iikoServer. Пробуем два:
-          1) POST /api/documents/{id}/setStatus?status=...
-          2) PUT  /api/documents/{id}/status?status=...
-        """
-        token = await self._ensure_token()
-        # На 401 (протухшая сессия) — сбрасываем токен и повторяем оба пути 1 раз.
+    async def _export_incoming_blocks(self, date: str) -> List[str]:
+        """Сырые <document>-блоки экспорта входящих накладных за дату."""
         for attempt in range(2):
-            got_401 = False
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-                # Попытка 1: POST setStatus
-                try:
-                    resp = await client.post(
-                        f"{self.base_url}/api/documents/{document_id}/setStatus",
-                        params={"key": token, "status": status}
-                    )
-                    if resp.status_code == 200:
-                        return {"ok": True, "raw": resp.text[:300]}
-                    if resp.status_code == 401:
-                        got_401 = True
-                except Exception:
-                    pass
-                # Попытка 2: PUT /status
-                try:
-                    resp = await client.put(
-                        f"{self.base_url}/api/documents/{document_id}/status",
-                        params={"key": token, "status": status}
-                    )
-                    if resp.status_code == 200:
-                        return {"ok": True, "raw": resp.text[:300]}
-                    if resp.status_code == 401:
-                        got_401 = True
-                except Exception:
-                    pass
-            if got_401 and attempt == 0:
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/documents/export/incomingInvoice",
+                    params={"key": token, "from": date, "to": date})
+            if resp.status_code == 401 and attempt == 0:
                 await self._invalidate_token()
-                token = await self._ensure_token()
                 continue
-            break
-        return {"ok": False,
-                "error": "iikoServer не принял setStatus ни на одном из путей "
-                         "(/setStatus, /status). Возможно для проводки в твоей версии нужен "
-                         "другой эндпоинт — пришли точный URL из iiko-докуменации."}
+            if resp.status_code != 200:
+                return []
+            return re.findall(r"<document>(.*?)</document>", resp.text, re.S)
+        return []
+
+    @staticmethod
+    def _docs_by_number(blocks: List[str], number: str) -> List[Dict[str, str]]:
+        """Документы с данным номером: [{id, status, block}].
+        Первый <id> в блоке — id документа (поля документа идут до <items>,
+        на этом же держится _resolve_incoming_doc_id)."""
+        out = []
+        for b in blocks:
+            if f"<documentNumber>{number}</documentNumber>" not in b:
+                continue
+            mid = re.search(r"<id>(.*?)</id>", b)
+            mst = re.search(r"<status>(.*?)</status>", b)
+            out.append({"id": mid.group(1).strip() if mid else "",
+                        "status": (mst.group(1).strip().upper() if mst else ""),
+                        "block": b})
+        return out
+
+    @staticmethod
+    def _items_from_export_block(block: str) -> List[Dict[str, Any]]:
+        """Позиции документа из export-блока (product|productId, store|storeId)."""
+        items = []
+        for ib in re.findall(r"<item>(.*?)</item>", block, re.S):
+            def g(tag):
+                m = re.search(rf"<{tag}>(.*?)</{tag}>", ib, re.S)
+                return m.group(1).strip() if m else ""
+            pid = g("product") or g("productId")
+            if not pid:
+                continue
+            items.append({"productId": pid,
+                          "amount": float(g("amount") or 0),
+                          "price": float(g("price") or 0),
+                          "sum": float(g("sum") or 0),
+                          "store": g("store") or g("storeId")})
+        return items
+
+    async def set_document_status(self, org_id: str, document_id: str,
+                                   status: str, doc_number: str = None,
+                                   date: str = None, fallback: dict = None) -> Dict[str, Any]:
+        """Проводка/распроведение документа в iikoServer через РЕ-ИМПОРТ.
+
+        Прямых эндпоинтов смены статуса в этой версии iikoServer НЕТ:
+        POST /documents/{id}/setStatus и PUT /documents/{id}/status — 404
+        (подтверждено логами прод-сервера 2026-07-04). Единственный рабочий
+        write-путь — import/incomingInvoice, и импорт со <status> применяет
+        статус сразу (подтверждено 2026-06-13). Передаём <id> существующего
+        документа — iikoServer трактует это как обновление.
+
+        Защита от квирка «повторный импорт = дубль»: перед PROCESSED делаем
+        пробный ре-импорт со status=NEW (если сервер проигнорирует <id>, дубль
+        будет безвредным черновиком) и проверяем через export, что документ
+        остался один. Только после этого шлём PROCESSED. Каждый шаг
+        верифицируется повторным export.
+
+        fallback: {supplier, items, date} из данных бота — если export не отдал
+        содержимое документа (страховка от другого формата тегов).
+        """
+        if not doc_number or not date:
+            return {"ok": False, "error": "нет номера/даты документа для ре-импорта"}
+        date = date[:10]
+        docs = self._docs_by_number(await self._export_incoming_blocks(date), doc_number)
+        if not docs:
+            return {"ok": False,
+                    "error": f"документ №{doc_number} за {date} не найден в iiko (export)"}
+        if len(docs) > 1:
+            return {"ok": False,
+                    "error": f"в iiko {len(docs)} документа №{doc_number} — "
+                             f"удалите дубли в iikoOffice и повторите"}
+        cur = docs[0]
+        doc_id = cur["id"] or document_id
+
+        def gtag(tag):
+            m = re.search(rf"<{tag}>(.*?)</{tag}>", cur["block"], re.S)
+            return m.group(1).strip() if m else ""
+
+        fb = fallback or {}
+        supplier = gtag("supplier") or gtag("counteragentId") or fb.get("supplier") or ""
+        dt_iso = gtag("dateIncoming") or fb.get("date") or f"{date}T10:00:00"
+        comment = gtag("comment")
+        items = self._items_from_export_block(cur["block"]) or fb.get("items") or []
+        store = gtag("defaultStore") or next(
+            (i["store"] for i in items if i.get("store")), "")
+        if not store:
+            store = await self._get_default_store(org_id) or ""
+        if not supplier or not items or not store:
+            return {"ok": False,
+                    "error": "не удалось прочитать содержимое документа из export "
+                             "(поставщик/позиции/склад) — проведите в iikoOffice"}
+
+        async def _reimport(target: str) -> Dict[str, Any]:
+            root = ET.Element("document")
+            ET.SubElement(root, "id").text = doc_id
+            ET.SubElement(root, "documentNumber").text = str(doc_number)
+            ET.SubElement(root, "dateIncoming").text = dt_iso
+            ET.SubElement(root, "supplier").text = supplier
+            ET.SubElement(root, "defaultStore").text = store
+            ET.SubElement(root, "status").text = target
+            if comment:
+                ET.SubElement(root, "comment").text = comment
+            items_el = ET.SubElement(root, "items")
+            for idx, it in enumerate(items, start=1):
+                ie = ET.SubElement(items_el, "item")
+                ET.SubElement(ie, "num").text = str(idx)
+                ET.SubElement(ie, "product").text = str(it["productId"])
+                ET.SubElement(ie, "amount").text = str(it["amount"])
+                ET.SubElement(ie, "price").text = str(it["price"])
+                ET.SubElement(ie, "sum").text = str(it["sum"])
+                ET.SubElement(ie, "store").text = str(it.get("store") or store)
+            xml = b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
+            for attempt in range(2):
+                tok = await self._ensure_token()
+                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/api/documents/import/incomingInvoice",
+                        params={"key": tok},
+                        headers={"Content-Type": "application/xml"},
+                        content=xml)
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                break
+            if resp.status_code != 200:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"iikoWeb reimport({target}) №{doc_number} HTTP {resp.status_code}: "
+                    f"{resp.text[:400]}")
+                return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+            if re.search(r"<valid>\s*false\s*</valid>", resp.text, re.I):
+                m = re.search(r"<errorMessage>(.*?)</errorMessage>", resp.text, re.S)
+                return {"ok": False,
+                        "error": (m.group(1).strip() if m else "документ не прошёл валидацию")}
+            return {"ok": True}
+
+        async def _verify(expected: str) -> Dict[str, Any]:
+            ds = self._docs_by_number(await self._export_incoming_blocks(date), doc_number)
+            if len(ds) != 1:
+                return {"ok": False,
+                        "error": f"после ре-импорта документов №{doc_number} стало {len(ds)} — "
+                                 f"сервер создал дубль вместо обновления; удалите дубль "
+                                 f"№{doc_number} в iikoOffice"}
+            st = ds[0]["status"]
+            if st and st != expected:
+                return {"ok": False,
+                        "error": f"статус после ре-импорта: {st} (ожидали {expected})"}
+            return {"ok": True}
+
+        target = (status or "").upper()
+        if target == "PROCESSED" and cur["status"] != "PROCESSED":
+            # Фаза-проба: убеждаемся, что сервер ОБНОВЛЯЕТ по <id>, а не дублирует.
+            r = await _reimport("NEW")
+            if not r["ok"]:
+                return r
+            v = await _verify("NEW")
+            if not v["ok"]:
+                return v
+        r = await _reimport(target)
+        if not r["ok"]:
+            return r
+        return await _verify(target)

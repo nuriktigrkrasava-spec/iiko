@@ -3352,6 +3352,28 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
             "had_comment": bool(payload.comment)}
 
 
+def _inv_reimport_fallback(inv: Dict[str, Any]) -> dict:
+    """Содержимое накладной из данных бота — страховка для ре-импорта, если
+    export iiko не отдаст позиции (см. IikoWebClient.set_document_status).
+    Позиции пригодны только если ВСЕ сопоставлены с номенклатурой (есть id)."""
+    try:
+        rows = json.loads(inv.get("items") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        rows = []
+    items = []
+    for it in rows:
+        pid = it.get("iiko_product_id") or it.get("productId")
+        if not pid:
+            items = []
+            break
+        qty = float(it.get("quantity") or it.get("amount") or 0)
+        price = float(it.get("price_per_unit") or it.get("price") or 0)
+        items.append({"productId": pid, "amount": qty, "price": price,
+                      "sum": float(it.get("total") or it.get("sum") or qty * price)})
+    return {"supplier": inv.get("supplier_id") or "", "items": items,
+            "date": (inv.get("date") or "")[:10]}
+
+
 @app.post("/api/invoices/{invoice_id}/post")
 async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_user)):
     """Провести накладную в iiko."""
@@ -3374,7 +3396,10 @@ async def invoice_post_doc(invoice_id: int, user: Dict = Depends(get_current_use
     if not doc_id:
         raise HTTPException(status_code=400, detail="Накладная не создана в iiko (нет doc_id)")
     try:
-        resp = await client.set_document_status(real_org, doc_id, "PROCESSED")
+        resp = await client.set_document_status(
+            real_org, doc_id, "PROCESSED",
+            doc_number=inv.get("iiko_doc_number"), date=(inv.get("date") or "")[:10],
+            fallback=_inv_reimport_fallback(inv))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"iiko: {e}")
     if not resp.get("ok"):
@@ -3398,7 +3423,10 @@ async def invoice_unpost_doc(invoice_id: int, user: Dict = Depends(get_current_u
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
     try:
-        resp = await client.set_document_status(real_org, inv["iiko_doc_id"], "NEW")
+        resp = await client.set_document_status(
+            real_org, inv["iiko_doc_id"], "NEW",
+            doc_number=inv.get("iiko_doc_number"), date=(inv.get("date") or "")[:10],
+            fallback=_inv_reimport_fallback(inv))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"iiko: {e}")
     if not resp.get("ok"):
@@ -4570,8 +4598,11 @@ async def _demo_block_if_used(chat_id: int, telegram_id: int) -> bool:
     - Подключённый юзер с АКТИВНЫМ триалом распознаёт свободно (ядро продукта).
     - Подключённый с ИСТЁКШИМ триалом — блок + оффер: иначе платная фича
       (распознавание + приход в iiko) остаётся бесплатной навсегда.
-    - НЕподключённый после DEMO_FREE_RECOGNITIONS — мягкий нудж подключить iiko."""
+    - НЕподключённый после DEMO_FREE_RECOGNITIONS — мягкий нудж подключить iiko.
+    - Владелец бота гейт обходит: ему нужно тестить и показывать живые демо."""
     if not DEMO_ONLY:
+        return False
+    if telegram_id == OWNER_CHAT_ID:
         return False
     if _has_real_iiko(telegram_id):
         if _demo_trial_state(telegram_id).get("state") == "ended":
