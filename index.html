@@ -2297,7 +2297,8 @@ function renderRevenueChart(chartData) {
       labels: chartData.labels,
       datasets: [{
         data: chartData.data,
-        backgroundColor: chartData.labels.map((_, i) => i === 5 ? '#333333' : '#5B9CF6'),
+        backgroundColor: chartData.labels.map((_, i) =>
+          i === chartData.labels.length - 1 ? '#333333' : '#5B9CF6'), // последний столбец = сегодня
         borderRadius: 6,
         barThickness: 28
       }]
