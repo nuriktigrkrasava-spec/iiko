@@ -1282,23 +1282,27 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
                 per_day[d] = per_day.get(d, 0.0) + float(r.get("DishAmountSum") or 0)
 
         # Дни графика = выбранный период, иначе сумма столбцов не сходится с
-        # карточкой. Исключение «Сегодня»: один столбец бессмыслен — показываем
-        # последние 7 дней для контекста (последний столбец == карточка).
-        if period == "today":
-            days = chart_days
+        # карточкой. Однодневные периоды (Сегодня/Вчера/Позавчера) — один столбец
+        # бессмыслен: рисуем последние 7 дней, а ПОДСВЕЧИВАЕМ выбранный день —
+        # его столбец равен карточке. highlight = индекс подсвеченного столбца.
+        _df, _dt = date.fromisoformat(date_from[:10]), date.fromisoformat(date_to[:10])
+        if _df == _dt and chart_days[0] <= _df <= chart_days[-1]:
+            groups = [(RU_DOW[d.weekday()], [d]) for d in chart_days]
+            highlight = (_df - chart_days[0]).days
         else:
-            _df, _dt = date.fromisoformat(date_from[:10]), date.fromisoformat(date_to[:10])
             days = [_df + timedelta(days=i) for i in range((_dt - _df).days + 1)]
-        if len(days) <= 7:
-            groups = [(RU_DOW[d.weekday()], [d]) for d in days]
-        elif len(days) <= 31:
-            groups = [(d.strftime("%d.%m"), [d]) for d in days]
-        else:  # длинный произвольный период — по неделям (метка = начало недели)
-            groups = [(days[i].strftime("%d.%m"), days[i:i + 7])
-                      for i in range(0, len(days), 7)]
+            if len(days) <= 7:
+                groups = [(RU_DOW[d.weekday()], [d]) for d in days]
+            elif len(days) <= 31:
+                groups = [(d.strftime("%d.%m"), [d]) for d in days]
+            else:  # длинный произвольный период — по неделям (метка = начало недели)
+                groups = [(days[i].strftime("%d.%m"), days[i:i + 7])
+                          for i in range(0, len(days), 7)]
+            highlight = len(groups) - 1  # последний столбец = самый свежий
         chart = {"labels": [g[0] for g in groups],
                  "data": [round(sum(per_day.get(d.isoformat(), 0.0) for d in g[1]), 2)
-                          for g in groups]}
+                          for g in groups],
+                 "highlight": highlight}
 
         resp = {
             "revenue_today": total,

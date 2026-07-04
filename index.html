@@ -2298,7 +2298,8 @@ function renderRevenueChart(chartData) {
       datasets: [{
         data: chartData.data,
         backgroundColor: chartData.labels.map((_, i) =>
-          i === chartData.labels.length - 1 ? '#333333' : '#5B9CF6'), // последний столбец = сегодня
+          i === (chartData.highlight ?? chartData.labels.length - 1)
+            ? '#333333' : '#5B9CF6'), // тёмный столбец = выбранный день (карточка)
         borderRadius: 6,
         maxBarThickness: 28 // месяц = 30 столбцов, фикс-ширина не влезает
       }]
