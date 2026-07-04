@@ -1988,7 +1988,6 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
     client = get_client(login, info.get("iiko_server"), info.get("api_password"))
     d_from, d_to = date_from[:10], date_to[:10]
     result_list = []
-    iiko_entries = []
 
     # ── Накладные из iiko (OLAP) — изолированный try, чтобы сбой не убил весь список ──
     try:
@@ -2000,16 +1999,13 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
         for inv in data.get("invoiceIncomings", []):
             supplier = inv.get("supplier", {}) or {}
             items = inv.get("items", []) or []
-            iiko_entries.append({
+            result_list.append({
                 "id": (inv.get("documentNumber", "") or (inv.get("id", "") or "")[:8])[:8],
                 "status": STATUS_MAP.get(inv.get("status", ""), inv.get("status", "")),
                 "supplier": supplier.get("name", "—"),
                 "date": _fmt_date(inv.get("dateIncoming", "")),
                 "items": len(items),
-                "amount": float(inv.get("sum", 0) or 0),
-                # служебные поля для дедупа с BOT-записями (ниже выпиливаются)
-                "_doc_number": inv.get("documentNumber", "") or "",
-                "_raw_date": (inv.get("dateIncoming", "") or "")[:10],
+                "amount": float(inv.get("sum", 0) or 0)
             })
     except Exception as e:
         print(f"[invoices] OLAP failed: {e}")
@@ -2050,20 +2046,6 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
             })
     except Exception as e:
         print(f"[invoices] bot invoices failed: {e}")
-
-    # ── Дедуп: отправленная ботом накладная существует и в iiko — без этого она
-    # показывалась ДВАЖДЫ (карточка BOT-N + безымянная карточка из iiko).
-    # Матчим по номеру документа, а при пустом номере в OLAP — по дате+сумме.
-    bot_sent = [x for x in result_list if x.get("iiko_doc_number")]
-    bot_nums = {x["iiko_doc_number"] for x in bot_sent}
-    bot_sigs = {(x.get("date") or "", round(float(x.get("amount") or 0), 2)) for x in bot_sent}
-    for e in iiko_entries:
-        dup = (e["_doc_number"] in bot_nums
-               or (e["_raw_date"], round(e["amount"], 2)) in bot_sigs)
-        e.pop("_doc_number", None)
-        e.pop("_raw_date", None)
-        if not dup:
-            result_list.append(e)
 
     result_list.sort(key=lambda x: x["date"], reverse=True)
     total_amount = round(sum(float(x.get("amount") or 0) for x in result_list))
