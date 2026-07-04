@@ -1270,7 +1270,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             total = olap_total  # не по всем филиалам есть смены — OLAP, как раньше
         avg_check = total / guests if guests else 0
 
-        # график «последние 7 дней»: те же смены, что и карточка; без смен — OLAP
+        # график: те же смены, что и карточка; без смен — OLAP
         per_day: Dict[str, float] = {}
         if got_sessions:
             for s in all_sessions:
@@ -1280,8 +1280,25 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             for r in all_rows:
                 d = str(r.get("OpenDate.Typed") or "")[:10]
                 per_day[d] = per_day.get(d, 0.0) + float(r.get("DishAmountSum") or 0)
-        chart = {"labels": [RU_DOW[d.weekday()] for d in chart_days],
-                 "data": [round(per_day.get(d.isoformat(), 0.0), 2) for d in chart_days]}
+
+        # Дни графика = выбранный период, иначе сумма столбцов не сходится с
+        # карточкой. Исключение «Сегодня»: один столбец бессмыслен — показываем
+        # последние 7 дней для контекста (последний столбец == карточка).
+        if period == "today":
+            days = chart_days
+        else:
+            _df, _dt = date.fromisoformat(date_from[:10]), date.fromisoformat(date_to[:10])
+            days = [_df + timedelta(days=i) for i in range((_dt - _df).days + 1)]
+        if len(days) <= 7:
+            groups = [(RU_DOW[d.weekday()], [d]) for d in days]
+        elif len(days) <= 31:
+            groups = [(d.strftime("%d.%m"), [d]) for d in days]
+        else:  # длинный произвольный период — по неделям (метка = начало недели)
+            groups = [(days[i].strftime("%d.%m"), days[i:i + 7])
+                      for i in range(0, len(days), 7)]
+        chart = {"labels": [g[0] for g in groups],
+                 "data": [round(sum(per_day.get(d.isoformat(), 0.0) for d in g[1]), 2)
+                          for g in groups]}
 
         resp = {
             "revenue_today": total,
