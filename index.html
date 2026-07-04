@@ -2222,12 +2222,19 @@ async function loadDashboard() {
   if (rows && rows.length > 0) {
     const guests  = olapSum(rows, 'GuestNum');
     const orders  = olapSum(rows, 'OrdersCount');
-    // Выручка — из КАССОВЫХ СМЕН (операционный день, как в кассе), а не из OLAP
-    // по дате открытия. Гости/чеки/график остаются на OLAP.
+    // Выручка И график — из /api/dashboard (кассовые смены, операционный день,
+    // как в кассе). Раньше карточку брали из смен, а график рисовали из OLAP по
+    // дате открытия заказа — источники разные, столбец дня не сходился с
+    // карточкой. Бэк считает карточку и график из ОДНОГО набора смен.
+    // Гости/чеки остаются на OLAP.
     let revenue = olapSum(rows, 'DishAmountSum');
+    let chart = null;
     try {
-      const rev = await apiGet(`/api/revenue/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
-      if (rev && rev.ok && rev.revenue != null) revenue = rev.revenue;
+      const d = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+      if (d && !d._iiko_error && d.revenue_today != null) {
+        revenue = d.revenue_today;
+        chart = d.chart_7days;
+      }
     } catch(e) {}
     const avgCheck = guests > 0 ? revenue / guests : 0;
     hideIikoError();
@@ -2240,26 +2247,29 @@ async function loadDashboard() {
     document.getElementById('m-revenue-change').innerHTML = '';
     document.getElementById('m-check-change').innerHTML = '';
     document.getElementById('m-guests-change').innerHTML = '';
-    // График всегда за 7 дней
-    const weekCacheKey = cacheKeyFor('week', null);
-    const weekRows = state.olapCache[weekCacheKey] || rows;
-    const byDate = olapGroup(weekRows, ['OpenDate.Typed'], ['DishAmountSum']);
-    byDate.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
-    if (byDate.length > 0) {
-      renderRevenueChart({
-        labels: byDate.map(r => r['OpenDate.Typed']?.slice(5) || ''),
-        data: byDate.map(r => r['DishAmountSum'])
-      });
-    }
-    // Загрузить неделю для графика если ещё нет
-    if (!state.olapCache[weekCacheKey]) {
-      fetchOlap('week').then(wRows => {
-        if (wRows && wRows.length > 0) {
-          const wd = olapGroup(wRows, ['OpenDate.Typed'], ['DishAmountSum']);
-          wd.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
-          renderRevenueChart({ labels: wd.map(r => r['OpenDate.Typed']?.slice(5)||''), data: wd.map(r => r['DishAmountSum']) });
-        }
-      });
+    if (chart && chart.labels && chart.labels.length > 0) {
+      renderRevenueChart(chart);
+    } else {
+      // Фолбек: /api/dashboard недоступен — график из OLAP за 7 дней, как раньше
+      const weekCacheKey = cacheKeyFor('week', null);
+      const weekRows = state.olapCache[weekCacheKey] || rows;
+      const byDate = olapGroup(weekRows, ['OpenDate.Typed'], ['DishAmountSum']);
+      byDate.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
+      if (byDate.length > 0) {
+        renderRevenueChart({
+          labels: byDate.map(r => r['OpenDate.Typed']?.slice(5) || ''),
+          data: byDate.map(r => r['DishAmountSum'])
+        });
+      }
+      if (!state.olapCache[weekCacheKey]) {
+        fetchOlap('week').then(wRows => {
+          if (wRows && wRows.length > 0) {
+            const wd = olapGroup(wRows, ['OpenDate.Typed'], ['DishAmountSum']);
+            wd.sort((a, b) => a['OpenDate.Typed'] > b['OpenDate.Typed'] ? 1 : -1);
+            renderRevenueChart({ labels: wd.map(r => r['OpenDate.Typed']?.slice(5)||''), data: wd.map(r => r['DishAmountSum']) });
+          }
+        });
+      }
     }
     return;
   }
