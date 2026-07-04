@@ -1119,16 +1119,16 @@ def _get_api_login(org_id: str, user: Dict) -> str:
     return _get_restaurant_info(org_id, user)["api_login"]
 
 
-async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
-                               ) -> Tuple[Optional[float], Dict[str, Any]]:
-    """Выручка ОДНОГО филиала из кассовых смен (операционный день = как в кассе).
+async def branch_shift_sessions(client, dept: str, date_from: str, date_to: str
+                                ) -> Tuple[Optional[List[Dict[str, Any]]], Dict[str, Any]]:
+    """Кассовые смены ОДНОГО филиала за период (операционный день = как в кассе).
 
     Сервер может держать несколько филиалов (концепций) на одних кредах, а в
     смене из полей-разделителей есть только conceptionId. Поэтому сужаем смены
     до концепций ИМЕННО этого филиала по детерминированной цепочке (без имён):
       Department(филиал) → Conception.Code (OLAP) → conceptionId (entities/list).
     Если сузить не удалось (одиночный сервер/справочник пуст) — берём все смены.
-    Возвращает (выручка | None при ошибке, debug-инфо).
+    Возвращает (смены | None при ошибке, debug-инфо).
     """
     dbg: Dict[str, Any] = {}
 
@@ -1175,6 +1175,15 @@ async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
             dbg["selected_sessions"] = 0
             return None, dbg
     dbg["selected_sessions"] = len(sel)
+    return sel, dbg
+
+
+async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
+                               ) -> Tuple[Optional[float], Dict[str, Any]]:
+    """Выручка ОДНОГО филиала из кассовых смен — см. branch_shift_sessions."""
+    sel, dbg = await branch_shift_sessions(client, dept, date_from, date_to)
+    if sel is None:
+        return None, dbg
     rev = client.cashshifts_revenue(sel)
     dbg["revenue"] = rev
     return rev, dbg
@@ -1215,20 +1224,32 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
 
     # Выручка = кассовые смены (операционный день), как в кассе. SALES OLAP режет
     # по дате открытия заказа и расходится с кассой; смены — эталон. Каждый филиал
-    # сужаем до своих концепций (см. branch_shift_revenue), поэтому на общем сервере
-    # филиалы не смешиваются и не задваиваются.
-    async def fetch_revenue(real_org: str):
+    # сужаем до своих концепций (см. branch_shift_sessions), поэтому на общем сервере
+    # филиалы не смешиваются и не задваиваются. Смены тянем сразу расширенным окном
+    # (период + последние 7 дней): из ОДНОГО набора считаем и карточку, и график —
+    # иначе цифры на графике и в карточке расходятся.
+    today = local_now().date()
+    chart_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
+    win_from = min(date_from, chart_days[0].isoformat())
+    win_to = max(date_to, today.isoformat())
+
+    async def fetch_sessions(real_org: str):
         info = _get_restaurant_info(real_org, user)
         client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         if not hasattr(client, "get_cashshifts"):
             return None  # облачный клиент — кассовых смен нет, fallback на OLAP
         try:
-            rev, _dbg = await branch_shift_revenue(
-                client, _olap_dept(real_org, info), date_from, date_to)
-            return rev
+            sel, _dbg = await branch_shift_sessions(
+                client, _olap_dept(real_org, info), win_from, win_to)
+            return sel
         except Exception as e:
             logger.warning(f"[dashboard] cashshifts {real_org}: {e}")
             return None
+
+    def _sess_day(s: Dict[str, Any]) -> str:
+        return (s.get("openDate") or "")[:10]
+
+    RU_DOW = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
     try:
         results = await asyncio.gather(*(fetch_one(o) for o in orgs))
@@ -1237,11 +1258,30 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
         guests = sum(float(r.get("GuestNum") or 0) for r in all_rows)
         orders = sum(float(r.get("OrdersCount") or 0) for r in all_rows)
 
-        rev_results = await asyncio.gather(*(fetch_revenue(o) for o in orgs))
-        revs = [r for r in rev_results if r is not None]
-        # есть смены → сумма по филиалам; иначе старый OLAP-итог (облако/ошибка)
-        total = round(sum(revs), 2) if revs else olap_total
+        sess_results = await asyncio.gather(*(fetch_sessions(o) for o in orgs))
+        got_sessions = [s for s in sess_results if s is not None]
+        all_sessions = [s for batch in got_sessions for s in batch]
+
+        if got_sessions and len(got_sessions) == len(orgs):
+            # карточка: смены только выбранного периода
+            total = round(sum(float(s.get("payOrders") or 0) for s in all_sessions
+                              if date_from[:10] <= _sess_day(s) <= date_to[:10]), 2)
+        else:
+            total = olap_total  # не по всем филиалам есть смены — OLAP, как раньше
         avg_check = total / guests if guests else 0
+
+        # график «последние 7 дней»: те же смены, что и карточка; без смен — OLAP
+        per_day: Dict[str, float] = {}
+        if got_sessions:
+            for s in all_sessions:
+                d = _sess_day(s)
+                per_day[d] = per_day.get(d, 0.0) + float(s.get("payOrders") or 0)
+        else:
+            for r in all_rows:
+                d = str(r.get("OpenDate.Typed") or "")[:10]
+                per_day[d] = per_day.get(d, 0.0) + float(r.get("DishAmountSum") or 0)
+        chart = {"labels": [RU_DOW[d.weekday()] for d in chart_days],
+                 "data": [round(per_day.get(d.isoformat(), 0.0), 2) for d in chart_days]}
 
         resp = {
             "revenue_today": total,
@@ -1253,7 +1293,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             "open_orders": orders,
             "revenue_yesterday": 0,
             "forecast": total * 1.4,
-            "chart_7days": DEMO_DASHBOARD["chart_7days"],
+            "chart_7days": chart,
             "branches_count": len(orgs),
         }
         _set_cached(key, resp)
