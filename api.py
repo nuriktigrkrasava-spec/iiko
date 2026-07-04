@@ -1460,7 +1460,9 @@ async def sales(org_id: str, period: str = "today",
         dept = _olap_dept(real_org, info)
         return await asyncio.gather(
             # DishDiscountSumInt (после скидок) — чтобы сумма каналов = выручке кассы.
-            safe_olap(dept, date_from, date_to, ["OrderType.Name"], ["DishDiscountSumInt", "GuestNum"]),
+            # OrdersCount по каналам корректен (заказ ровно в одном канале) —
+            # отсюда точное общее число заказов для «Корзины» на фронте.
+            safe_olap(dept, date_from, date_to, ["OrderType.Name"], ["DishDiscountSumInt", "GuestNum", "OrdersCount"]),
             safe_olap(dept, date_from, date_to, ["DishName"], ["DishAmountSum", "DishCount"]),
             safe_olap(dept, date_from, date_to, ["ProductCategory.Name"], ["DishAmountSum"]),
             # Выручка по типам оплаты. Мера DishDiscountSumInt = реально оплачено
@@ -1484,14 +1486,17 @@ async def sales(org_id: str, period: str = "today",
                 continue
             name = _normalize_channel_name(name, user)
             if name not in ch_agg:
-                ch_agg[name] = {"revenue": 0.0, "guests": 0}
+                ch_agg[name] = {"revenue": 0.0, "guests": 0, "orders": 0}
             ch_agg[name]["revenue"] += float(row.get("DishDiscountSumInt", 0) or 0)
             ch_agg[name]["guests"]  += int(row.get("GuestNum", 0) or 0)
+            ch_agg[name]["orders"]  += int(float(row.get("OrdersCount", 0) or 0))
         channels = [{
             "name": n, "revenue": v["revenue"], "guests": int(v["guests"]),
+            "orders": int(v["orders"]),
             "avg_check": v["revenue"] / v["guests"] if v["guests"] else 0, "top": True
         } for n, v in ch_agg.items()]
         channels.sort(key=lambda x: x["revenue"], reverse=True)
+        total_orders = sum(c["orders"] for c in channels)
 
         # Дедупликация по названию блюда
         di_agg: Dict[str, Dict[str, float]] = {}
@@ -1540,7 +1545,11 @@ async def sales(org_id: str, period: str = "today",
         accounts = [{"name": n, "revenue": round(v, 2)} for n, v in acc_agg.items()]
         accounts.sort(key=lambda x: x["revenue"], reverse=True)
 
-        result = {"channels": channels, "top_dishes": dishes[:10], "categories": categories,
+        # all_dishes — полная номенклатура для ABC-анализа (топ-10 для него мал);
+        # orders — точное число заказов (сумма OrdersCount по каналам).
+        result = {"channels": channels, "top_dishes": dishes[:10],
+                  "all_dishes": dishes, "orders": total_orders,
+                  "categories": categories,
                   "pay_types": pay_types, "accounts": accounts,
                   "branches_count": len(orgs)}
         _set_cached(key, result)

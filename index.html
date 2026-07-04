@@ -758,6 +758,24 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       </div>
       <div class="card">
         <div class="card-header">
+          <div>
+            <div class="card-title">Выручка по типам оплаты</div>
+            <div class="card-subtitle">После скидок — сходится с кассой</div>
+          </div>
+        </div>
+        <div class="subtabs" style="margin-bottom:4px">
+          <div class="subtab active" id="pay-view-type" onclick="setPayView('type', this)">Типы оплаты</div>
+          <div class="subtab" id="pay-view-account" onclick="setPayView('account', this)">Счета</div>
+        </div>
+        <div class="table-container">
+          <table class="data-table" id="paytypes-table">
+            <thead><tr><th id="paytypes-col">Тип оплаты</th><th>Выручка</th><th>%</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header">
           <div class="card-title">Топ блюд по выручке</div>
           <button class="excel-btn" onclick="exportReport('top-dishes')">↓ Excel</button>
         </div>
@@ -2220,20 +2238,23 @@ async function loadDashboard() {
   // Сначала пробуем OLAP (один запрос)
   const rows = await fetchOlap(state.period);
   if (rows && rows.length > 0) {
-    const guests  = olapSum(rows, 'GuestNum');
-    const orders  = olapSum(rows, 'OrdersCount');
-    // Выручка И график — из /api/dashboard (кассовые смены, операционный день,
-    // как в кассе). Раньше карточку брали из смен, а график рисовали из OLAP по
-    // дате открытия заказа — источники разные, столбец дня не сходился с
-    // карточкой. Бэк считает карточку и график из ОДНОГО набора смен.
-    // Гости/чеки остаются на OLAP.
+    // Карточки И график — из /api/dashboard (выручка из кассовых смен, опер.
+    // день как в кассе; гости/заказы из OLAP с группировкой ТОЛЬКО по дате).
+    // Локальные OLAP-строки сгруппированы по 5 полям (дата+блюдо+категория+
+    // официант+тип заказа) — сумма GuestNum/OrdersCount по ним считает заказ
+    // один раз на КАЖДОЕ блюдо и завышает гостей/заказы в разы (128 вместо 27),
+    // занижая средний чек. Поэтому OLAP-суммы здесь только фолбек.
     let revenue = olapSum(rows, 'DishAmountSum');
+    let guests  = olapSum(rows, 'GuestNum');
+    let orders  = olapSum(rows, 'OrdersCount');
     let chart = null;
     try {
       const d = await apiGet(`/api/dashboard/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
       if (d && !d._iiko_error && d.revenue_today != null) {
         revenue = d.revenue_today;
         chart = d.chart_7days;
+        if (d.guests != null) guests = d.guests;
+        if (d.open_orders != null) orders = d.open_orders;
       }
     } catch(e) {}
     const avgCheck = guests > 0 ? revenue / guests : 0;
@@ -2361,25 +2382,32 @@ async function loadSales() {
     `).join('');
     state.payData = { pay_types: data.pay_types || [], accounts: data.accounts || [] };
     renderPayTypes();
+    // Точное число заказов с бэка (по каналам): перекрывает OLAP-сумму ниже,
+    // которая считает заказ раз на каждое блюдо и завышает в разы
+    if (data.orders != null) {
+      state.salesOrders = data.orders;
+      const co = document.getElementById('cart-orders');
+      if (co) co.textContent = Number(data.orders).toLocaleString('ru-RU');
+    }
   }).catch(console.error);
 
   if (rows && rows.length > 0) {
 
-    // Топ блюда
-    const dishes = olapGroup(rows, ['DishName'], ['DishAmountSum', 'DishCount'])
+    // Топ блюда. all_dishes — ВСЯ номенклатура для ABC: анализ по топ-10
+    // бессмыслен (почти всё выходит «A»), считать надо по полному меню.
+    const allDishes = olapGroup(rows, ['DishName'], ['DishAmountSum', 'DishCount'])
       .filter(r => r.DishName)
       .sort((a, b) => b.DishAmountSum - a.DishAmountSum)
-      .slice(0, 10);
-    state.salesData = { channels: [], top_dishes: dishes.map(d => ({
-      name: d.DishName, revenue: d.DishAmountSum, count: Math.round(d.DishCount)
-    })), categories: [] };
-    const maxRev = Math.max(...dishes.map(d => d.DishAmountSum), 1);
+      .map(d => ({ name: d.DishName, revenue: d.DishAmountSum, count: Math.round(d.DishCount) }));
+    const dishes = allDishes.slice(0, 10);
+    state.salesData = { channels: [], top_dishes: dishes, all_dishes: allDishes, categories: [] };
+    const maxRev = Math.max(...dishes.map(d => d.revenue), 1);
     document.getElementById('top-dishes-chart').innerHTML = dishes.map(d => `
       <div class="hbar-item">
-        <div class="hbar-label">${escHtml(d.DishName)}</div>
+        <div class="hbar-label">${escHtml(d.name)}</div>
         <div class="hbar-track">
-          <div class="hbar-fill" style="width:${(d.DishAmountSum/maxRev*100).toFixed(1)}%"></div>
-          <div class="hbar-value">${(d.DishAmountSum/1000).toFixed(0)}к</div>
+          <div class="hbar-fill" style="width:${(d.revenue/maxRev*100).toFixed(1)}%"></div>
+          <div class="hbar-value">${(d.revenue/1000).toFixed(0)}к</div>
         </div>
       </div>
     `).join('');
@@ -2959,7 +2987,8 @@ function setAbcMode(mode, el) {
 }
 
 function renderABC() {
-  const dishes = [...(state.salesData?.top_dishes || [])];
+  // ABC по всей номенклатуре (all_dishes); top_dishes (10 шт) — только фолбек
+  const dishes = [...(state.salesData?.all_dishes || state.salesData?.top_dishes || [])];
   dishes.sort((a, b) => (abcMode === 'revenue' ? b.revenue - a.revenue : b.count - a.count));
   const total = dishes.reduce((s, d) => s + (abcMode === 'revenue' ? d.revenue : d.count), 0);
   let cum = 0, cA = 0, cB = 0, cC = 0;
@@ -3006,7 +3035,9 @@ async function renderCancels() {
     // % от выручки из OLAP
     const olapRows = state.olapCache[cacheKeyFor(state.salesPeriod, state.salesCustomRange)] || [];
     const totalRev = olapRows.reduce((s, r) => s + (r.DishAmountSum || 0), 0);
-    const totalOrd = olapRows.reduce((s, r) => s + (r.OrdersCount || 0), 0);
+    // Точные заказы с бэка (/api/sales); OLAP-сумма — фолбек, она завышена
+    // (заказ считается раз на каждое блюдо)
+    const totalOrd = state.salesOrders ?? olapRows.reduce((s, r) => s + (r.OrdersCount || 0), 0);
     if (el('cancels-returns-pct') && totalRev > 0)
       el('cancels-returns-pct').textContent = (totalAmount / totalRev * 100).toFixed(2) + '% от выручки';
     if (el('cancels-pct') && totalOrd > 0)
@@ -4110,16 +4141,6 @@ function renderComparison() {
     return (period.channels[_compChannel]?.orders || 0);
   }
 
-  // Итоги
-  const curTotal = data.current.reduce((s, p) => s + getRevenue(p), 0);
-  const prevTotal = data.previous.reduce((s, p) => s + getRevenue(p), 0);
-  const growth = prevTotal > 0 ? ((curTotal - prevTotal) / prevTotal * 100) : 0;
-  document.getElementById('comp-cur-rev').textContent = formatMoney(curTotal);
-  document.getElementById('comp-prev-rev').textContent = formatMoney(prevTotal);
-  const gEl = document.getElementById('comp-growth');
-  gEl.textContent = (growth >= 0 ? '+' : '') + growth.toFixed(1) + '%';
-  gEl.style.color = growth >= 0 ? 'var(--green)' : 'var(--red)';
-
   // Выровниваем периоды текущего года (по номеру недели/месяца)
   const curMap = {};
   data.current.forEach(p => { curMap[p.key] = p; });
@@ -4129,7 +4150,15 @@ function renderComparison() {
     const newKey = p.key.replace(String(prev_year), String(cur_year));
     prevMap[newKey] = p;
   });
-  const allKeys = [...new Set([...Object.keys(curMap), ...Object.keys(prevMap)])].sort();
+  let allKeys = [...new Set([...Object.keys(curMap), ...Object.keys(prevMap)])].sort();
+
+  // Обрезаем будущие периоды (в текущем году данных ещё нет): без этого «Рост»
+  // сравнивал неполный год с ПОЛНЫМ прошлым (−56% на ровном месте), а таблица
+  // начиналась с «Нед 52: 0 ₸ / −100%». Отрез по total_rev, не по фильтру
+  // канала — чтобы выбор канала не менял набор периодов.
+  let lastIdx = -1;
+  allKeys.forEach((k, i) => { if ((curMap[k]?.total_rev || 0) > 0) lastIdx = i; });
+  if (lastIdx >= 0) allKeys = allKeys.slice(0, lastIdx + 1);
 
   const labels = allKeys.map(k => curMap[k]?.label || prevMap[k]?.label || k);
   const curRevs  = allKeys.map(k => getRevenue(curMap[k]  || {total_rev:0,channels:{}}));
@@ -4142,6 +4171,17 @@ function renderComparison() {
     const o = getOrders(prevMap[k] || {total_orders:0,channels:{}});
     return o > 0 ? prevRevs[i] / o : 0;
   });
+
+  // Итоги — по одинаковому набору периодов (прожитая часть года против той же
+  // части прошлого года), поэтому «Рост» теперь сопоставим
+  const curTotal = curRevs.reduce((s, v) => s + v, 0);
+  const prevTotal = prevRevs.reduce((s, v) => s + v, 0);
+  const growth = prevTotal > 0 ? ((curTotal - prevTotal) / prevTotal * 100) : 0;
+  document.getElementById('comp-cur-rev').textContent = formatMoney(curTotal);
+  document.getElementById('comp-prev-rev').textContent = formatMoney(prevTotal);
+  const gEl = document.getElementById('comp-growth');
+  gEl.textContent = (growth >= 0 ? '+' : '') + growth.toFixed(1) + '%';
+  gEl.style.color = growth >= 0 ? 'var(--green)' : 'var(--red)';
 
   // График выручки
   const ctxRev = document.getElementById('comp-chart').getContext('2d');
