@@ -907,6 +907,8 @@ async def startup():
     init_salary_overrides_db()
     # Фоновый планировщик воскресного отчёта ген.директору
     asyncio.create_task(_weekly_report_scheduler())
+    # Понедельничные итоги недели — каждому владельцу по его филиалам
+    asyncio.create_task(_weekly_users_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
     # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
@@ -2262,6 +2264,26 @@ async def weekly_report_preview(
         else:
             await _tg_send(int(recipient["telegram_id"]), text)
             result["sent"] = True
+    return result
+
+
+@app.get("/api/weekly-user-report/preview")
+async def weekly_user_report_preview(
+        send: bool = False,
+        user: Dict = Depends(get_current_user)):
+    """Предпросмотр понедельничного отчёта: юзер видит ТОЛЬКО свой (по своим
+    филиалам), чужие данные недоступны. send=true — прислать себе в Telegram."""
+    tg_id = int(user.get("id", 0))
+    owner_rests = [r for r in get_all_restaurants()
+                   if int(r.get("telegram_id") or 0) == tg_id]
+    if not owner_rests:
+        return {"ok": False, "error": "нет подключённых филиалов"}
+    text = await _owner_week_report(owner_rests)
+    if not text:
+        return {"ok": False, "error": "нет данных за прошлую неделю"}
+    result: Dict[str, Any] = {"ok": True, "text": text}
+    if send:
+        result["sent"] = await _tg_send(tg_id, text) is not None
     return result
 
 
@@ -3886,6 +3908,183 @@ async def _send_weekly_report() -> bool:
         return False
     await _tg_send(int(user["telegram_id"]), text)
     return True
+
+
+# ============ ПОНЕДЕЛЬНИЧНЫЙ ОТЧЁТ ВЛАДЕЛЬЦАМ ============
+# Каждый понедельник — КАЖДОМУ юзеру с подключённым iiko по его филиалам:
+# итоги прошлой полной недели (пн–вс) против позапрошлой + проблемы смен
+# (расхождения кассы, исправленные платежи, непринятые смены).
+# Не путать с воскресным отчётом ген.директору выше — тот один на всю сеть.
+
+def _fmt_delta_money(cur: float, prev: float) -> str:
+    """Как _fmt_delta, но с абсолютной дельтой: '🟢 ▲ +12% (+230 000 ₸)'."""
+    base = _fmt_delta(cur, prev)
+    if prev <= 0 or not base.startswith(("🟢", "🔴")):
+        return base
+    diff = cur - prev
+    sign = "+" if diff >= 0 else "−"
+    return f"{base} ({sign}{format_money(abs(diff))})"
+
+
+def _last_week_ranges(today: date) -> Tuple[str, str, str, str]:
+    """(cur_from, cur_to, prev_from, prev_to): прошлая полная неделя пн–вс
+    и неделя перед ней. Работает в любой день недели (для превью)."""
+    monday = today - timedelta(days=today.weekday())
+    return ((monday - timedelta(days=7)).isoformat(),
+            (monday - timedelta(days=1)).isoformat(),
+            (monday - timedelta(days=14)).isoformat(),
+            (monday - timedelta(days=8)).isoformat())
+
+
+async def _branch_week_summary(rest: Dict[str, Any], cur_from: str, cur_to: str,
+                               prev_from: str, prev_to: str) -> Dict[str, Any]:
+    """Метрики недели + проблемы смен одного филиала.
+    cur=None — данных нет совсем. Выручка — из кассовых смен (как в дашборде),
+    фолбэк на OLAP; гости — всегда OLAP; ср. чек = выручка/гости."""
+    cur, prev = await asyncio.gather(
+        _branch_week_metrics(rest, cur_from, cur_to),
+        _branch_week_metrics(rest, prev_from, prev_to),
+    )
+    out: Dict[str, Any] = {"name": rest.get("organization_name") or "Филиал",
+                           "cur": cur,
+                           "prev": prev or {"revenue": 0, "guests": 0, "avg_check": 0},
+                           "problems": None}
+    client = get_client(rest["api_login"], rest.get("iiko_server"), rest.get("api_password"))
+    if not hasattr(client, "get_cashshifts"):
+        return out  # облачный iiko — смен нет, остаёмся на OLAP без блока проблем
+    dept = rest.get("organization_name") or rest.get("organization_id")
+    try:
+        cur_s, prev_s = await asyncio.gather(
+            _branch_sessions(client, dept, cur_from, cur_to),
+            _branch_sessions(client, dept, prev_from, prev_to),
+        )
+    except Exception as e:
+        logger.warning(f"[weekly_users] смены {dept}: {e}")
+        return out
+    # выручка из смен (эталон кассы), гости OLAP-овские — как /api/dashboard
+    if cur_s:
+        rev = sum(float(s.get("payOrders") or 0) for s in cur_s)
+        guests = (cur or {}).get("guests", 0)
+        out["cur"] = {"revenue": rev, "guests": guests,
+                      "avg_check": rev / guests if guests else 0}
+    if prev_s:
+        rev_p = sum(float(s.get("payOrders") or 0) for s in prev_s)
+        g_p = out["prev"].get("guests", 0)
+        out["prev"] = {"revenue": rev_p, "guests": g_p,
+                       "avg_check": rev_p / g_p if g_p else 0}
+    if not cur_s:
+        return out
+    diff_shifts, diff_sum, unaccepted, edits, type_changes = 0, 0.0, 0, 0, 0
+    for s in cur_s:
+        d = float(s.get("cashDiff") or 0)
+        if abs(d) > 0.01:
+            diff_shifts += 1
+            diff_sum += d
+        if s.get("sessionStatus") != "ACCEPTED":
+            unaccepted += 1
+        try:
+            pay = await client.get_cashshift_payments(s["id"])
+            for e in _payment_edits(pay):
+                edits += 1
+                if e.get("account_changed"):
+                    type_changes += 1
+        except Exception as e:
+            logger.warning(f"[weekly_users] платежи {dept} №{s.get('sessionNumber')}: {e}")
+    out["problems"] = {"diff_shifts": diff_shifts, "diff_sum": diff_sum,
+                       "unaccepted": unaccepted, "edits": edits,
+                       "type_changes": type_changes}
+    return out
+
+
+def _build_owner_week_text(summaries: List[Dict[str, Any]], cur_from: str, cur_to: str,
+                           prev_from: str, prev_to: str) -> Optional[str]:
+    """Текст понедельничного отчёта из готовых сводок филиалов. None — слать нечего."""
+    if not any(b.get("cur") for b in summaries):
+        return None
+    def d(x): return datetime.fromisoformat(x).strftime("%d.%m")
+    lines = [f"📊 <b>Итоги недели</b> ({d(cur_from)}–{d(cur_to)})",
+             f"<i>сравнение с прошлой ({d(prev_from)}–{d(prev_to)})</i>", ""]
+    tot_cur = tot_prev = 0.0
+    for b in summaries:
+        lines.append(f"🏢 <b>{b['name']}</b>")
+        c = b.get("cur")
+        if not c:
+            lines.append("   ⚠️ нет данных\n")
+            continue
+        p = b["prev"]
+        tot_cur += c["revenue"]; tot_prev += p["revenue"]
+        lines.append(f"   Выручка: <b>{format_money(c['revenue'])}</b>  "
+                     f"{_fmt_delta_money(c['revenue'], p['revenue'])}")
+        lines.append(f"   Средний чек: <b>{format_money(c['avg_check'])}</b>  "
+                     f"{_fmt_delta(c['avg_check'], p['avg_check'])}")
+        if c.get("guests"):
+            lines.append(f"   Гости: <b>{int(c['guests'])}</b>  "
+                         f"{_fmt_delta(c['guests'], p.get('guests', 0))}")
+        pr = b.get("problems")
+        if pr is None:
+            pass  # смены недоступны — блок проблем не показываем
+        elif pr["diff_shifts"] or pr["edits"] or pr["unaccepted"]:
+            lines.append("   ⚠️ Проблемы за неделю:")
+            if pr["diff_shifts"]:
+                lines.append(f"   • смен с расхождением кассы: {pr['diff_shifts']} "
+                             f"({format_money(pr['diff_sum'])})")
+            if pr["edits"]:
+                extra = (f", из них со сменой типа оплаты: {pr['type_changes']}"
+                         if pr["type_changes"] else "")
+                lines.append(f"   • исправленных платежей: {pr['edits']}{extra}")
+            if pr["unaccepted"]:
+                lines.append(f"   • непринятых смен: {pr['unaccepted']}")
+        else:
+            lines.append("   ✅ Смены чистые, расхождений нет")
+        lines.append("")
+    if sum(1 for b in summaries if b.get("cur")) > 1:
+        lines.append(f"━━━━━━━━━━━━━━\n💰 <b>Итого:</b> {format_money(tot_cur)}  "
+                     f"{_fmt_delta_money(tot_cur, tot_prev)}")
+    return "\n".join(lines).strip()
+
+
+async def _owner_week_report(owner_rests: List[Dict[str, Any]]) -> Optional[str]:
+    """Понедельничный отчёт одного владельца по всем его филиалам."""
+    cf, ct, pf, pt = _last_week_ranges(local_now().date())
+    summaries = await asyncio.gather(
+        *(_branch_week_summary(r, cf, ct, pf, pt) for r in owner_rests))
+    return _build_owner_week_text(list(summaries), cf, ct, pf, pt)
+
+
+async def _send_weekly_users_report() -> int:
+    """Шлёт понедельничный отчёт каждому владельцу. Возвращает число отправленных."""
+    rests = get_all_restaurants()
+    by_owner: Dict[int, list] = {}
+    for r in rests:
+        by_owner.setdefault(r["telegram_id"], []).append(r)
+    sent = 0
+    for tg_id, owner_rests in by_owner.items():
+        try:
+            text = await _owner_week_report(owner_rests)
+            if text and await _tg_send(int(tg_id), text) is not None:
+                sent += 1
+        except Exception as e:
+            logger.warning(f"[weekly_users] owner {tg_id}: {e}")
+    return sent
+
+
+async def _weekly_users_report_scheduler():
+    """Фоновый цикл: по понедельникам после REPORT_HOUR_LOCAL — итоги недели
+    владельцам. app_state-дедупликация переживает рестарты Render."""
+    while True:
+        try:
+            now = local_now()
+            # weekday(): 0 = понедельник
+            if now.weekday() == 0 and now.hour >= REPORT_HOUR_LOCAL:
+                today_str = now.date().isoformat()
+                if get_app_state("weekly_users_last_sent") != today_str:
+                    n = await _send_weekly_users_report()
+                    # помечаем и при n=0 — иначе весь день молотим iiko впустую
+                    set_app_state("weekly_users_last_sent", today_str)
+                    logger.info(f"[weekly_users] отправлено {n} владельцам за {today_str}")
+        except Exception as e:
+            logger.warning(f"[weekly_users] цикл: {e}")
+        await asyncio.sleep(1800)
 
 
 async def _demo_sales_scheduler():
@@ -5617,19 +5816,31 @@ async def salary_override(payload: SalaryOverrideIn, user: Dict = Depends(get_cu
     return {"ok": True}
 
 
+# «к прошлому понедельнику», … — дательный падеж для строки выручки в сводке
+RU_DOW_PREV = ["прошлому понедельнику", "прошлому вторнику", "прошлой среде",
+               "прошлому четвергу", "прошлой пятнице", "прошлой субботе",
+               "прошлому воскресенью"]
+
+
 async def _send_daily_shifts_report() -> bool:
-    """Сводка по сменам всех филиалов за вчера — владельцам в Telegram."""
+    """Сводка по сменам всех филиалов за вчера — владельцам в Telegram.
+    Плюс выручка за вчера против того же дня недели назад (сб к сб, а не к пт —
+    иначе после выходных всегда ложное «падение»)."""
     from database import get_all_restaurants
     rests = get_all_restaurants()
     if not rests:
         return False
-    yesterday = (local_now() - timedelta(days=1)).date().isoformat()
+    yd = (local_now() - timedelta(days=1)).date()
+    yesterday = yd.isoformat()
+    week_ago = (yd - timedelta(days=7)).isoformat()
     by_owner: Dict[int, list] = {}
     for r in rests:
         by_owner.setdefault(r["telegram_id"], []).append(r)
     for tg_id, owner_rests in by_owner.items():
         lines = [f"🌙 <b>Кассовые смены за {yesterday}</b>"]
         problems = 0
+        rev_cur = rev_prev = 0.0
+        got_prev = False
         for r in owner_rests:
             try:
                 info = {"api_login": r["api_login"], "iiko_server": r.get("iiko_server"),
@@ -5644,6 +5855,7 @@ async def _send_daily_shifts_report() -> bool:
                 for s in sessions:
                     diff = float(s.get("cashDiff") or 0)
                     total = float(s.get("payOrders") or 0)
+                    rev_cur += total
                     name = (r.get("organization_name") or "")[:28]
                     if abs(diff) > 0.01:
                         problems += 1
@@ -5651,10 +5863,20 @@ async def _send_daily_shifts_report() -> bool:
                                      f"итого {format_money(total)}, расхождение {format_money(diff)}")
                     else:
                         lines.append(f"✅ {name}: №{s.get('sessionNumber')} — {format_money(total)}")
+                try:
+                    prev_sessions = await _branch_sessions(client, dept, week_ago, week_ago)
+                    rev_prev += sum(float(s.get("payOrders") or 0) for s in prev_sessions)
+                    got_prev = got_prev or bool(prev_sessions)
+                except Exception as e:
+                    logger.warning(f"[daily_shifts] прошлая неделя {r.get('organization_name')}: {e}")
             except Exception as e:
                 logger.warning(f"[daily_shifts] {r.get('organization_name')}: {e}")
         if len(lines) > 1:
             lines.insert(1, f"Проблемных смен: {problems}" if problems else "Все смены без расхождений 👌")
+            rev_line = f"\n💰 Выручка вчера: <b>{format_money(rev_cur)}</b>"
+            if got_prev:
+                rev_line += f"  {_fmt_delta(rev_cur, rev_prev)} к {RU_DOW_PREV[yd.weekday()]}"
+            lines.append(rev_line)
             try:
                 async with httpx.AsyncClient(timeout=15.0) as c:
                     await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
