@@ -4069,13 +4069,14 @@ async def _send_weekly_users_report() -> int:
 
 
 async def _weekly_users_report_scheduler():
-    """Фоновый цикл: по понедельникам после REPORT_HOUR_LOCAL — итоги недели
-    владельцам. app_state-дедупликация переживает рестарты Render."""
+    """Фоновый цикл: в ночь на понедельник (после 00:05) — итоги недели
+    владельцам, как только неделя закрылась. app_state-дедупликация
+    переживает рестарты Render."""
     while True:
         try:
             now = local_now()
-            # weekday(): 0 = понедельник
-            if now.weekday() == 0 and now.hour >= REPORT_HOUR_LOCAL:
+            # weekday(): 0 = понедельник; 00:05 — форы кассам закрыться, как у ночной сводки
+            if now.weekday() == 0 and (now.hour >= 1 or (now.hour == 0 and now.minute >= 5)):
                 today_str = now.date().isoformat()
                 if get_app_state("weekly_users_last_sent") != today_str:
                     n = await _send_weekly_users_report()
