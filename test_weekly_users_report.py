@@ -74,6 +74,19 @@ def test_build_owner_week_text_multi_and_empty():
     print("  [OK] текст: итог по сети, филиал без данных, пустой отчёт → None")
 
 
+def test_dead_branches_hidden():
+    # филиал с нулями обе недели (цех/закрытая точка) скрывается из отчёта
+    dead = _summary("Цех Алпамыс", rev=0, prev_rev=0)
+    text = api._build_owner_week_text(
+        [_summary("Чашка"), dead],
+        "2026-06-29", "2026-07-05", "2026-06-22", "2026-06-28")
+    assert "Цех Алпамыс" not in text and "Чашка" in text
+    # если ВСЕ филиалы пустые — отчёт не шлём вовсе
+    assert api._build_owner_week_text(
+        [dead], "2026-06-29", "2026-07-05", "2026-06-22", "2026-06-28") is None
+    print("  [OK] текст: пустые филиалы скрыты, полностью пустой отчёт → None")
+
+
 def test_cloud_client_no_problems_block():
     # облачный iiko: problems=None → без блока проблем и без «✅ чистые»
     text = api._build_owner_week_text(
@@ -89,5 +102,6 @@ if __name__ == "__main__":
     test_build_owner_week_text_clean()
     test_build_owner_week_text_problems()
     test_build_owner_week_text_multi_and_empty()
+    test_dead_branches_hidden()
     test_cloud_client_no_problems_block()
     print("Все тесты прошли ✅")

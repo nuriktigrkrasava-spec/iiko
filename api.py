@@ -3977,7 +3977,9 @@ async def _branch_week_summary(rest: Dict[str, Any], cur_from: str, cur_to: str,
     diff_shifts, diff_sum, unaccepted, edits, type_changes = 0, 0.0, 0, 0, 0
     for s in cur_s:
         d = float(s.get("cashDiff") or 0)
-        if abs(d) > 0.01:
+        # cashRemain=0 при ненулевом cashDiff = кассир не вводил пересчёт кассы,
+        # расхождение фиктивное (та же логика, что counted в cashshifts_day)
+        if abs(d) > 0.01 and (s.get("cashRemain") or 0) != 0:
             diff_shifts += 1
             diff_sum += d
         if s.get("sessionStatus") != "ACCEPTED":
@@ -4005,13 +4007,18 @@ def _build_owner_week_text(summaries: List[Dict[str, Any]], cur_from: str, cur_t
     lines = [f"📊 <b>Итоги недели</b> ({d(cur_from)}–{d(cur_to)})",
              f"<i>сравнение с прошлой ({d(prev_from)}–{d(prev_to)})</i>", ""]
     tot_cur = tot_prev = 0.0
+    shown = 0
     for b in summaries:
-        lines.append(f"🏢 <b>{b['name']}</b>")
         c = b.get("cur")
+        p = b["prev"]
+        # филиал без оборота обе недели (цех/закрытая точка) — не шумим нулями
+        if c and not c.get("revenue") and not p.get("revenue"):
+            continue
+        lines.append(f"🏢 <b>{b['name']}</b>")
         if not c:
             lines.append("   ⚠️ нет данных\n")
             continue
-        p = b["prev"]
+        shown += 1
         tot_cur += c["revenue"]; tot_prev += p["revenue"]
         lines.append(f"   Выручка: <b>{format_money(c['revenue'])}</b>  "
                      f"{_fmt_delta_money(c['revenue'], p['revenue'])}")
@@ -4037,7 +4044,9 @@ def _build_owner_week_text(summaries: List[Dict[str, Any]], cur_from: str, cur_t
         else:
             lines.append("   ✅ Смены чистые, расхождений нет")
         lines.append("")
-    if sum(1 for b in summaries if b.get("cur")) > 1:
+    if not shown:
+        return None  # все филиалы пустые — не шлём отчёт из одних заголовков
+    if shown > 1:
         lines.append(f"━━━━━━━━━━━━━━\n💰 <b>Итого:</b> {format_money(tot_cur)}  "
                      f"{_fmt_delta_money(tot_cur, tot_prev)}")
     return "\n".join(lines).strip()
@@ -4052,17 +4061,25 @@ async def _owner_week_report(owner_rests: List[Dict[str, Any]]) -> Optional[str]
 
 
 async def _send_weekly_users_report() -> int:
-    """Шлёт понедельничный отчёт каждому владельцу. Возвращает число отправленных."""
+    """Шлёт понедельничный отчёт каждому владельцу + копию оператору
+    (REPORT_RECIPIENT_USERNAME), чтобы видеть, что реально ушло юзерам.
+    Возвращает число отправленных."""
     rests = get_all_restaurants()
     by_owner: Dict[int, list] = {}
     for r in rests:
         by_owner.setdefault(r["telegram_id"], []).append(r)
+    op = get_user_by_username(REPORT_RECIPIENT_USERNAME)
+    op_id = int(op["telegram_id"]) if op and op.get("telegram_id") else 0
     sent = 0
     for tg_id, owner_rests in by_owner.items():
         try:
             text = await _owner_week_report(owner_rests)
             if text and await _tg_send(int(tg_id), text) is not None:
                 sent += 1
+                if op_id and int(tg_id) != op_id:  # свой же отчёт не дублируем
+                    u = get_user(int(tg_id)) or {}
+                    uname = f"@{u['username']}" if u.get("username") else str(tg_id)
+                    await _tg_send(op_id, f"📋 Копия еженедельного отчёта {uname}:\n\n{text}")
         except Exception as e:
             logger.warning(f"[weekly_users] owner {tg_id}: {e}")
     return sent
