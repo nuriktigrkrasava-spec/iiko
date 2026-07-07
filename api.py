@@ -2287,6 +2287,60 @@ async def weekly_user_report_preview(
     return result
 
 
+# ── ВРЕМЕННОЕ: миграция SQLite между хостингами ──
+# Включается ТОЛЬКО env-переменной MIGRATE_TOKEN (fail-closed: без неё 404).
+# dump — целостная копия БД (sqlite backup) на скачивание; restore — принять
+# файл БД и подменить DB_PATH (после restore сервис нужно перезапустить).
+# После переезда: удалить env MIGRATE_TOKEN, затем выпилить этот блок.
+MIGRATE_TOKEN = os.getenv("MIGRATE_TOKEN", "")
+
+
+def _migrate_auth(token: str):
+    if not MIGRATE_TOKEN or not hmac.compare_digest(token.encode(), MIGRATE_TOKEN.encode()):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.get("/api/admin/migrate/dump")
+async def migrate_dump(token: str = Query("")):
+    _migrate_auth(token)
+    import sqlite3 as _sq
+    from database import DB_PATH as _dbp
+    dst = _dbp + ".dump"
+    src = _sq.connect(_dbp)
+    out = _sq.connect(dst)
+    with out:
+        src.backup(out)
+    out.close(); src.close()
+    return FileResponse(dst, filename="db.sqlite",
+                        media_type="application/octet-stream")
+
+
+@app.post("/api/admin/migrate/restore")
+async def migrate_restore(request: Request, token: str = Query("")):
+    _migrate_auth(token)
+    import sqlite3 as _sq
+    from database import DB_PATH as _dbp
+    body = await request.body()
+    if not body.startswith(b"SQLite format 3\x00"):
+        raise HTTPException(status_code=400, detail="not a sqlite db")
+    tmp = _dbp + ".incoming"
+    with open(tmp, "wb") as f:
+        f.write(body)
+    con = _sq.connect(tmp)
+    n = con.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+    con.close()
+    if not n:
+        raise HTTPException(status_code=400, detail="empty db")
+    # хвосты WAL от старого файла не должны примениться к новому
+    for suf in ("-wal", "-shm"):
+        try:
+            os.remove(_dbp + suf)
+        except FileNotFoundError:
+            pass
+    os.replace(tmp, _dbp)
+    return {"ok": True, "tables": n, "bytes": len(body)}
+
+
 @app.get("/api/withdrawals/{org_id}")
 async def withdrawals(org_id: str, period: str = "month", user: Dict = Depends(get_current_user)):
     """Изъятия наличных из кассы (выемка/инкассация) за период."""
