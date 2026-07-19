@@ -1,5 +1,9 @@
 import { useApi } from '../lib/useApi'
-import { Card, Stat, Loading, ErrorBox, SectionTitle } from '../components/ui'
+import {
+  Hero, Metric, MetricRow, Section, DataTable, Loading, ErrorBox,
+} from '../components/ui'
+import type { Column } from '../components/ui'
+import { CHART } from '../lib/chartTheme'
 import { tenge, tengeShort, pct } from '../lib/format'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend,
@@ -12,6 +16,13 @@ type Cmp = {
   cur_year?: number; prev_year?: number
 }
 
+const COLUMNS: Column[] = [
+  { key: 'week', label: 'Неделя' },
+  { key: 'cur', label: 'Этот год', numeric: true },
+  { key: 'prev', label: 'Год назад', numeric: true },
+  { key: 'delta', label: 'Δ', numeric: true },
+]
+
 export default function Comparison() {
   const { data, error, loading } = useApi<Cmp>('comparison')
   if (loading) return <Loading />
@@ -21,7 +32,8 @@ export default function Comparison() {
   const prev = data.weeks.previous
   const curTotal = cur.reduce((a, w) => a + w.total_rev, 0)
   const prevTotal = prev.reduce((a, w) => a + w.total_rev, 0)
-  const deltaPct = prevTotal ? ((curTotal - prevTotal) / prevTotal) * 100 : 0
+  const diff = curTotal - prevTotal
+  const deltaPct = prevTotal ? (diff / prevTotal) * 100 : 0
 
   const chart = cur.map((w, i) => ({
     label: w.label,
@@ -29,65 +41,60 @@ export default function Comparison() {
     'Год назад': prev[i]?.total_rev ?? 0,
   }))
 
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <Stat label={`Этот год${data.cur_year ? ` · ${data.cur_year}` : ''}`} value={tengeShort(curTotal)} />
-        <Stat label={`Прошлый год${data.prev_year ? ` · ${data.prev_year}` : ''}`} value={tengeShort(prevTotal)} />
-        <Stat label="Изменение г/г" value={pct(deltaPct)} delta={deltaPct} accent />
-      </div>
+  const rows = cur.map((w, i) => {
+    const p = prev[i]?.total_rev ?? 0
+    const d = p ? ((w.total_rev - p) / p) * 100 : 0
+    return [
+      w.label,
+      tenge(w.total_rev),
+      <span className="text-ink2">{tenge(p)}</span>,
+      <span className={d >= 0 ? 'text-pos' : 'text-neg'}>{pct(d)}</span>,
+    ]
+  })
 
-      <Card>
-        <SectionTitle hint="выручка по неделям, текущий vs прошлый год">Сравнение год к году</SectionTitle>
+  return (
+    <div>
+      <Hero
+        label="Разница год к году"
+        value={tenge(diff)}
+        delta={deltaPct}
+        note={
+          `Этот год${data.cur_year ? ` (${data.cur_year})` : ''} — ${tengeShort(curTotal)}, ` +
+          `прошлый${data.prev_year ? ` (${data.prev_year})` : ''} — ${tengeShort(prevTotal)}. ` +
+          `Сравниваются одни и те же недели.`
+        }
+      />
+
+      <MetricRow>
+        <Metric label={`Этот год${data.cur_year ? ` · ${data.cur_year}` : ''}`} value={tengeShort(curTotal)} />
+        <Metric label={`Прошлый год${data.prev_year ? ` · ${data.prev_year}` : ''}`} value={tengeShort(prevTotal)} />
+        <Metric label="Изменение г/г" value={pct(deltaPct)} delta={deltaPct} />
+      </MetricRow>
+
+      <Section title="Сравнение год к году" hint="выручка по неделям, текущий против прошлого">
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chart} margin={{ top: 8, right: 4, left: 4, bottom: 0 }} barGap={2}>
-              <CartesianGrid stroke="#232c40" vertical={false} />
-              <XAxis dataKey="label" tick={{ fill: '#8891a6', fontSize: 12 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fill: '#5b6478', fontSize: 11 }} axisLine={false} tickLine={false}
-                tickFormatter={(v) => `${Math.round(v / 1000000)}М`} width={36} />
+              <CartesianGrid stroke={CHART.grid.stroke} vertical={false} />
+              <XAxis dataKey="label" tick={CHART.axis} axisLine={false} tickLine={false} />
+              <YAxis tick={CHART.axis} axisLine={false} tickLine={false}
+                tickFormatter={(v) => `${Math.round(Number(v) / 1000000)}М`} width={36} />
               <Tooltip
-                cursor={{ fill: '#ffffff08' }}
-                contentStyle={{ background: '#111725', border: '1px solid #232c40', borderRadius: 12, color: '#e8ecf4' }}
-                formatter={(v: number) => tenge(v)}
+                cursor={{ fill: CHART.paper2 }}
+                contentStyle={CHART.tooltip}
+                formatter={(value) => tenge(Number(value))}
               />
-              <Legend wrapperStyle={{ fontSize: 12, color: '#8891a6' }} />
-              <Bar dataKey="Год назад" fill="#37415a" radius={[4, 4, 0, 0]} maxBarSize={26} />
-              <Bar dataKey="В этом году" fill="#3b82f6" radius={[4, 4, 0, 0]} maxBarSize={26} />
+              <Legend wrapperStyle={{ fontSize: 11, fontFamily: '"Golos Text", sans-serif', color: CHART.muted }} />
+              <Bar dataKey="Год назад" fill={CHART.muted} maxBarSize={24} />
+              <Bar dataKey="В этом году" fill={CHART.ink} maxBarSize={24} />
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </Card>
+      </Section>
 
-      <Card>
-        <SectionTitle>По неделям</SectionTitle>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-left text-xs uppercase tracking-wider text-muted">
-                <th className="pb-2 font-medium">Неделя</th>
-                <th className="pb-2 text-right font-medium">Этот год</th>
-                <th className="pb-2 text-right font-medium">Год назад</th>
-                <th className="pb-2 text-right font-medium">Δ</th>
-              </tr>
-            </thead>
-            <tbody className="num">
-              {cur.map((w, i) => {
-                const p = prev[i]?.total_rev ?? 0
-                const d = p ? ((w.total_rev - p) / p) * 100 : 0
-                return (
-                  <tr key={w.key} className="border-t border-border/60">
-                    <td className="py-2.5 font-sans text-ink">{w.label}</td>
-                    <td className="py-2.5 text-right text-ink">{tenge(w.total_rev)}</td>
-                    <td className="py-2.5 text-right text-muted">{tenge(p)}</td>
-                    <td className={`py-2.5 text-right ${d >= 0 ? 'text-pos' : 'text-neg'}`}>{pct(d)}</td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+      <Section title="По неделям">
+        <DataTable columns={COLUMNS} rows={rows} />
+      </Section>
     </div>
   )
 }

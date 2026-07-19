@@ -1,55 +1,103 @@
 import { useApi } from '../lib/useApi'
-import { Card, Loading, ErrorBox, SectionTitle, Delta } from '../components/ui'
+import { Grade, Section, DataTable, Loading, ErrorBox, Empty } from '../components/ui'
+import type { Column } from '../components/ui'
 import { num } from '../lib/format'
-import { Star } from 'lucide-react'
 
-type Platform = { platform: string; label: string; rating: number; scale: number; reviews_count: number | null; delta: number | null }
+type Platform = {
+  platform: string; label: string; rating: number; scale: number
+  reviews_count: number | null; delta: number | null
+}
 type Review = { rating: number; text: string; date: string; author: string }
 type Rev = { platforms: Platform[]; reviews: Review[] }
+
+/** Рейтинг площадки → 0–100. 2ГИС на шкале 5, Wolt на шкале 10 — приводим к общему. */
+const norm = (p: Platform) => (p.rating / p.scale) * 100
+
+/** Сводная оценка соцсетей: среднее по площадкам, взвешенное по числу отзывов. */
+function socialScore(platforms: Platform[]): number | null {
+  const scored = platforms.filter((p) => p.rating != null && p.scale)
+  if (scored.length === 0) return null
+  const wsum = scored.reduce((a, p) => a + (p.reviews_count || 1), 0)
+  const acc = scored.reduce((a, p) => a + norm(p) * (p.reviews_count || 1), 0)
+  return Math.round(acc / wsum)
+}
+
+const COLUMNS: Column[] = [
+  { key: 'label', label: 'Площадка' },
+  { key: 'rating', label: 'Рейтинг', numeric: true },
+  { key: 'norm', label: 'Из 100', numeric: true },
+  { key: 'count', label: 'Отзывов', numeric: true },
+  { key: 'delta', label: 'Δ нед.', numeric: true },
+]
 
 export default function Reviews() {
   const { data, error, loading } = useApi<Rev>('reviews')
   if (loading) return <Loading />
   if (error || !data) return <ErrorBox msg={error || 'нет данных'} />
 
-  return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {data.platforms.map((p, i) => (
-          <Card key={i} className="fade-in">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-muted">{p.label}</span>
-              {p.delta != null && <Delta value={p.delta} />}
-            </div>
-            <div className="mt-2 flex items-baseline gap-2">
-              <span className="num text-4xl font-semibold text-accent">{p.rating}</span>
-              <span className="text-sm text-faint">/ {p.scale}</span>
-            </div>
-            {p.reviews_count != null && (
-              <div className="mt-1 text-xs text-faint">{num(p.reviews_count)} отзывов</div>
-            )}
-          </Card>
-        ))}
-      </div>
+  const score = socialScore(data.platforms)
+  const rows = data.platforms.map((p) => [
+    p.label,
+    `${p.rating} / ${p.scale}`,
+    String(Math.round(norm(p))),
+    p.reviews_count != null ? num(p.reviews_count) : '—',
+    p.delta != null
+      ? <span className={p.delta >= 0 ? 'text-pos' : 'text-neg'}>{p.delta >= 0 ? '+' : ''}{p.delta}</span>
+      : '—',
+  ])
 
-      <Card>
-        <SectionTitle hint="голос гостя">Последние отзывы</SectionTitle>
-        <div className="space-y-3">
-          {data.reviews.map((r, i) => (
-            <div key={i} className="rounded-xl border border-border/60 bg-panel2/50 p-3">
-              <div className="mb-1 flex items-center gap-2">
-                <div className="flex">
-                  {Array.from({ length: 5 }).map((_, s) => (
-                    <Star key={s} size={13} className={s < r.rating ? 'fill-accent text-accent' : 'text-border'} />
-                  ))}
-                </div>
-                <span className="text-xs text-faint">{r.date} · {r.author}</span>
-              </div>
-              <div className="text-sm text-ink">{r.text}</div>
-            </div>
-          ))}
+  return (
+    <div>
+      {score != null && (
+        <div className="border-b border-rule py-2">
+          <Grade score={score} label="Оценка соцсетей" />
+          <p className="max-w-lg px-5 pb-4 text-[13px] leading-relaxed text-ink2">
+            Сводный балл голоса гостя по {data.platforms.length}{' '}
+            {plural(data.platforms.length, 'площадке', 'площадкам', 'площадкам')} —
+            2ГИС и Wolt, взвешенно по числу отзывов. Приведён к 100-балльной шкале, чтобы разные площадки сравнивались напрямую.
+          </p>
         </div>
-      </Card>
+      )}
+
+      <Section title="Из чего сложилась оценка" hint="рейтинги площадок и динамика за неделю">
+        {data.platforms.length === 0 ? (
+          <Empty msg="Площадки ещё не подключены" />
+        ) : (
+          <DataTable columns={COLUMNS} rows={rows} />
+        )}
+      </Section>
+
+      <Section title="Голос гостя" hint="свежие отзывы — доказательства за оценкой">
+        {data.reviews.length === 0 ? (
+          <Empty msg="Отзывов пока нет" />
+        ) : (
+          <div>
+            {data.reviews.map((r, i) => (
+              <div key={i} className="border-b border-rule py-4 last:border-b-0">
+                <div className="mb-1.5 flex items-center gap-2">
+                  <span className="tnum text-[13px] font-semibold text-ink">{stars(r.rating)}</span>
+                  <span className="text-[11px] text-muted">{r.date} · {r.author}</span>
+                </div>
+                <div className="text-[13px] leading-relaxed text-ink">{r.text}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Section>
     </div>
   )
+}
+
+/** ★★★★☆ по рейтингу 0–5. */
+function stars(rating: number): string {
+  const full = Math.round(rating)
+  return '★'.repeat(full) + '☆'.repeat(Math.max(0, 5 - full))
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10
+  const m100 = n % 100
+  if (m10 === 1 && m100 !== 11) return one
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few
+  return many
 }

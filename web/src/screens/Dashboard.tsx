@@ -1,6 +1,7 @@
 import { useApi } from '../lib/useApi'
 import type { Period } from '../lib/api'
-import { Card, Stat, Loading, ErrorBox, SectionTitle } from '../components/ui'
+import { Hero, Metric, MetricRow, Section, Loading, ErrorBox } from '../components/ui'
+import { CHART } from '../lib/chartTheme'
 import { tenge, tengeShort, num } from '../lib/format'
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Cell,
@@ -21,60 +22,50 @@ export default function Dashboard({ period }: { period: Period }) {
 
   const chart = data.chart_7days.labels.map((l, i) => ({ day: l, rev: data.chart_7days.data[i] }))
   const maxRev = Math.max(...data.chart_7days.data)
+  const avg7 = Math.round(
+    data.chart_7days.data.reduce((a, b) => a + b, 0) / data.chart_7days.data.length,
+  )
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Stat label="Выручка" value={tenge(data.revenue_today)} delta={data.revenue_change} />
-        <Stat label="Средний чек" value={tenge(data.avg_check)} delta={data.avg_check_change} />
-        <Stat label="Гостей" value={num(data.guests)} delta={data.guests_change} />
-        <Stat label="Прогноз месяца" value={tengeShort(data.forecast)} accent />
-      </div>
+    <div>
+      <Hero
+        label="Выручка за период"
+        value={tenge(data.revenue_today)}
+        delta={data.revenue_change}
+        note={`Средняя за 7 дней — ${tenge(avg7)}. Прогноз месяца — ${tengeShort(data.forecast)}.`}
+      />
 
-      <Card>
-        <SectionTitle hint="выручка по кассовым сменам">Динамика за 7 дней</SectionTitle>
+      <MetricRow>
+        <Metric label="Средний чек" value={tenge(data.avg_check)} delta={data.avg_check_change} />
+        <Metric label="Гостей" value={num(data.guests)} delta={data.guests_change} />
+        <Metric label="Открытые заказы" value={num(data.open_orders)} />
+        <Metric label="Прогноз месяца" value={tengeShort(data.forecast)} />
+      </MetricRow>
+
+      <Section title="Динамика за 7 дней" hint="выручка по кассовым сменам">
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chart} margin={{ top: 8, right: 4, left: 4, bottom: 0 }}>
-              <CartesianGrid stroke="#232c40" vertical={false} />
-              <XAxis dataKey="day" tick={{ fill: '#8891a6', fontSize: 12 }} axisLine={false} tickLine={false} />
+              <CartesianGrid stroke={CHART.grid.stroke} vertical={false} />
+              <XAxis dataKey="day" tick={CHART.axis} axisLine={false} tickLine={false} />
               <YAxis
-                tick={{ fill: '#5b6478', fontSize: 11 }} axisLine={false} tickLine={false}
-                tickFormatter={(v) => `${Math.round(v / 1000)}k`} width={40}
+                tick={CHART.axis} axisLine={{ stroke: CHART.rule }} tickLine={false}
+                tickFormatter={(v) => `${Math.round(Number(v) / 1000)}k`} width={40}
               />
               <Tooltip
-                cursor={{ fill: '#ffffff08' }}
-                contentStyle={{ background: '#111725', border: '1px solid #232c40', borderRadius: 12, color: '#e8ecf4' }}
-                formatter={(v: number) => [tenge(v), 'Выручка']}
+                cursor={{ fill: CHART.paper2 }}
+                contentStyle={CHART.tooltip}
+                formatter={(value) => [tenge(Number(value)), 'Выручка']}
               />
-              <Bar dataKey="rev" radius={[6, 6, 0, 0]} maxBarSize={54}>
+              <Bar dataKey="rev" maxBarSize={46}>
                 {chart.map((c, i) => (
-                  <Cell key={i} fill={c.rev === maxRev ? '#f5a524' : '#3b82f6'} />
+                  <Cell key={i} fill={c.rev === maxRev ? CHART.neg : CHART.ink} />
                 ))}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </Card>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <Card className="flex items-center justify-between">
-          <div>
-            <div className="text-xs uppercase tracking-wider text-muted">Открытые заказы</div>
-            <div className="num mt-1 text-2xl font-semibold">{data.open_orders}</div>
-          </div>
-          <div className="text-xs text-faint">сейчас в работе</div>
-        </Card>
-        <Card className="flex items-center justify-between">
-          <div>
-            <div className="text-xs uppercase tracking-wider text-muted">Средняя за 7 дней</div>
-            <div className="num mt-1 text-2xl font-semibold">
-              {tenge(Math.round(data.chart_7days.data.reduce((a, b) => a + b, 0) / data.chart_7days.data.length))}
-            </div>
-          </div>
-          <div className="text-xs text-faint">выручка/день</div>
-        </Card>
-      </div>
+      </Section>
     </div>
   )
 }

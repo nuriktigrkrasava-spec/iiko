@@ -26,7 +26,7 @@ const SCREENS: Screen[] = [
   { id: 'yoy',    label: 'Год к году', group: 'Деньги',    periodic: false, render: () => <Comparison /> },
   { id: 'shifts', label: 'Смены',      group: 'Операции',  periodic: true,  render: (p) => <Shifts period={p} /> },
   { id: 'anom',   label: 'Аномалии',   group: 'Операции',  periodic: true,  render: (p) => <Anomalies period={p} /> },
-  { id: 'rev',    label: 'Отзывы',     group: 'Оценки',    periodic: false, render: () => <Reviews /> },
+  { id: 'rev',    label: 'Соцсети',    group: 'Оценки',    periodic: false, render: () => <Reviews /> },
 ]
 
 const GROUPS = ['Сводка', 'Деньги', 'Операции', 'Оценки']

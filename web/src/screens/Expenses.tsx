@@ -1,11 +1,20 @@
 import { useApi } from '../lib/useApi'
 import type { Period } from '../lib/api'
-import { Card, Stat, Loading, ErrorBox, SectionTitle, Bar as MiniBar } from '../components/ui'
-import { tenge } from '../lib/format'
+import {
+  Hero, Metric, MetricRow, Section, DataTable, MiniBar, Loading, ErrorBox, Empty,
+} from '../components/ui'
+import type { Column } from '../components/ui'
+import { tenge, num } from '../lib/format'
 
 type Op = { name: string; cat: string; date: string; kassa: string; amount: number }
 type Cat = { name: string; amount: number }
 type Exp = { total: number; operations: Op[]; categories: Cat[] }
+
+const OP_COLUMNS: Column[] = [
+  { key: 'cat', label: 'Статья' },
+  { key: 'where', label: 'Дата · касса' },
+  { key: 'amount', label: 'Сумма', numeric: true },
+]
 
 export default function Expenses({ period }: { period: Period }) {
   const { data, error, loading } = useApi<Exp>('expenses', { period })
@@ -14,46 +23,58 @@ export default function Expenses({ period }: { period: Period }) {
 
   const cats = [...data.categories].sort((a, b) => b.amount - a.amount)
   const maxCat = Math.max(...cats.map((c) => c.amount), 1)
+  const topShare = data.total > 0 && cats[0] ? (cats[0].amount / data.total) * 100 : 0
+
+  const opRows = data.operations.map((o) => [
+    o.cat || o.name,
+    <span className="text-ink2">{o.date} · {o.kassa}</span>,
+    tenge(o.amount),
+  ])
 
   return (
-    <div className="space-y-6">
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
-        <Stat label="Всего расходов" value={tenge(data.total)} accent />
-        <Stat label="Категорий" value={String(cats.length)} />
-        <Stat label="Операций" value={String(data.operations.length)} />
-      </div>
+    <div>
+      <Hero
+        label="Расходы за период"
+        value={tenge(data.total)}
+        note={
+          cats[0]
+            ? `Крупнейшая статья — «${cats[0].name}», ${tenge(cats[0].amount)} (${topShare.toFixed(0)}% всех расходов). ` +
+              `Всего ${cats.length} статей, ${data.operations.length} операций.`
+            : undefined
+        }
+      />
 
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card>
-          <SectionTitle hint="доля в общих расходах">Категории</SectionTitle>
+      <MetricRow>
+        <Metric label="Всего расходов" value={tenge(data.total)} />
+        <Metric label="Статей" value={num(cats.length)} />
+        <Metric label="Операций" value={num(data.operations.length)} />
+      </MetricRow>
+
+      <Section title="Категории" hint="доля в общих расходах">
+        {cats.length === 0 ? (
+          <Empty msg="Расходов за период нет" />
+        ) : (
           <div className="space-y-4">
             {cats.map((c, i) => (
               <div key={i}>
-                <div className="mb-1 flex items-baseline justify-between">
-                  <span className="text-sm text-ink">{c.name}</span>
-                  <span className="num text-sm text-muted">{tenge(c.amount)}</span>
+                <div className="mb-1.5 flex items-baseline justify-between">
+                  <span className="text-[13px] text-ink">{c.name}</span>
+                  <span className="tnum text-[13px] text-ink2">{tenge(c.amount)}</span>
                 </div>
-                <MiniBar value={c.amount} max={maxCat} tone={i === 0 ? 'accent' : 'primary'} />
+                <MiniBar value={c.amount} max={maxCat} tone={i === 0 ? 'neg' : 'ink'} />
               </div>
             ))}
           </div>
-        </Card>
+        )}
+      </Section>
 
-        <Card>
-          <SectionTitle>Последние операции</SectionTitle>
-          <div className="space-y-1">
-            {data.operations.map((o, i) => (
-              <div key={i} className="flex items-center justify-between border-b border-border/50 py-2 last:border-0">
-                <div>
-                  <div className="text-sm text-ink">{o.cat || o.name}</div>
-                  <div className="text-xs text-faint">{o.date} · {o.kassa}</div>
-                </div>
-                <div className="num text-sm text-ink">{tenge(o.amount)}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
-      </div>
+      <Section title="Последние операции">
+        {data.operations.length === 0 ? (
+          <Empty msg="Операций нет" />
+        ) : (
+          <DataTable columns={OP_COLUMNS} rows={opRows} />
+        )}
+      </Section>
     </div>
   )
 }

@@ -31,14 +31,14 @@ body {
 }
 
 /* Цифры в таблицах: моноширинные, колонки выстраиваются столбиком */
-.tnum {
+@utility tnum {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
 
 /* Подпись капсом — повторяется на каждом экране */
-.eyebrow {
+@utility eyebrow {
   font-size: 9px;
   letter-spacing: 0.11em;
   text-transform: uppercase;
