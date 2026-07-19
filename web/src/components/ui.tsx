@@ -31,7 +31,7 @@ export function Delta({ value, invert = false }: {
   const arrow = value === 0 ? '' : value > 0 ? '▲' : '▼'
   return (
     <span className={`text-xs font-semibold ${tone}`}>
-      {arrow} {pct(Math.abs(value), false)}
+      {arrow && `${arrow} `}{pct(Math.abs(value), false)}
     </span>
   )
 }
@@ -82,6 +82,11 @@ export type Column = {
   numeric?: boolean
 }
 
+/** Выравнивание колонки: явный `align`, иначе вправо для числовых, иначе влево. */
+function colAlign(c?: Column): 'left' | 'right' {
+  return c?.align ?? (c?.numeric ? 'right' : 'left')
+}
+
 export function DataTable({ columns, rows }: { columns: Column[]; rows: ReactNode[][] }) {
   return (
     <div className="overflow-x-auto">
@@ -91,7 +96,7 @@ export function DataTable({ columns, rows }: { columns: Column[]; rows: ReactNod
             {columns.map((c) => (
               <th
                 key={c.key}
-                className={`eyebrow pb-2 ${c.numeric || c.align === 'right' ? 'text-right' : 'text-left'}`}
+                className={`eyebrow pb-2 ${colAlign(c) === 'right' ? 'text-right' : 'text-left'}`}
               >
                 {c.label}
               </th>
@@ -103,11 +108,12 @@ export function DataTable({ columns, rows }: { columns: Column[]; rows: ReactNod
             <tr key={i} className="border-b border-rule last:border-b-0">
               {row.map((cell, j) => {
                 const c = columns[j]
-                const numeric = c?.numeric || c?.align === 'right'
+                const numeric = !!c?.numeric
+                const align = colAlign(c)
                 return (
                   <td
                     key={j}
-                    className={`py-2.5 ${numeric ? 'tnum text-right' : 'text-left text-ink'}`}
+                    className={`py-2.5 ${align === 'right' ? 'text-right' : 'text-left'} ${numeric ? 'tnum' : 'text-ink'}`}
                   >
                     {cell}
                   </td>
