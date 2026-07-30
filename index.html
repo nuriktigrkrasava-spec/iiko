@@ -1483,7 +1483,7 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     </div>
     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
       <input type="date" id="cs-date" style="background:var(--card);color:var(--text);border:1px solid var(--divider);border-radius:10px;padding:8px 10px;font-size:14px;"
-             onchange="loadCashshifts(); loadSalary();">
+             onchange="loadCashshifts(); loadSchedule();">
       <span style="font-size:12px;color:var(--text-secondary);">смены и расхождения за день</span>
     </div>
   </div>
@@ -1500,14 +1500,14 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="card" style="margin-top:16px;">
       <div class="card-header">
         <div>
-          <div class="card-title">Зарплата · часы из iiko</div>
-          <div class="card-subtitle">за выбранную дату · тап по ставке или итогу — изменить</div>
+          <div class="card-title">Расписание</div>
+          <div class="card-subtitle">план на день · факт из явок iiko · тап по «плану» — задать смену</div>
         </div>
       </div>
 
       <div class="table-container">
-        <table class="data-table" id="salary-table">
-          <thead><tr><th>Сотрудник</th><th style="text-align:right">Часы</th><th style="text-align:right">Ставка</th><th style="text-align:right">Итого</th></tr></thead>
+        <table class="data-table" id="schedule-table">
+          <thead><tr><th>Сотрудник</th><th>План</th><th style="text-align:right">Факт</th><th style="text-align:right">Статус</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -1915,7 +1915,7 @@ function switchTab(tab) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
   document.getElementById('screen-' + tab).classList.add('active');
-  if (tab === 'cashshifts') { loadCashshifts(); loadSalary(); loadPendingShifts(); }
+  if (tab === 'cashshifts') { loadCashshifts(); loadSchedule(); loadPendingShifts(); }
   const navItems = document.querySelectorAll('.nav-item');
   const tabMap = { main: 0, sales: 1, staff: 2, expenses: 3, comparison: 4, cashshifts: 5 };
   if (navItems[tabMap[tab]]) navItems[tabMap[tab]].classList.add('active');
@@ -2748,7 +2748,7 @@ function togglePending() {
 
 function openShiftDate(date) {
   document.getElementById('cs-date').value = date;
-  loadCashshifts(); loadSalary();
+  loadCashshifts(); loadSchedule();
 }
 
 function showZReport(i) {
@@ -2829,6 +2829,62 @@ async function setRate(employeeId, current) {
   if (v === null) return;
   await apiPost('/api/salary/rate', { org_id: csOrgId(), employee_id: employeeId, rate: +v || 0 });
   loadSalary();
+}
+
+// ============ РАСПИСАНИЕ (план у нас + факт из явок iiko) ============
+// План (расписание) — localStorage: одна плановая смена на (сотрудник, день).
+const SCHED_KEY = 'iiko.schedule.v1';
+function schedRead() { try { return JSON.parse(localStorage.getItem(SCHED_KEY) || '{}'); } catch { return {}; } }
+function schedWrite(o) { try { localStorage.setItem(SCHED_KEY, JSON.stringify(o)); } catch (e) {} }
+function planFor(eid, date) { return schedRead()[eid + '|' + date] || null; }
+function schedMin(t) { const p = t.split(':'); return (+p[0]) * 60 + (+p[1]); }
+function schedStatus(plan, fact) {
+  if (!plan && fact) return { t: 'Вне графика', c: 'var(--text-secondary)', over: 0 };
+  if (plan && !fact) return { t: 'Прогул', c: '#ff453a', over: 0 };
+  if (!plan || !fact) return { t: '—', c: 'var(--text-secondary)', over: 0 };
+  const late = Math.max(0, schedMin(fact.start) - schedMin(plan.start));
+  const over = Math.max(0, schedMin(fact.end) - schedMin(plan.end));
+  if (late > 5) return { t: 'Опоздание ' + late + ' мин', c: '#ff9f0a', over: over };
+  return { t: 'Вовремя', c: '#30d158', over: over };
+}
+async function loadSchedule() {
+  if (!state.restaurant) return;
+  const dateEl = document.getElementById('cs-date');
+  if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
+  const day = dateEl.value;
+  const tbody = document.querySelector('#schedule-table tbody');
+  tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
+  const d = await apiGet('/api/attendance/' + csOrgId() + '?from=' + day + '&to=' + day).catch(function () { return null; });
+  if (!d || !d.employees) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">⚠️ Явки доступны только на самохостед iiko</td></tr>'; return; }
+  const factByEmp = {};
+  (d.rows || []).forEach(function (r) { factByEmp[r.employee_id] = r; });
+  tbody.innerHTML = d.employees.map(function (e) {
+    const plan = planFor(e.id, day);
+    const fact = factByEmp[e.id] || null;
+    const st = schedStatus(plan, fact);
+    const planTxt = plan ? (plan.start + '–' + plan.end) : '+ задать';
+    const factTxt = fact ? (fact.start + '–' + fact.end) : '—';
+    return '<tr>' +
+      '<td class="name">' + escHtml(e.name) + '</td>' +
+      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + e.id + '\',\'' + day + '\')">' + planTxt + '</td>' +
+      '<td class="num">' + factTxt + '</td>' +
+      '<td class="num" style="color:' + st.c + ';font-weight:600">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="4" style="color:var(--text-secondary)">Нет сотрудников</td></tr>';
+}
+function setPlan(eid, date) {
+  const cur = planFor(eid, date);
+  const v = prompt('Смена (напр. 10:00-18:00), пусто — убрать:', cur ? (cur.start + '-' + cur.end) : '');
+  if (v === null) return;
+  const o = schedRead(); const key = eid + '|' + date; const t = v.trim();
+  if (!t) { delete o[key]; }
+  else {
+    const m = t.match(/^(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})$/);
+    if (!m) { showToast('Формат: 10:00-18:00'); return; }
+    o[key] = { employeeId: eid, date: date, start: m[1], end: m[2] };
+  }
+  schedWrite(o);
+  loadSchedule();
 }
 
 async function loadClients() {

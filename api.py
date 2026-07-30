@@ -5788,6 +5788,109 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
     return resp
 
 
+def _attendance_journal(attendance: List[Dict[str, Any]],
+                        employees: Dict[str, str],
+                        org_name: str = "") -> List[Dict[str, Any]]:
+    """Явки iiko → строки приход/уход по (сотрудник, день). Пересекающиеся
+    интервалы (задвоенные роли на терминале) сливаются, чтобы часы не удваивались.
+    Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours."""
+    by_emp_day: Dict[Any, list] = {}
+    for a in attendance:
+        if org_name and a.get("departmentName") != org_name:
+            continue
+        try:
+            df = datetime.fromisoformat(a["dateFrom"])
+            dt_ = datetime.fromisoformat(a["dateTo"])
+        except Exception:
+            continue
+        if dt_ <= df:
+            continue
+        by_emp_day.setdefault((a["employeeId"], df.date()), []).append((df, dt_))
+    rows: List[Dict[str, Any]] = []
+    for (eid, _day), ivs in by_emp_day.items():
+        ivs.sort()
+        merged = [list(ivs[0])]
+        for df, dt_ in ivs[1:]:
+            if df <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], dt_)
+            else:
+                merged.append([df, dt_])
+        for a0, b0 in merged:
+            rows.append({
+                "employee_id": eid,
+                "name": employees.get(eid, eid[:8]),
+                "date": a0.date().isoformat(),
+                "start": a0.strftime("%H:%M"),
+                "end": b0.strftime("%H:%M"),
+                "hours": round((b0 - a0).total_seconds() / 3600, 2),
+            })
+    rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
+    return rows
+
+
+# Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.
+_DEMO_TEAM = [
+    {"id": "d1", "name": "Виктория Ким", "start": "10:00", "end": "18:00"},
+    {"id": "d2", "name": "Артём Волков", "start": "12:00", "end": "20:00"},
+    {"id": "d3", "name": "Асан Нуров", "start": "09:00", "end": "17:00"},
+]
+
+
+def _demo_attendance(from_: str, to: str) -> Dict[str, Any]:
+    """Детерминированный журнал явок за период: будни, лёгкие опоздания и редкая
+    переработка — чтобы «план vs факт» в мини-аппе было что показать."""
+    def _hm(t: str) -> int:
+        h, m = t.split(":"); return int(h) * 60 + int(m)
+    try:
+        d0 = datetime.fromisoformat(from_[:10]).date()
+        d1 = datetime.fromisoformat(to[:10]).date()
+    except Exception:
+        d1 = local_now().date(); d0 = d1 - timedelta(days=6)
+    rows: List[Dict[str, Any]] = []
+    day = d0
+    while day <= d1:
+        if day.weekday() != 6:  # без воскресенья
+            for i, m in enumerate(_DEMO_TEAM):
+                late = (day.toordinal() * 7 + i * 5) % 13  # 0..12 мин
+                sh = int(m["start"][:2])
+                start = f"{sh:02d}:{late:02d}"
+                eh, em = int(m["end"][:2]), int(m["end"][3:])
+                over = (day.toordinal() + i) % 4 == 0
+                end = f"{(eh + (1 if over else 0)):02d}:{em:02d}"
+                rows.append({
+                    "employee_id": m["id"], "name": m["name"],
+                    "date": day.isoformat(), "start": start, "end": end,
+                    "hours": round((_hm(end) - _hm(start)) / 60, 2),
+                })
+        day += timedelta(days=1)
+    rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
+    return {"employees": [{"id": m["id"], "name": m["name"]} for m in _DEMO_TEAM],
+            "rows": rows}
+
+
+@app.get("/api/attendance/{org_id}")
+async def attendance(org_id: str,
+                     from_: str = Query(..., alias="from"), to: str = Query(...),
+                     user: Dict = Depends(get_current_user)):
+    """Журнал явок (факт из iiko) + список сотрудников для расписания.
+    План (расписание) хранится на стороне клиента — здесь только факт."""
+    if _use_demo_data(user, org_id):
+        return _demo_attendance(from_, to)
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_attendance"):
+        raise HTTPException(status_code=400, detail="Явки доступны только на самохостед iiko")
+    att, employees = await asyncio.gather(
+        client.get_attendance(from_, to),
+        client.get_employees_map(),
+    )
+    rows = _attendance_journal(att, employees, info.get("org_name", ""))
+    emp_list = [{"id": eid, "name": name}
+                for eid, name in sorted(employees.items(), key=lambda x: x[1])]
+    return {"employees": emp_list, "rows": rows}
+
+
 @app.get("/api/salary/{org_id}")
 async def salary(org_id: str, response: Response,
                  from_: str = Query(..., alias="from"), to: str = Query(...),
