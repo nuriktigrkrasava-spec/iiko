@@ -5891,12 +5891,13 @@ async def attendance(org_id: str,
                    info.get("org_name", ""), len(att), len(rows), len(employees),
                    min([r["date"] for r in rows], default="-"), max([r["date"] for r in rows], default="-"))
     try:
-        _ft = (local_now().date() + timedelta(days=1)).isoformat()
-        _tt = (local_now().date() + timedelta(days=14)).isoformat()
+        _ft = local_now().date().isoformat()
+        _tt = (local_now().date() + timedelta(days=21)).isoformat()
         _fut = await client.get_attendance(_ft, _tt)
         _futf = _attendance_journal(_fut, employees, info.get("org_name", ""))
-        logger.warning("[sched-diag] future %s..%s raw=%d after_filter=%d sample=%s",
-                       _ft, _tt, len(_fut), len(_futf), _futf[:2])
+        logger.warning("[sched-diag] future %s..%s raw=%d after_filter=%d futdepts=%s sample=%s",
+                       _ft, _tt, len(_fut), len(_futf),
+                       list({a.get("departmentName") for a in _fut})[:20], _fut[:1])
     except Exception as _e:
         logger.warning("[sched-diag] future check failed: %s", _e)
     # роспись филиала = сотрудники, у кого есть явки в этом филиале за период
