@@ -5886,6 +5886,10 @@ async def attendance(org_id: str,
         client.get_employees_map(),
     )
     rows = _attendance_journal(att, employees, info.get("org_name", ""))
+    # ДИАГНОСТИКА (временно): почему бывает пусто — сверяем org_name с departmentName явок
+    logger.warning("[attendance-diag] org_name=%r raw_att=%d depts=%s after_filter=%d emp_map=%d",
+                   info.get("org_name", ""), len(att),
+                   list({a.get("departmentName") for a in att})[:12], len(rows), len(employees))
     # роспись филиала = сотрудники, у кого есть явки в этом филиале за период
     branch_ids = {r["employee_id"] for r in rows}
     emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
