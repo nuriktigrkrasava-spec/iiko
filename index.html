@@ -2855,10 +2855,11 @@ async function loadSchedule() {
   const tbody = document.querySelector('#schedule-table tbody');
   tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-secondary)">Загрузка…</td></tr>';
   const org = csOrgId();
-  // Роспись филиала за 30 дней (кто вообще работает) + зарплата за выбранный день.
+  // Окно −30…+21: прошлое = факт из явок, будущее = плановый график iiko.
   const from30 = new Date(new Date(day).getTime() - 30 * 864e5).toISOString().slice(0, 10);
+  const to21 = new Date(new Date(day).getTime() + 21 * 864e5).toISOString().slice(0, 10);
   const res = await Promise.all([
-    apiGet('/api/attendance/' + org + '?from=' + from30 + '&to=' + day).catch(function () { return null; }),
+    apiGet('/api/attendance/' + org + '?from=' + from30 + '&to=' + to21).catch(function () { return null; }),
     apiGet('/api/salary/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; })
   ]);
   const att = res[0], sal = res[1];
@@ -2878,8 +2879,10 @@ async function loadSchedule() {
     var shiftCell;
     if (fact) {
       const st = plan ? schedStatus(plan, fact) : null;
-      shiftCell = '<td class="num">' + fact.start + '–' + fact.end +
-        (st && st.t !== '—' ? '<div style="font-size:11px;color:' + st.c + '">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</div>' : '') + '</td>';
+      const tag = day > todayStr
+        ? '<div style="font-size:11px;color:var(--text-secondary)">график</div>'
+        : (st && st.t !== '—' ? '<div style="font-size:11px;color:' + st.c + '">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</div>' : '');
+      shiftCell = '<td class="num">' + fact.start + '–' + fact.end + tag + '</td>';
     } else if (plan) {
       shiftCell = '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + e.id + '\',\'' + day + '\')">' + plan.start + '–' + plan.end + '<div style="font-size:11px;color:var(--text-secondary)">план</div></td>';
     } else if (day >= todayStr) {

@@ -5881,26 +5881,23 @@ async def attendance(org_id: str,
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
     if not hasattr(client, "get_attendance"):
         raise HTTPException(status_code=400, detail="Явки доступны только на самохостед iiko")
-    att, employees = await asyncio.gather(
-        client.get_attendance(from_, to),
-        client.get_employees_map(),
-    )
+    today = local_now().date().isoformat()
+    calls = [client.get_attendance(from_, to), client.get_employees_map()]
+    # Плановый график iiko отдаётся только при запросе С СЕГОДНЯ вперёд. Если период
+    # захватывает будущее — тянем плановые смены отдельно и мержим (dedupe).
+    want_future = to >= today
+    if want_future:
+        calls.append(client.get_attendance(today, to))
+    results = await asyncio.gather(*calls)
+    att, employees = results[0], results[1]
+    if want_future:
+        seen = {(a.get("employeeId"), a.get("dateFrom")) for a in att}
+        for a in results[2]:
+            k = (a.get("employeeId"), a.get("dateFrom"))
+            if k not in seen:
+                att.append(a); seen.add(k)
     rows = _attendance_journal(att, employees, info.get("org_name", ""))
-    # ДИАГНОСТИКА (временно): сверяем org_name с departmentName + есть ли ПЛАНОВЫЕ явки на будущее
-    logger.warning("[attendance-diag] org_name=%r raw_att=%d after_filter=%d emp_map=%d dates=%s..%s",
-                   info.get("org_name", ""), len(att), len(rows), len(employees),
-                   min([r["date"] for r in rows], default="-"), max([r["date"] for r in rows], default="-"))
-    try:
-        _ft = local_now().date().isoformat()
-        _tt = (local_now().date() + timedelta(days=21)).isoformat()
-        _fut = await client.get_attendance(_ft, _tt)
-        _futf = _attendance_journal(_fut, employees, info.get("org_name", ""))
-        logger.warning("[sched-diag] future %s..%s raw=%d after_filter=%d futdepts=%s sample=%s",
-                       _ft, _tt, len(_fut), len(_futf),
-                       list({a.get("departmentName") for a in _fut})[:20], _fut[:1])
-    except Exception as _e:
-        logger.warning("[sched-diag] future check failed: %s", _e)
-    # роспись филиала = сотрудники, у кого есть явки в этом филиале за период
+    # роспись филиала = сотрудники, у кого есть явки/график в этом филиале за период
     branch_ids = {r["employee_id"] for r in rows}
     emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
     emp_list.sort(key=lambda x: x["name"])
