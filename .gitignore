@@ -36,3 +36,9 @@ Thumbs.db
 
 # визуальный компаньон brainstorming
 .superpowers/
+
+# scratch/preview артефакты (Этап 1)
+/*.png
+/scratch_*.log
+/app-build.html
+.playwright-mcp/

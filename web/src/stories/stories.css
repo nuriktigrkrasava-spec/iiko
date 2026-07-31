@@ -1,0 +1,152 @@
+/* Сторис — собственная тёмная сцена. themeParams игнорируется: это контент,
+   как видеоплеер, а не хром. Палитра и свет — из референса «ночной квартал»
+   (miniapp/theme.css, класс .night): тёплый почти-чёрный, свет изнутри.
+   Единственный эффект сцены — тональное свечение из глубины кадра.
+   Компоновка по споке: сверху мелко место, внизу огромное число. */
+
+@import url('https://fonts.googleapis.com/css2?family=Onest:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap');
+@import '../miniapp/theme.css';
+
+.st-root {
+  --font: var(--font-ui);
+  --mono: var(--font-money);
+
+  position: fixed; inset: 0;
+  background: var(--field);
+  color: var(--ink);
+  font-family: var(--font);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  /* safe-area: вырезы и скругления, особенно в fullscreen */
+  padding: max(14px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+           max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  display: flex; flex-direction: column;
+  user-select: none;
+}
+
+/* свет изнутри — окна референса. Один слой, меняется тоном кадра */
+.st-root::before {
+  content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background: var(--glow-life);
+  transition: opacity var(--dur-in) var(--ease-out);
+}
+.st-root[data-tone="loss"]::before { background: var(--glow-loss); }
+.st-root[data-tone="gain"]::before { background: var(--glow-gain); }
+.st-root[data-tone="neutral"]::before { background: var(--glow-life); }
+
+.tnum { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ── сегменты прогресса: тихие, тёплые ─────────────────────────────────── */
+.st-segs { display: flex; gap: 5px; height: 2px; flex: 0 0 auto; z-index: 3; }
+.st-seg { flex: 1; border-radius: 1px; background: var(--rule); overflow: hidden; }
+.st-seg.done { background: var(--life-dim); }
+.st-seg.now { background: var(--life-dim); position: relative; }
+.st-seg.now::after {
+  content: ""; position: absolute; inset: 0; background: var(--rule);
+  transform-origin: right; animation: seg-fill .35s var(--ease-out) both;
+}
+@keyframes seg-fill { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+
+/* ── кадр: место сверху, событие внизу ─────────────────────────────────── */
+.st-frame {
+  flex: 1 1 auto; z-index: 2;
+  display: flex; flex-direction: column;
+  max-width: 520px; width: 100%; margin: 0 auto;
+  /* кадр — только текст: тапы проходят сквозь него в зоны листания */
+  pointer-events: none;
+  animation: fr-in var(--dur-in) var(--ease-out) both;
+}
+@keyframes fr-in { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+.st-overline {
+  margin-top: 26px;
+  font-size: 12px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--ink-2); font-weight: 500;
+}
+
+/* нижний блок — сюда приходит свет */
+.st-bottom { margin-top: auto; padding-bottom: clamp(16px, 5vh, 44px); }
+
+.st-figure { margin: 0 0 20px; }
+.st-number {
+  font-size: var(--num-xl); font-weight: 500; letter-spacing: var(--num-track);
+  line-height: 1.02; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  display: inline; /* ₸ течёт за последней цифрой, не отрывается */
+}
+.st-number.compact { font-size: var(--num-lg); letter-spacing: -0.03em; }
+.st-number.tone-loss { color: var(--loss); }
+.st-number.tone-gain { color: var(--gain); }
+.st-number.tone-neutral { color: var(--ink); }
+.st-unit {
+  font-style: normal; font-weight: 400; font-size: 0.36em;
+  color: var(--ink-2); letter-spacing: 0; margin-left: 0.18em;
+}
+
+.st-sentence {
+  font-size: 18px; line-height: 1.45; max-width: 26ch; margin: 0;
+  color: var(--ink); font-weight: 400; text-wrap: balance;
+}
+.st-sub {
+  font-size: 14px; line-height: 1.5; max-width: 34ch; margin: 10px 0 0; color: var(--ink-2);
+}
+
+/* ── кадр задач: списочный архетип, другой ритм ────────────────────────── */
+.st-tasks { list-style: none; margin: 0 0 22px; padding: 0; }
+.st-task {
+  display: flex; align-items: baseline; gap: 14px;
+  padding: 16px 0; border-bottom: 1px solid var(--rule);
+}
+.st-task:first-child { border-top: 1px solid var(--rule); }
+.st-task-n { font-size: 12px; color: var(--ink-3); flex: 0 0 auto; }
+.st-task-title { font-size: 16px; line-height: 1.35; color: var(--ink); flex: 1 1 auto; }
+.st-task-amt { font-size: 16px; color: var(--loss); white-space: nowrap; }
+.st-task-amt i { font-style: normal; color: var(--ink-2); font-size: 13px; margin-left: 4px; }
+
+/* ── зоны тапа ──────────────────────────────────────────────────────────── */
+.st-tap {
+  position: absolute; top: 0; bottom: 0; width: 40%;
+  background: none; border: 0; padding: 0; margin: 0; cursor: pointer; z-index: 1;
+  -webkit-tap-highlight-color: transparent;
+}
+.st-tap.left { left: 0; }
+.st-tap.right { right: 0; width: 60%; }
+.st-tap:disabled { cursor: default; }
+.st-tap:focus-visible { outline: 2px solid var(--life); outline-offset: -3px; }
+
+/* ── действия: только браузерный fallback (в TG — родная кнопка) ───────── */
+.st-actions {
+  flex: 0 0 auto; z-index: 3; display: flex; align-items: center; gap: 20px;
+  justify-content: center; padding-top: 10px; min-height: 48px;
+}
+.st-link {
+  font: inherit; font-size: 14px; color: var(--ink-2); background: none; border: 0;
+  min-height: 48px; padding: 0 10px; cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.st-link:hover { color: var(--ink); }
+.st-cta {
+  font: inherit; font-size: 15px; font-weight: 500; color: var(--ink);
+  background: none; cursor: pointer; text-decoration: none;
+  min-height: 48px; padding: 0 22px; display: inline-flex; align-items: center;
+  border: 1px solid var(--rule); border-radius: var(--radius-control);
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.st-cta:hover { border-color: var(--life-dim); }
+.st-cta:active { color: var(--life); }
+.st-link:focus-visible, .st-cta:focus-visible { outline: 2px solid var(--life); outline-offset: 3px; border-radius: var(--radius-control); }
+
+/* ── скелетон ───────────────────────────────────────────────────────────── */
+.st-sk { background: var(--raised); border-radius: 4px; display: inline-block; }
+.st-sk-overline { width: 120px; height: 12px; }
+.st-sk-number { width: 70%; height: 72px; margin-bottom: 24px; }
+.st-sk-line { width: 90%; height: 16px; margin-bottom: 10px; display: block; }
+.st-sk-line.short { width: 55%; }
+
+/* движение отключается полностью */
+@media (prefers-reduced-motion: reduce) {
+  .st-frame, .st-seg.now::after { animation: none; }
+  .st-seg.now::after { display: none; }
+  .st-root::before { transition: none; }
+}
