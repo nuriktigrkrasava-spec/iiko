@@ -5897,10 +5897,20 @@ async def salary(org_id: str, response: Response,
                  user: Dict = Depends(get_current_user)):
     """Часы сотрудников филиала из явок iiko × ставка (хранится у нас)."""
     if _use_demo_data(user, org_id):
+        # согласовано с демо-явками: часы за период × демо-ставка (та же бригада)
+        att = _demo_attendance(from_, to)
+        rates = {"d1": 900, "d2": 800, "d3": 850}
+        agg: Dict[str, Dict[str, Any]] = {}
+        for r in att["rows"]:
+            a = agg.setdefault(r["employee_id"], {"name": r["name"], "hours": 0.0, "days": set()})
+            a["hours"] += r["hours"]; a["days"].add(r["date"])
         return {"rows": [
-            {"employee_id": "d1", "name": "Виктория Ким", "hours": 142.5, "rate": 900, "total": 128250},
-            {"employee_id": "d2", "name": "Артём Волков", "hours": 156.0, "rate": 800, "total": 124800},
-        ]}
+            {"employee_id": eid, "name": v["name"], "hours": round(v["hours"], 1),
+             "days": len(v["days"]), "rate": rates.get(eid, 0),
+             "total": round(v["hours"] * rates.get(eid, 0)),
+             "suspicious": False, "overridden": False}
+            for eid, v in agg.items()
+        ], "period_key": f"demo:{from_}:{to}"}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))

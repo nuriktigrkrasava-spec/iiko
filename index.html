@@ -1500,14 +1500,14 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
     <div class="card" style="margin-top:16px;">
       <div class="card-header">
         <div>
-          <div class="card-title">Расписание</div>
-          <div class="card-subtitle">план на день · факт из явок iiko · тап по «плану» — задать смену</div>
+          <div class="card-title">Расписание и зарплата</div>
+          <div class="card-subtitle">сотрудники филиала · факт из явок iiko · зарплата за день · тап по «плану»/«₸» — изменить</div>
         </div>
       </div>
 
       <div class="table-container">
         <table class="data-table" id="schedule-table">
-          <thead><tr><th>Сотрудник</th><th>План</th><th style="text-align:right">Факт</th><th style="text-align:right">Статус</th></tr></thead>
+          <thead><tr><th>Сотрудник</th><th>План</th><th style="text-align:right">Факт</th><th style="text-align:right">₸ за день</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -2854,23 +2854,32 @@ async function loadSchedule() {
   const day = dateEl.value;
   const tbody = document.querySelector('#schedule-table tbody');
   tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
-  const d = await apiGet('/api/attendance/' + csOrgId() + '?from=' + day + '&to=' + day).catch(function () { return null; });
-  if (!d || !d.employees) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">⚠️ Явки доступны только на самохостед iiko</td></tr>'; return; }
-  const factByEmp = {};
-  (d.rows || []).forEach(function (r) { factByEmp[r.employee_id] = r; });
-  tbody.innerHTML = d.employees.map(function (e) {
-    const plan = planFor(e.id, day);
-    const fact = factByEmp[e.id] || null;
+  const org = csOrgId();
+  // Зарплата уже фильтрует сотрудников по филиалу (departmentName) и даёт часы+₸ —
+  // берём её как список сотрудников; факт-смену подмешиваем из явок.
+  const res = await Promise.all([
+    apiGet('/api/salary/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; }),
+    apiGet('/api/attendance/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; })
+  ]);
+  const sal = res[0], att = res[1];
+  if (!sal || !sal.rows) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">⚠️ Явки доступны только на самохостед iiko</td></tr>'; return; }
+  state._salaryPeriodKey = sal.period_key;
+  const shiftByEmp = {};
+  if (att && att.rows) att.rows.forEach(function (r) { shiftByEmp[r.employee_id] = r; });
+  tbody.innerHTML = sal.rows.map(function (r) {
+    const plan = planFor(r.employee_id, day);
+    const fact = shiftByEmp[r.employee_id] || null;
     const st = schedStatus(plan, fact);
     const planTxt = plan ? (plan.start + '–' + plan.end) : '+ задать';
     const factTxt = fact ? (fact.start + '–' + fact.end) : '—';
+    const stTxt = (st.t && st.t !== '—') ? ('<div style="font-size:11px;color:' + st.c + '">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</div>') : '';
     return '<tr>' +
-      '<td class="name">' + escHtml(e.name) + '</td>' +
-      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + e.id + '\',\'' + day + '\')">' + planTxt + '</td>' +
-      '<td class="num">' + factTxt + '</td>' +
-      '<td class="num" style="color:' + st.c + ';font-weight:600">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</td>' +
+      '<td class="name">' + escHtml(r.name) + '<div style="font-size:11px;color:var(--text-secondary)">' + (r.hours || 0) + ' ч</div></td>' +
+      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + r.employee_id + '\',\'' + day + '\')">' + planTxt + '</td>' +
+      '<td class="num" style="color:' + st.c + '">' + factTxt + stTxt + '</td>' +
+      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setSalaryTotal(\'' + r.employee_id + '\',' + (r.total || 0) + ')">' + formatMoney(r.total || 0) + (r.overridden ? ' ✏️' : '') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="4" style="color:var(--text-secondary)">Нет сотрудников</td></tr>';
+  }).join('') || '<tr><td colspan="4" style="color:var(--text-secondary)">Нет явок за день</td></tr>';
 }
 function setPlan(eid, date) {
   const cur = planFor(eid, date);
