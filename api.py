@@ -5886,8 +5886,10 @@ async def attendance(org_id: str,
         client.get_employees_map(),
     )
     rows = _attendance_journal(att, employees, info.get("org_name", ""))
-    emp_list = [{"id": eid, "name": name}
-                for eid, name in sorted(employees.items(), key=lambda x: x[1])]
+    # роспись филиала = сотрудники, у кого есть явки в этом филиале за период
+    branch_ids = {r["employee_id"] for r in rows}
+    emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
+    emp_list.sort(key=lambda x: x["name"])
     return {"employees": emp_list, "rows": rows}
 
 

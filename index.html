@@ -1501,13 +1501,13 @@ body.ie-mode #splash, body.ie-mode #screen-onboarding { display:none !important;
       <div class="card-header">
         <div>
           <div class="card-title">Расписание и зарплата</div>
-          <div class="card-subtitle">сотрудники филиала · факт из явок iiko · зарплата за день · тап по «плану»/«₸» — изменить</div>
+          <div class="card-subtitle">сотрудники филиала · отработанное — из явок iiko, будущее — «+ задать» · тап по ₸ — ставка</div>
         </div>
       </div>
 
       <div class="table-container">
         <table class="data-table" id="schedule-table">
-          <thead><tr><th>Сотрудник</th><th>План</th><th style="text-align:right">Факт</th><th style="text-align:right">₸ за день</th></tr></thead>
+          <thead><tr><th>Сотрудник</th><th style="text-align:right">Смена</th><th style="text-align:right">₸ за день</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -2821,14 +2821,14 @@ async function setSalaryTotal(employeeId, current) {
   if (v === null) return;
   await apiPost('/api/salary/override', { org_id: csOrgId(), employee_id: employeeId,
     period_key: state._salaryPeriodKey, amount: v.trim() === '' ? null : +v });
-  loadSalary();
+  loadSchedule();
 }
 
 async function setRate(employeeId, current) {
   const v = prompt('Ставка, ₸/час:', current || '');
   if (v === null) return;
   await apiPost('/api/salary/rate', { org_id: csOrgId(), employee_id: employeeId, rate: +v || 0 });
-  loadSalary();
+  loadSchedule();
 }
 
 // ============ РАСПИСАНИЕ (план у нас + факт из явок iiko) ============
@@ -2853,33 +2853,46 @@ async function loadSchedule() {
   if (!dateEl.value) dateEl.value = new Date().toISOString().slice(0, 10);
   const day = dateEl.value;
   const tbody = document.querySelector('#schedule-table tbody');
-  tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Загрузка…</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-secondary)">Загрузка…</td></tr>';
   const org = csOrgId();
-  // Зарплата уже фильтрует сотрудников по филиалу (departmentName) и даёт часы+₸ —
-  // берём её как список сотрудников; факт-смену подмешиваем из явок.
+  // Роспись филиала за 30 дней (кто вообще работает) + зарплата за выбранный день.
+  const from30 = new Date(new Date(day).getTime() - 30 * 864e5).toISOString().slice(0, 10);
   const res = await Promise.all([
-    apiGet('/api/salary/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; }),
-    apiGet('/api/attendance/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; })
+    apiGet('/api/attendance/' + org + '?from=' + from30 + '&to=' + day).catch(function () { return null; }),
+    apiGet('/api/salary/' + org + '?from=' + day + '&to=' + day).catch(function () { return null; })
   ]);
-  const sal = res[0], att = res[1];
-  if (!sal || !sal.rows) { tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">⚠️ Явки доступны только на самохостед iiko</td></tr>'; return; }
-  state._salaryPeriodKey = sal.period_key;
-  const shiftByEmp = {};
-  if (att && att.rows) att.rows.forEach(function (r) { shiftByEmp[r.employee_id] = r; });
-  tbody.innerHTML = sal.rows.map(function (r) {
-    const plan = planFor(r.employee_id, day);
-    const fact = shiftByEmp[r.employee_id] || null;
-    const st = schedStatus(plan, fact);
-    const planTxt = plan ? (plan.start + '–' + plan.end) : '+ задать';
-    const factTxt = fact ? (fact.start + '–' + fact.end) : '—';
-    const stTxt = (st.t && st.t !== '—') ? ('<div style="font-size:11px;color:' + st.c + '">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</div>') : '';
-    return '<tr>' +
-      '<td class="name">' + escHtml(r.name) + '<div style="font-size:11px;color:var(--text-secondary)">' + (r.hours || 0) + ' ч</div></td>' +
-      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + r.employee_id + '\',\'' + day + '\')">' + planTxt + '</td>' +
-      '<td class="num" style="color:' + st.c + '">' + factTxt + stTxt + '</td>' +
-      '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setSalaryTotal(\'' + r.employee_id + '\',' + (r.total || 0) + ')">' + formatMoney(r.total || 0) + (r.overridden ? ' ✏️' : '') + '</td>' +
-      '</tr>';
-  }).join('') || '<tr><td colspan="4" style="color:var(--text-secondary)">Нет явок за день</td></tr>';
+  const att = res[0], sal = res[1];
+  if (!att || !att.employees) { tbody.innerHTML = '<tr><td colspan="3" style="color:var(--text-secondary)">⚠️ Явки доступны только на самохостед iiko</td></tr>'; return; }
+  if (sal && sal.period_key) state._salaryPeriodKey = sal.period_key;
+  const factByEmp = {};
+  (att.rows || []).forEach(function (r) { if (r.date === day) factByEmp[r.employee_id] = r; });
+  const salByEmp = {};
+  ((sal && sal.rows) || []).forEach(function (r) { salByEmp[r.employee_id] = r; });
+  const todayStr = new Date().toISOString().slice(0, 10);
+  tbody.innerHTML = att.employees.map(function (e) {
+    const fact = factByEmp[e.id] || null;
+    const plan = planFor(e.id, day);
+    const s = salByEmp[e.id] || null;
+    // Смена: есть факт → показываем (день уже отработан). Нет → план, иначе на
+    // будущее «+ задать» (составляем только дни без расписания), в прошлом — «—».
+    var shiftCell;
+    if (fact) {
+      const st = plan ? schedStatus(plan, fact) : null;
+      shiftCell = '<td class="num">' + fact.start + '–' + fact.end +
+        (st && st.t !== '—' ? '<div style="font-size:11px;color:' + st.c + '">' + st.t + (st.over ? ' +' + st.over + 'м' : '') + '</div>' : '') + '</td>';
+    } else if (plan) {
+      shiftCell = '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + e.id + '\',\'' + day + '\')">' + plan.start + '–' + plan.end + '<div style="font-size:11px;color:var(--text-secondary)">план</div></td>';
+    } else if (day >= todayStr) {
+      shiftCell = '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setPlan(\'' + e.id + '\',\'' + day + '\')">+ задать</td>';
+    } else {
+      shiftCell = '<td class="num" style="color:var(--text-secondary)">—</td>';
+    }
+    const hours = s ? s.hours : 0;
+    const total = s ? s.total : 0;
+    const rate = s ? s.rate : 0;
+    const salCell = '<td class="num" style="color:var(--blue);cursor:pointer" onclick="setRate(\'' + e.id + '\',' + rate + ')">' + (total ? formatMoney(total) : '—') + '<div style="font-size:11px;color:var(--text-secondary)">' + (rate ? (rate + ' ₸/ч') : 'ставка?') + '</div></td>';
+    return '<tr><td class="name">' + escHtml(e.name) + (hours ? '<div style="font-size:11px;color:var(--text-secondary)">' + hours + ' ч</div>' : '') + '</td>' + shiftCell + salCell + '</tr>';
+  }).join('') || '<tr><td colspan="3" style="color:var(--text-secondary)">Нет сотрудников филиала</td></tr>';
 }
 function setPlan(eid, date) {
   const cur = planFor(eid, date);
