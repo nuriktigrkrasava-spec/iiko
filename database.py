@@ -162,7 +162,7 @@ def init_db():
     """)
     conn.commit()
     # Миграция для существующих БД
-    for col, definition in [("iiko_server", "TEXT DEFAULT NULL"), ("api_password", "TEXT DEFAULT NULL")]:
+    for col, definition in [("iiko_server", "TEXT DEFAULT NULL"), ("api_password", "TEXT DEFAULT NULL"), ("cloud_api_login", "TEXT DEFAULT NULL")]:
         try:
             conn.execute(f"ALTER TABLE restaurants ADD COLUMN {col} {definition}")
             conn.commit()
@@ -526,14 +526,15 @@ def set_app_state(key: str, value: str):
 
 
 def add_restaurant(telegram_id: int, api_login: str, org_id: str, org_name: str,
-                   iiko_server: str = None, api_password: str = None):
+                   iiko_server: str = None, api_password: str = None, cloud_api_login: str = None):
     conn = get_db()
     conn.execute(
         """INSERT INTO restaurants
-           (telegram_id, api_login, organization_id, organization_name, iiko_server, api_password, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+           (telegram_id, api_login, organization_id, organization_name, iiko_server, api_password, cloud_api_login, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (telegram_id, api_login, org_id, org_name, iiko_server,
          encrypt_password(api_password) if api_password else None,
+         encrypt_password(cloud_api_login) if cloud_api_login else None,
          datetime.now().isoformat())
     )
     conn.commit()
@@ -646,6 +647,45 @@ def delete_manual_expense(expense_id: int, org_id: str):
     )
     conn.commit()
     conn.close()
+
+
+# ── Недельный план по типам каналов (вкладка «План») ──
+# Хранение в БД (план доступен на всех устройствах владельца), изоляция по org.
+def _ensure_weekly_plans(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS weekly_plans (
+        organization_id TEXT NOT NULL,
+        ym TEXT NOT NULL,            -- 'YYYY-MM'
+        widx INTEGER NOT NULL,       -- индекс недели в месяце (1..5)
+        ch_type TEXT NOT NULL,       -- 'hall' | 'delivery' | 'agg'
+        planned INTEGER NOT NULL,    -- план по КОЛИЧЕСТВУ заказов
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, ym, widx, ch_type)
+    )""")
+
+
+def set_weekly_plan(org_id: str, ym: str, widx: int, ch_type: str, planned: int):
+    conn = get_db()
+    _ensure_weekly_plans(conn)
+    conn.execute(
+        """INSERT INTO weekly_plans (organization_id, ym, widx, ch_type, planned, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(organization_id, ym, widx, ch_type)
+           DO UPDATE SET planned = excluded.planned, updated_at = excluded.updated_at""",
+        (org_id, ym, int(widx), ch_type, int(planned), datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_weekly_plans(org_id: str, ym: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_weekly_plans(conn)
+    rows = conn.execute(
+        "SELECT widx, ch_type, planned FROM weekly_plans WHERE organization_id = ? AND ym = ?",
+        (org_id, ym)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,

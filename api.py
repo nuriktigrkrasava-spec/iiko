@@ -34,6 +34,7 @@ from database import (
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     wipe_demo_user,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
+    set_weekly_plan, get_weekly_plans,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     get_db, decrypt_password,
@@ -49,6 +50,7 @@ from database import (
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
 import assistant_ai
+import calendar
 from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -6161,6 +6163,94 @@ async def assistant(user: Dict = Depends(get_current_user)):
     signals = await _gather_assistant_signals(user)
     advice = await assistant_ai.advise(signals)
     return {"advice": advice, "count": len(advice), "demo": False}
+
+
+# ── Вкладка «План»: недельный план по типам каналов (КОЛ-ВО заказов) + факт ──
+PLAN_TYPES = ["hall", "delivery", "agg"]
+
+
+def _classify_channel(name: str) -> str:
+    s = (name or "").lower()
+    if any(k in s for k in ("wolt", "glovo", "яндекс", "yandex")):
+        return "agg"
+    if "достав" in s:
+        return "delivery"
+    return "hall"  # «Обычный заказ», зал, вынос, самовывоз
+
+
+def _month_weeks(ym: str) -> List[Dict[str, Any]]:
+    """Месяц 'YYYY-MM' → недели 7-дневными кусками от 1-го числа (widx 1..5)."""
+    y, m = int(ym[:4]), int(ym[5:7])
+    last = calendar.monthrange(y, m)[1]
+    weeks, d, widx = [], 1, 1
+    while d <= last:
+        end = min(d + 6, last)
+        weeks.append({"widx": widx, "from": f"{y:04d}-{m:02d}-{d:02d}", "to": f"{y:04d}-{m:02d}-{end:02d}"})
+        d, widx = end + 1, widx + 1
+    return weeks
+
+
+def _empty_plan_grid(weeks: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    return {str(w["widx"]): {t: 0 for t in PLAN_TYPES} for w in weeks}
+
+
+@app.get("/api/weekplan/{org_id}")
+async def plan_get(org_id: str, month: Optional[str] = None, user: Dict = Depends(get_current_user)):
+    """План (из нашей БД) + факт (кол-во заказов по типам из /api/sales) по неделям месяца."""
+    ym = month or local_now().strftime("%Y-%m")
+    weeks = _month_weeks(ym)
+    if _use_demo_data(user, org_id):
+        plan = {str(w["widx"]): {"hall": 120, "delivery": 60, "agg": 40} for w in weeks}
+        fact = {str(w["widx"]): {"hall": 108, "delivery": 55, "agg": 47} for w in weeks}
+        return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": True}
+
+    real_org = _get_org_id(org_id, user)
+    plan = _empty_plan_grid(weeks)
+    for r in get_weekly_plans(real_org, ym):
+        wk = str(r["widx"])
+        if wk in plan and r["ch_type"] in PLAN_TYPES:
+            plan[wk][r["ch_type"]] = r["planned"]
+
+    fact = _empty_plan_grid(weeks)
+
+    async def _wk_fact(w):
+        f = {t: 0 for t in PLAN_TYPES}
+        try:
+            s = await sales(org_id, "custom", w["from"], w["to"], None, user=user)
+            for c in s.get("channels", []):
+                f[_classify_channel(c.get("name"))] += int(c.get("orders", 0) or 0)
+        except Exception as e:
+            logger.warning(f"[plan] факт неделя {w['widx']} {real_org}: {e!r}")
+        return w["widx"], f
+
+    for widx, f in await asyncio.gather(*(_wk_fact(w) for w in weeks)):
+        fact[str(widx)] = f
+    return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": False}
+
+
+class PlanSetIn(BaseModel):
+    month: str
+    ch_type: str
+    planned: int
+    widx: Optional[int] = None
+    all_weeks: bool = False
+
+
+@app.post("/api/weekplan/{org_id}")
+async def plan_set(org_id: str, payload: PlanSetIn, user: Dict = Depends(get_current_user)):
+    """Сохранить план: одну неделю (widx) или все недели месяца (all_weeks)."""
+    if payload.ch_type not in PLAN_TYPES:
+        raise HTTPException(status_code=400, detail="bad ch_type")
+    real_org = _get_org_id(org_id, user)
+    planned = max(0, int(payload.planned))
+    if payload.all_weeks:
+        for w in _month_weeks(payload.month):
+            set_weekly_plan(real_org, payload.month, w["widx"], payload.ch_type, planned)
+    elif payload.widx is not None:
+        set_weekly_plan(real_org, payload.month, int(payload.widx), payload.ch_type, planned)
+    else:
+        raise HTTPException(status_code=400, detail="widx or all_weeks required")
+    return {"ok": True}
 
 
 # Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.
