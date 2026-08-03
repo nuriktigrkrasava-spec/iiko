@@ -9,6 +9,7 @@ import json
 import csv
 import io
 import re
+import time
 from datetime import datetime, timedelta, date, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
@@ -228,7 +229,10 @@ def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
 async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
     if not x_telegram_init_data:
         if not BOT_TOKEN:
-            return {"id": 0, "username": "dev", "first_name": "Developer"}
+            # dev-режим без Telegram: DEV_TID позволяет действовать как владелец
+            # (видеть его реальные филиалы из локальной БД). По умолчанию 0.
+            dev_tid = int(os.getenv("DEV_TID", "0") or 0)
+            return {"id": dev_tid, "username": "dev", "first_name": "Developer"}
         raise HTTPException(status_code=401, detail="Missing init data")
     user = validate_telegram_init_data(x_telegram_init_data)
     return user
@@ -390,29 +394,42 @@ DEMO_FOODCOST = {
 }
 
 DEMO_EXPENSES = {
-    "total": 674420,
+    "total": 26640000,
     "operations": [
-        {"name": "Маркетинг", "cat": "маркетинг", "date": "25.03.2026", "kassa": "Основная касса", "amount": 20000},
-        {"name": "Услуги специалистов", "cat": "Заплатили охраннику", "date": "23.03.2026",
-         "kassa": "Касса руководства", "amount": 70000},
-        {"name": "Услуги специалистов", "cat": "Зп официантам", "date": "20.03.2026", "kassa": "Касса руководства",
-         "amount": 200000},
+        {"name": "Зарплата официантам и поварам", "cat": "ФОТ (зарплаты)", "date": "25.03.2026", "kassa": "Касса руководства", "amount": 6400000},
+        {"name": "Аренда помещения", "cat": "Аренда", "date": "01.03.2026", "kassa": "Касса руководства", "amount": 4757000},
+        {"name": "Налоги", "cat": "Налоги", "date": "20.03.2026", "kassa": "Касса руководства", "amount": 2854000},
+        {"name": "Роялти франчайзеру", "cat": "Роялти (франшиза)", "date": "05.03.2026", "kassa": "Касса руководства", "amount": 2379000},
+        {"name": "Электричество и вода", "cat": "Коммуналка", "date": "15.03.2026", "kassa": "Основная касса", "amount": 1189000},
+        {"name": "Комиссия эквайринга", "cat": "Эквайринг", "date": "28.03.2026", "kassa": "Основная касса", "amount": 951000},
+        {"name": "Реклама в соцсетях", "cat": "Маркетинг", "date": "22.03.2026", "kassa": "Основная касса", "amount": 951000},
+        {"name": "Хозтовары и уборка", "cat": "Хозрасходы", "date": "18.03.2026", "kassa": "Основная касса", "amount": 714000},
     ],
     "categories": [
-        {"name": "Услуги специалистов", "amount": 270000},
-        {"name": "Хозяйственные расходы", "amount": 150000},
-        {"name": "Маркетинг", "amount": 20000},
-        {"name": "Аренда", "amount": 234420},
+        {"name": "ФОТ (зарплаты)", "amount": 12845000},
+        {"name": "Аренда", "amount": 4757000},
+        {"name": "Налоги", "amount": 2854000},
+        {"name": "Роялти (франшиза)", "amount": 2379000},
+        {"name": "Коммуналка", "amount": 1189000},
+        {"name": "Эквайринг", "amount": 951000},
+        {"name": "Маркетинг", "amount": 951000},
+        {"name": "Хозрасходы", "amount": 714000},
     ]
 }
 
 DEMO_INVOICES = [
-    {"id": "0013", "status": "Проведена", "supplier": "ТОО АгроПром", "date": "08.03.2026", "items": 3,
-     "amount": 279850},
-    {"id": "0014", "status": "Проведена", "supplier": "ТОО МясоОпт", "date": "09.03.2026", "items": 2,
-     "amount": 185000},
-    {"id": "0015", "status": "Проведена", "supplier": "ИП Фермер", "date": "10.03.2026", "items": 2, "amount": 92500},
-    {"id": "0016", "status": "Новая", "supplier": "ТОО АгроПром", "date": "12.03.2026", "items": 1, "amount": 312400},
+    {"id": "0013", "status": "Проведена", "supplier": "ТОО АгроПром", "date": "08.03.2026", "items": 3, "amount": 279850,
+     "positions": [{"name": "Говядина вырезка", "qty": 20, "unit": "кг", "price": 9500, "sum": 190000},
+                   {"name": "Овощи микс", "qty": 45, "unit": "кг", "price": 1300, "sum": 58500},
+                   {"name": "Зелень свежая", "qty": 21, "unit": "кг", "price": 1493, "sum": 31350}]},
+    {"id": "0014", "status": "Проведена", "supplier": "ТОО МясоОпт", "date": "09.03.2026", "items": 2, "amount": 185000,
+     "positions": [{"name": "Куриное филе", "qty": 60, "unit": "кг", "price": 1950, "sum": 117000},
+                   {"name": "Фарш говяжий", "qty": 40, "unit": "кг", "price": 1700, "sum": 68000}]},
+    {"id": "0015", "status": "Проведена", "supplier": "ИП Фермер", "date": "10.03.2026", "items": 2, "amount": 92500,
+     "positions": [{"name": "Молоко 3.2%", "qty": 100, "unit": "л", "price": 450, "sum": 45000},
+                   {"name": "Сыр моцарелла", "qty": 25, "unit": "кг", "price": 1900, "sum": 47500}]},
+    {"id": "0016", "status": "Новая", "supplier": "ТОО АгроПром", "date": "12.03.2026", "items": 1, "amount": 312400,
+     "positions": [{"name": "Стейк рибай (отруб)", "qty": 40, "unit": "кг", "price": 7810, "sum": 312400}]},
 ]
 
 DEMO_WRITEOFFS = {
@@ -850,6 +867,7 @@ class SetupSave(BaseModel):
     organization_name: str
     iiko_server: Optional[str] = None
     api_password: Optional[str] = None
+    cloud_api_login: Optional[str] = None  # ключ iiko Cloud для живого зала/стоп-листов
 
 
 class AIAnalyze(BaseModel):
@@ -919,18 +937,10 @@ async def startup():
 
 
 @app.get("/")
-async def root(request: Request):
+async def root():
     # no-store — иначе Telegram-webview держит старый бандл и не подхватывает
     # новые правки фронта (показывал старую выручку из старого index.html).
-    # app-build.html — собранный одним файлом React-апп «Бумага» (web/, SINGLEFILE=1).
-    # ВАЖНО: редактор накладных живёт в старом index.html и открывается по ?edit=...
-    # Новый апп его пока не содержит — поэтому для ?edit отдаём старый index.html,
-    # чтобы не сломать живой процесс правки накладных. Всё остальное — новый апп.
-    if "edit" in request.query_params and os.path.exists("index.html"):
-        page = "index.html"
-    else:
-        page = "app-build.html" if os.path.exists("app-build.html") else "index.html"
-    return FileResponse(page,
+    return FileResponse("index.html",
                         headers={"Cache-Control": "no-store, must-revalidate"})
 
 
@@ -989,9 +999,19 @@ async def setup_save(payload: SetupSave, user: Dict = Depends(get_current_user))
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     add_restaurant(tid, payload.api_login, payload.organization_id, payload.organization_name,
-                   payload.iiko_server, payload.api_password)
+                   payload.iiko_server, payload.api_password, payload.cloud_api_login)
     set_demo_mode(tid, 0)
     return {"success": True}
+
+
+def _safe_restaurant(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Только безопасные поля в браузер — БЕЗ api_password / cloud_api_login / api_login."""
+    return {
+        "id": r.get("id"),
+        "organization_id": r.get("organization_id"),
+        "organization_name": r.get("organization_name"),
+        "has_cloud": bool(r.get("cloud_api_login")),  # подключён ли живой зал (Cloud)
+    }
 
 
 @app.get("/api/restaurants")
@@ -1001,10 +1021,128 @@ async def list_restaurants(user: Dict = Depends(get_current_user)):
     rests = get_restaurants(tid)
     if not rests:
         # Не меняем is_demo флаг автоматически — только явный /api/demo его ставит
-        return [DEMO_RESTAURANT]
+        return [_safe_restaurant(DEMO_RESTAURANT)]
     # Если есть реальные рестораны — сбрасываем demo флаг на всякий случай
     set_demo_mode(tid, 0)
-    return rests
+    return [_safe_restaurant(r) for r in rests]
+
+
+def _pseudo_section(name: str) -> bool:
+    """Псевдо-секции (не настоящий зал): вынос, доставка, агрегаторы, касса."""
+    n = (name or "").lower()
+    return any(k in n for k in ["вынос", "достав", "wolt", "glovo", "яндекс", "yandex", "касса", "самовывоз", "агрегат"])
+
+
+_hall_cache: Dict[str, tuple] = {}  # org_id -> (ts, data)
+_HALL_TTL = 20  # сек: живой зал кэшируем, чтобы не хаммерить Cloud и переживать флап сети
+
+
+@app.get("/api/hall/{org_id}")
+async def hall(org_id: str, user: Dict = Depends(get_current_user)):
+    """Живой зал из iiko Cloud: секции+схема+занятость. Нужен cloud_api_login у филиала."""
+    if _use_demo_data(user, org_id):
+        return {"connected": False, "demo": True}
+    rests = get_restaurants(user.get("id", 0))
+    r = next((x for x in rests if x.get("organization_id") == org_id), None)
+    enc = r.get("cloud_api_login") if r else None
+    if not enc:
+        return {"connected": False}
+    # свежий кэш — сразу
+    cached = _hall_cache.get(org_id)
+    if cached and (time.time() - cached[0]) < _HALL_TTL:
+        return cached[1]
+    last_err = ""
+    for _attempt in range(2):  # ретрай на флап сети до Cloud
+      try:
+        client = get_client(decrypt_password(enc))  # кэш-клиент: токен переиспользуется (не хаммерим /access_token)
+        org_name = (r.get("organization_name") or "").strip().lower()
+        orgs = await client.get_organizations()
+        cloud = next((o for o in orgs if (o.get("name") or "").strip().lower() == org_name), None)
+        if not cloud:
+            return {"connected": False, "error": "Организация не найдена в iiko Cloud"}
+        coid = cloud["id"]
+        tgs = await client.terminal_groups([coid])
+        secs = await client.restaurant_sections(tgs)
+        all_ids = [t["id"] for s in secs for t in s.get("tables", [])]
+        orders = await client.hall_orders(coid, all_ids, tgs[0] if tgs else None)
+        busy, guests_by, sum_by = {}, {}, {}
+        for o in orders:
+            oo = o.get("order", {}) or {}
+            g = oo.get("guestCount") or oo.get("guestsCount") or 0
+            sm = oo.get("sum") or 0
+            for tid in (oo.get("tableIds") or []):
+                busy[tid] = True
+                guests_by[tid] = g
+                sum_by[tid] = sm
+        tables, channels = [], []
+        real_sec_ids = []  # id настоящих залов (для запроса броней)
+        for s in secs:
+            sname = s.get("name", "")
+            if _pseudo_section(sname):
+                cnt = sum(1 for t in s.get("tables", []) if busy.get(t["id"]))
+                channels.append({"name": sname, "count": cnt})
+                continue
+            if s.get("id"):
+                real_sec_ids.append(s["id"])
+            schema = s.get("schema") or {}
+            elems = {e.get("tableId"): e for e in schema.get("tableElements", [])}
+            sw, sh = schema.get("width") or 810, schema.get("height") or 550
+            for t in s.get("tables", []):
+                tid = t["id"]
+                el = elems.get(tid, {})
+                tables.append({
+                    "id": tid, "section": sname, "number": t.get("number"),
+                    "seats": t.get("seatingCapacity") or 0,
+                    "x": el.get("x"), "y": el.get("y"), "w": el.get("width"), "h": el.get("height"),
+                    "angle": el.get("angle") or 0, "sw": sw, "sh": sh,
+                    "busy": bool(busy.get(tid)), "guests": guests_by.get(tid, 0), "sum": sum_by.get(tid, 0),
+                })
+        occ = [t for t in tables if t["busy"]]
+
+        # ── Бронь: показываем ТОЛЬКО если у организации включён модуль броней (reserve API).
+        # Ошибка reserve не должна ронять зал → has_reservations=false, столы просто без метки.
+        has_reservations = False
+        reserved_ids = set()
+        try:
+            reserve_orgs = await client.reserve_available_orgs([coid])
+            has_reservations = coid in reserve_orgs
+            if has_reservations and real_sec_ids:
+                _n = local_now()
+                d0 = _n.strftime("%Y-%m-%d %H:%M:%S.000")
+                d1 = _n.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%d %H:%M:%S.000")
+                for rv in await client.reserve_workload(real_sec_ids, d0, d1):
+                    tids = rv.get("tableIds") or ([rv["tableId"]] if rv.get("tableId") else [])
+                    for tid in tids:
+                        reserved_ids.add(tid)
+        except Exception as _re:
+            logger.warning(f"[hall] reserve for {org_id}: {_re!r}")
+        for t in tables:
+            # занятый стол важнее брони: если за ним уже сидят — это occ, а не «бронь».
+            t["reserved"] = (not t["busy"]) and (t["id"] in reserved_ids)
+
+        # Список секций для переключателя залов (только настоящие залы, без псевдо-секций).
+        section_names = []
+        for t in tables:
+            if t["section"] not in section_names:
+                section_names.append(t["section"])
+        result = {
+            "connected": True, "branch": r.get("organization_name"),
+            "tables": tables, "channels": channels, "sections": section_names,
+            "has_reservations": has_reservations,
+            "reserved": sum(1 for t in tables if t["reserved"]),
+            "guests": sum(t["guests"] for t in occ), "open_orders": len(orders),
+            "occupied": len(occ), "total": len(tables),
+            "load": round(len(occ) / len(tables) * 100) if tables else 0,
+        }
+        _hall_cache[org_id] = (time.time(), result)
+        return result
+      except Exception as e:
+        last_err = repr(e)
+        continue
+    # обе попытки не удались — отдаём последний хороший кэш (если есть), иначе ошибку
+    if cached:
+        return cached[1]
+    return {"connected": False, "error": last_err}
 
 
 @app.delete("/api/restaurants/{rest_id}")
@@ -1886,6 +2024,55 @@ async def chaspik_export(
     return r.json()
 
 
+# Склад: строгий баланс по позиции — было + приход − остаток = фактически ушло;
+# сверяем с «ушло по продажам» → расхождение (недостача/фрод/списание) в тенге.
+_DEMO_STOCK_RAW = [
+    # (позиция, ед, было, приход, продано, остаток, цена ₸/ед)
+    ("Говядина рибай", "кг", 16, 42, 44, 6, 5200),
+    ("Сыр моцарелла", "кг", 24, 16, 30, 8, 3100),
+    ("Лосось филе", "кг", 12, 20, 20, 6, 6800),
+    ("Томаты", "кг", 30, 8, 33, 2, 900),
+    ("Сливки 33%", "л", 8, 28, 7, 27, 1400),
+    ("Оливковое масло", "л", 14, 6, 5, 15, 2600),
+    ("Мука", "кг", 50, 0, 12, 38, 320),
+]
+
+
+def _demo_stock() -> Dict[str, Any]:
+    rows = []
+    for name, unit, opening, incoming, sold, closing, price in _DEMO_STOCK_RAW:
+        actual = opening + incoming - closing          # фактически ушло
+        disc = actual - sold                            # расхождение (>0 — недостача)
+        disc_money = max(0, round(disc * price))
+        issue = None
+        if closing <= 2 and sold >= 25:
+            issue = "stockout"                          # стокаут ходовой — потеря выручки
+        elif closing >= 25 and sold <= 8:
+            issue = "overstock"                         # перезатарка скоропорта — будущее списание
+        rows.append({
+            "position": name, "unit": unit, "opening": opening, "incoming": incoming,
+            "sold": sold, "closing": closing, "actual_used": actual, "discrepancy": disc,
+            "discrepancy_money": disc_money, "price": price, "issue": issue,
+        })
+    rows.sort(key=lambda r: (r["discrepancy_money"], 1 if r["issue"] else 0), reverse=True)
+    return {"rows": rows, "total_discrepancy": sum(r["discrepancy_money"] for r in rows),
+            "branch": "Демо Ресторан · Алматы"}
+
+
+@app.get("/api/stock/{org_id}")
+async def stock(org_id: str, user: Dict = Depends(get_current_user)):
+    """Склад: строгий баланс (было+приход−остаток=факт) vs продажи → расхождение в ₸.
+    Изоляция по филиалу (Store/departmentName) — данные филиалов не смешиваются."""
+    if _use_demo_data(user, org_id):
+        return _demo_stock()
+    # TODO(real): остатки iiko на начало/конец + приход из incomingInvoice + расход из продаж,
+    # строго по Store выбранного филиала. Пока честный статус (не 400-ошибка!) — фронт покажет план.
+    info = _get_restaurant_info(_get_org_id(org_id, user), user)
+    return {"available": False, "rows": [], "total_discrepancy": 0,
+            "branch": info.get("org_name", ""),
+            "reason": "Строгий баланс склада для самохостед iiko ещё подключается."}
+
+
 @app.get("/api/foodcost/{org_id}")
 async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
@@ -2087,13 +2274,21 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
         for inv in data.get("invoiceIncomings", []):
             supplier = inv.get("supplier", {}) or {}
             items = inv.get("items", []) or []
+            positions = [{
+                "name": (it.get("product", {}) or {}).get("name") or it.get("productName") or it.get("name") or "Позиция",
+                "qty": it.get("amount") or it.get("num") or 0,
+                "unit": (it.get("product", {}) or {}).get("mainUnit") or it.get("unit") or "",
+                "price": it.get("price") or 0,
+                "sum": it.get("sum") or it.get("sumWithoutNds") or 0,
+            } for it in items[:40]]
             result_list.append({
                 "id": (inv.get("documentNumber", "") or (inv.get("id", "") or "")[:8])[:8],
                 "status": STATUS_MAP.get(inv.get("status", ""), inv.get("status", "")),
                 "supplier": supplier.get("name", "—"),
                 "date": _fmt_date(inv.get("dateIncoming", "")),
                 "items": len(items),
-                "amount": float(inv.get("sum", 0) or 0)
+                "amount": float(inv.get("sum", 0) or 0),
+                "positions": positions,
             })
     except Exception as e:
         print(f"[invoices] OLAP failed: {e}")
@@ -5851,8 +6046,9 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
     интервалы (задвоенные роли на терминале) сливаются, чтобы часы не удваивались.
     Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours."""
     by_emp_day: Dict[Any, list] = {}
+    org_key = org_name.strip().lower()
     for a in attendance:
-        if org_name and a.get("departmentName") != org_name:
+        if org_key and (a.get("departmentName") or "").strip().lower() != org_key:
             continue
         try:
             df = datetime.fromisoformat(a["dateFrom"])
@@ -5882,6 +6078,59 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
             })
     rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
     return rows
+
+
+async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Компактные сигналы по всем филиалам ЗАЛОГИНЕННОГО клиента (1..N) для ИИ-ассистента.
+    Сбой одного филиала не роняет остальные. Семафор ограничивает нагрузку на iiko
+    у больших сетей (десятки филиалов)."""
+    from fastapi import Response as _Resp
+    rests = get_restaurants(user.get("id", 0))
+    out_branches: List[Dict[str, Any]] = []
+    sem = asyncio.Semaphore(6)  # не более 6 филиалов одновременно → не хаммерим сервер клиента
+
+    async def one(r: Dict[str, Any]) -> Dict[str, Any]:
+        org = r.get("organization_id")
+        name = r.get("organization_name") or "Филиал"
+        b: Dict[str, Any] = {"name": name, "foodcost": None, "revenue": None,
+                             "cancels": None, "writeoffs_pct": None, "reviews": [],
+                             "peak": None, "has_recipes": None, "has_socials": None}
+        try:
+            fc = await foodcost(org, "month", 1, user)
+            b["has_recipes"] = fc.get("fact_pct") is not None
+            if fc.get("fact_pct") is not None:
+                b["foodcost"] = {"fact_pct": fc["fact_pct"], "norm_pct": fc.get("norm_pct", 30),
+                                 "fact_sum": fc.get("fact_sum")}
+        except Exception as e:
+            logger.warning(f"[assistant] foodcost {name}: {e!r}")
+        try:
+            d = await dashboard(org, _Resp(), "month", user=user)
+            b["revenue"] = d.get("revenue_today")  # revenue_today = выручка периода
+        except Exception as e:
+            logger.warning(f"[assistant] dashboard {name}: {e!r}")
+        try:
+            cn = await cancels(org, "month", user)
+            b["cancels"] = cn.get("total_amount")
+        except Exception as e:
+            logger.warning(f"[assistant] cancels {name}: {e!r}")
+        try:
+            rv = await branch_reviews(org, user)
+            b["has_socials"] = bool(rv.get("platforms"))
+            b["reviews"] = [{"label": p.get("label"), "rating": p.get("rating"),
+                             "delta": p.get("delta")} for p in rv.get("platforms", [])]
+        except Exception as e:
+            logger.warning(f"[assistant] reviews {name}: {e!r}")
+        return b
+
+    async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
+        async with sem:  # семафор ограничивает число одновременных обращений к iiko
+            return await one(r)
+
+    results = await asyncio.gather(*(throttled(r) for r in rests), return_exceptions=True)
+    for r in results:
+        if isinstance(r, dict):
+            out_branches.append(r)
+    return {"branches": out_branches}
 
 
 # Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.
@@ -5942,8 +6191,13 @@ async def attendance(org_id: str,
         client.get_employees_map(),
     )
     rows = _attendance_journal(att, employees, info.get("org_name", ""))
-    emp_list = [{"id": eid, "name": name}
-                for eid, name in sorted(employees.items(), key=lambda x: x[1])]
+    # Изоляция по филиалу: список сотрудников — только те, кто реально работал в этом
+    # филиале за период (rows уже отфильтрованы по departmentName), а не вся сеть.
+    emp_ids = {r["employee_id"] for r in rows}
+    emp_list = sorted(
+        ({"id": eid, "name": employees.get(eid, eid[:8])} for eid in emp_ids),
+        key=lambda e: e["name"],
+    )
     return {"employees": emp_list, "rows": rows}
 
 
