@@ -35,11 +35,18 @@ def rules_advice(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
                             f"Пересобери техкарты топ-блюд и передоговорись с поставщиками.",
                             round(over) if over > 0 else None,
                             {"type": "navigate", "tab": "fc", "hint": None}))
-        # техкарт нет → фудкост не считается: план
-        elif b.get("has_recipes") is False:
-            out.append(_adv(name, "med", "Фудкост не считается",
-                            f"{name}: в iiko не заполнены техкарты — себестоимость взять неоткуда.",
-                            None, {"type": "navigate", "tab": "fc", "hint": None}))
+        # техкарт нет → фудкост не считается: план (во вкладку Директор)
+        if b.get("has_recipes") is False:
+            out.append(_adv(name, "med", "Техкарты не заведены",
+                            f"{name}: заполни техкарты в iiko, чтобы считать фудкост.",
+                            None, {"type": "navigate", "tab": "director", "hint": None}))
+        # техкарты есть, но покрывают мало выручки → фудкост неполный
+        elif b.get("has_recipes") is True and fc and fc.get("coverage") is not None and fc["coverage"] < 70:
+            cov = fc["coverage"]
+            out.append(_adv(name, "med", "Техкарты неполные",
+                            f"{name}: техкарты покрывают {cov}% выручки — заполни остальные "
+                            f"во вкладке Директор, чтобы фудкост считался полностью.",
+                            None, {"type": "navigate", "tab": "director", "hint": None}))
         # отмены/возвраты
         cn = b.get("cancels") or 0
         if cn > 0:
@@ -50,6 +57,24 @@ def rules_advice(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
         if b.get("has_socials") is False:
             out.append(_adv(name, "low", "Соцсети не подключены",
                             f"{name}: площадки отзывов (2ГИС/Wolt) не найдены — укажи бренд в «Подключить».",
+                            None, {"type": "navigate", "tab": "rep", "hint": None}))
+        # слабые отзывы → одна карточка на филиал (худшая площадка)
+        worst = None
+        for p in (b.get("reviews") or []):
+            rating = p.get("rating")
+            if rating is None:
+                continue
+            delta = p.get("delta")
+            low = rating < 4 if rating <= 5 else rating < 8
+            neg = isinstance(delta, (int, float)) and delta < 0
+            if (low or neg) and (worst is None or rating < worst.get("rating", 1e9)):
+                worst = p
+        if worst is not None:
+            wr, wl = worst.get("rating"), worst.get("label")
+            wd = worst.get("delta")
+            falling = " (падает)" if isinstance(wd, (int, float)) and wd < 0 else ""
+            out.append(_adv(name, "med", f"Слабый отзыв · {wl}",
+                            f"{name}: {wl} рейтинг {wr}{falling} — разбери свежие жалобы.",
                             None, {"type": "navigate", "tab": "rep", "hint": None}))
         # час-пик → штат
         peak = b.get("peak")

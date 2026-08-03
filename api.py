@@ -6101,7 +6101,7 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
             b["has_recipes"] = fc.get("fact_pct") is not None
             if fc.get("fact_pct") is not None:
                 b["foodcost"] = {"fact_pct": fc["fact_pct"], "norm_pct": fc.get("norm_pct", 30),
-                                 "fact_sum": fc.get("fact_sum")}
+                                 "fact_sum": fc.get("fact_sum"), "coverage": fc.get("coverage_pct")}
         except Exception as e:
             logger.warning(f"[assistant] foodcost {name}: {e!r}")
         try:
@@ -6121,6 +6121,13 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
                              "delta": p.get("delta")} for p in rv.get("platforms", [])]
         except Exception as e:
             logger.warning(f"[assistant] reviews {name}: {e!r}")
+        try:
+            hm = await load_heatmap(org, "month", None, user=user)
+            pk = hm.get("peak") if isinstance(hm, dict) else None
+            if pk and pk.get("orders"):
+                b["peak"] = {"day": assistant_ai.DOW_RU.get(pk.get("d")), "hour": pk.get("h")}
+        except Exception as e:
+            logger.warning(f"[assistant] heatmap {name}: {e!r}")
         return b
 
     async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
