@@ -30,3 +30,12 @@ def test_parse_advice_strips_markdown():
     raw = '```json\n[{"branch":"X","title":"t","detail":"d","money":10,"severity":"low"}]\n```'
     out = _parse_advice(raw)
     assert out[0]["branch"] == "X"
+
+
+def test_parse_advice_drops_non_dict_elements():
+    # Claude может вернуть массив с мусором (null/строка/число) — рендер не должен падать
+    raw = '[{"branch":"X","title":"t","detail":"d","money":1,"severity":"low"}, null]'
+    out = _parse_advice(raw)
+    assert out == [{"branch": "X", "title": "t", "detail": "d", "money": 1, "severity": "low"}]
+    assert all(isinstance(x, dict) for x in out)
+    assert None not in out

@@ -75,7 +75,9 @@ def _parse_advice(raw_text: str) -> List[Dict[str, Any]]:
         data = data["advice"]
     if not isinstance(data, list):
         raise ValueError("advice не массив")
-    return data
+    # оставляем только корректные объекты: не-dict элемент (null/строка/число)
+    # уронил бы рендер фронта (a.id/a.severity на не-объекте) — защищаемся тут.
+    return [x for x in data if isinstance(x, dict)]
 
 
 _SYSTEM = (
