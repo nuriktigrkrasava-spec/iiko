@@ -1,7 +1,8 @@
 import type { ReactNode } from 'react'
-import { Glass, Chart, Light, Bullet, Insight, Delta, fmt } from './ui'
-import { areaChart, barChart, yoyChart, slope, heatStrip, donut, hbar, legend, color } from './charts'
+import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback } from './ui'
+import { areaChart, barChart, yoyChart, slope, heatStrip, donut, hbar, legend, color, bar } from './charts'
 import { useApi } from '../lib/useApi'
+import { periodLabel } from '../lib/api'
 import { tenge, tengeShort } from '../lib/format'
 
 /* Заглушка на всю сетку, пока грузятся живые данные */
@@ -55,7 +56,7 @@ function Tile({ label, value, delta, invert }: { label: string; value: string; d
   )
 }
 export function Dash() {
-  const { data, error, loading } = useApi<DashT>('dashboard', { period: 'month' })
+  const { data, error, loading } = useApi<DashT>('dashboard')
   if (loading) return <Note>Собираю выручку…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   const c = data.chart_7days
@@ -65,7 +66,7 @@ export function Dash() {
   return (
     <>
       <Glass span={8} spot warp>
-        <div style={{ fontSize: 11, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка · сегодня</div>
+        <div style={{ fontSize: 11, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка · {periodLabel()}</div>
         <div className="tnum" style={{ fontSize: 40, fontWeight: 680, letterSpacing: '-.03em', marginTop: 8, display: 'flex', alignItems: 'baseline', gap: 14 }}>{tenge(data.revenue_today)} <Delta v={data.revenue_change} /></div>
         <Chart html={barChart(bars, hiIdx, 'var(--acc)', ' млн')} />
         <div style={{ fontSize: 12, color: 'var(--mute)', marginTop: 4 }}>Средняя за 7 дней — {tenge(avg7)}</div>
@@ -79,7 +80,7 @@ export function Dash() {
           <Light tone="amber" k="Открытые заказы" v={String(data.open_orders)} />
         </div>
       </Glass>
-      <Tile label="Выручка сегодня" value={tengeShort(data.revenue_today)} delta={data.revenue_change} />
+      <Tile label={`Выручка · ${periodLabel()}`} value={tengeShort(data.revenue_today)} delta={data.revenue_change} />
       <Tile label="Средний чек" value={tenge(data.avg_check)} delta={data.avg_check_change} />
       <Tile label="Гостей" value={String(data.guests)} delta={data.guests_change} />
       <Tile label="Открытые заказы" value={String(data.open_orders)} />
@@ -89,36 +90,48 @@ export function Dash() {
 
 /* ─────────── Фудкост — живой /api/foodcost ─────────── */
 type FCT = {
-  norm_pct: number; fact_pct: number; diff_pct: number; norm_sum: number; fact_sum: number; warning: string
-  trend: { month: string; fact: number; norm: number }[]
+  norm_pct: number; fact_pct: number | null; diff_pct: number | null; norm_sum: number; fact_sum: number | null; warning: string | null
+  cost_available?: boolean; coverage_pct?: number | null
+  trend: { month: string; fact: number | null; norm: number }[]
   dishes: { name: string; category: string; revenue: number; count: number; cost_pct: number }[]
 }
 export function FC() {
-  const { data, error, loading } = useApi<FCT>('foodcost', { period: 'month' })
+  // самохостед iikoWeb считает теоретический фудкост по техкартам только с compute=1
+  const { data, error, loading } = useApi<FCT>('foodcost', { compute: '1' })
   if (loading) return <Note>Считаю фудкост по техкартам…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
-  const over = data.fact_sum - data.norm_sum
+  // Владелец не завёл техкарты/приходные цены → себестоимость взять неоткуда: ставим планом, а не 0/пусто.
+  if (data.fact_pct == null) return (
+    <Glass span={12} spot>
+      <PlanFallback
+        title="Фудкост пока не считается"
+        reason="В iiko не заполнены техкарты и/или приходные цены на ингредиенты — себестоимость блюд взять неоткуда."
+        action="Заполни техкарты и приходные накладные в iiko — фудкост посчитается по ним автоматически." />
+    </Glass>
+  )
+  const over = (data.fact_sum ?? 0) - data.norm_sum
   const toneOf = (p: number): 'acc' | 'warn' | 'bad' => (p >= 45 ? 'bad' : p >= 35 ? 'warn' : 'acc')
   const dishes = [...data.dishes].sort((a, b) => b.cost_pct - a.cost_pct)
   return (
     <>
       <Glass span={5} spot>
         <Hero eyebrow="Фудкост по техкартам" hint={`цель ${data.norm_pct}%`} value={<>{data.fact_pct}% <Delta v={data.diff_pct} invert /></>}
-          note={`${data.warning}. Перерасход к норме — ${tenge(over)} за период.`} />
+          note={`${data.warning ? data.warning + '. ' : ''}Перерасход к норме — ${tenge(over)} за период.`} />
         <div style={{ marginTop: 16 }}><Bullet value={data.fact_pct} target={data.norm_pct} max={50} tone={toneOf(data.fact_pct)} /></div>
         <Sub>факт {data.fact_pct}% · <span style={{ color: 'var(--hi)' }}>| цель {data.norm_pct}%</span> · порог 35%</Sub>
       </Glass>
       <Glass span={7}>
         <Eyebrow t="Динамика фудкоста" hint="факт (красный) vs норма" />
-        <Chart html={slope([{ c: 'var(--red)', v: data.trend.map((t) => t.fact) }, { c: 'var(--mute)', v: data.trend.map((t) => t.norm) }])} />
+        <Chart html={slope([{ c: 'var(--red)', v: data.trend.map((t) => t.fact ?? 0) }, { c: 'var(--mute)', v: data.trend.map((t) => t.norm) }])} />
         <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
           {data.trend.map((t) => {
-            const c = t.fact <= t.norm ? 'var(--grn)' : t.fact <= t.norm + 5 ? 'var(--amb)' : 'var(--red)'
+            const tf = t.fact ?? 0
+            const c = tf <= t.norm ? 'var(--grn)' : tf <= t.norm + 5 ? 'var(--amb)' : 'var(--red)'
             return (
               <span key={t.month} style={{ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12.5 }}>
                 <span style={{ width: 8, height: 8, borderRadius: '50%', background: c, boxShadow: `0 0 7px ${c}`, flex: 'none' }} />
                 <span style={{ color: 'var(--lo)' }}>{t.month}</span>
-                <span className="tnum" style={{ fontWeight: 700, color: c }}>{t.fact}%</span>
+                <span className="tnum" style={{ fontWeight: 700, color: c }}>{tf}%</span>
               </span>
             )
           })}
@@ -146,7 +159,7 @@ type ExpT = {
   categories: { name: string; amount: number }[]
 }
 export function Exp() {
-  const { data, error, loading } = useApi<ExpT>('expenses', { period: 'month' })
+  const { data, error, loading } = useApi<ExpT>('expenses')
   if (loading) return <Note>Собираю расходы…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   const cats = [...data.categories].sort((a, b) => b.amount - a.amount)
@@ -156,7 +169,7 @@ export function Exp() {
   return (
     <>
       <Glass span={5} spot warp>
-        <Hero eyebrow="Расходы за месяц" value={<>{tengeShort(data.total)}</>} sub="сумма операций за период" />
+        <Hero eyebrow={`Расходы · ${periodLabel()}`} value={<>{tengeShort(data.total)}</>} sub="сумма операций за период" />
         <div style={{ marginTop: 20 }}>
           <Stat k="Крупнейшая статья" v={<>{top?.name ?? '—'} · {tengeShort(top?.amount ?? 0)}</>} />
           <Stat k="Статей расходов" v={cats.length} />
@@ -172,7 +185,7 @@ export function Exp() {
       </Glass>
       <Glass span={5}>
         <Eyebrow t="Статьи расходов" hint="доля бюджета" />
-        <Chart html={hbar(cats.map((c, i) => ({ l: c.name, v: c.amount, c: color(i) })), ' ₸')} />
+        <Chart html={hbar(cats.map((c) => ({ l: c.name, v: c.amount, c: bar(0) })), ' ₸')} />
       </Glass>
       <Glass span={7}>
         <Eyebrow t="Операции" hint="крупнейшие сначала" />
@@ -285,9 +298,9 @@ type ShiftsT = { staff: { name: string; since: string; revenue: number; orders: 
 type CourT = { couriers: { name: string; deliveries: number; avg_way: number; avg_delay: number; late_pct: number }[]; summary: { deliveries: number; couriers: number; avg_way: number; avg_delay: number; late_pct: number } }
 type HeatT = { cells: { d: number; h: number; orders: number }[]; max: number; peak: { d: number; h: number; orders: number } }
 export function Staff() {
-  const sh = useApi<ShiftsT>('shifts', { period: 'month' })
-  const co = useApi<CourT>('couriers', { period: 'month' })
-  const hm = useApi<HeatT>('load-heatmap', { period: 'month' })
+  const sh = useApi<ShiftsT>('shifts')
+  const co = useApi<CourT>('couriers')
+  const hm = useApi<HeatT>('load-heatmap')
   if (sh.loading || co.loading || hm.loading) return <Note>Собираю смены и загрузку…</Note>
   if (sh.error || !sh.data) return <Note>Не удалось загрузить: {sh.error}</Note>
   const staff = [...sh.data.staff].sort((a, b) => b.revenue - a.revenue)
@@ -300,7 +313,7 @@ export function Staff() {
   return (
     <>
       <Glass span={5} spot>
-        <Hero eyebrow="Смены и персонал" hint="за месяц" value={<span style={{ fontSize: 34 }}>{staff.length} официанта · {sum?.couriers ?? 0} курьера</span>}
+        <Hero eyebrow="Смены и персонал" hint={periodLabel()} value={<span style={{ fontSize: 34 }}>{staff.length} официанта · {sum?.couriers ?? 0} курьера</span>}
           note={hm.data ? `Пик — ${hm.data.peak.h}:00, ${hm.data.peak.orders} заказов. Разброс по официантам — ${Math.round((1 - staff[staff.length - 1].revenue / maxRev) * 100)}%.` : 'Смены за период.'} />
       </Glass>
       <Glass span={7}>
