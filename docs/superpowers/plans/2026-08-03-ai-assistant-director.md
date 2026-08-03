@@ -4,7 +4,7 @@
 
 **Goal:** Заменить демо-агента (`web/src/lg/Agent.tsx`) на проактивного ИИ-советника: бэкенд собирает реальные сигналы по всем филиалам, Claude превращает их в приоритезированные советы «проблема → деньги → что сделать» с опциональными действиями (открыть вкладку / показать динамику); при недоступности Claude — детерминированный фоллбэк на правила.
 
-**Architecture:** Новый эндпоинт `GET /api/assistant` в `api.py` собирает компактные сигналы по филиалам владельца (переиспользуя существующие route-функции), передаёт их модулю `assistant_ai.py` (по образцу `claude_api.py`), который вызывает Claude и парсит структурированный список советов. `Agent.tsx` тянет `/api/assistant`, проактивно всплывает 1–2 карточками и показывает список с кнопками-действиями. Действия исполняются через существующий механизм `window.dispatchEvent('lg:go', ...)`.
+**Architecture:** Новый эндпоинт `GET /api/assistant` в `api.py` собирает компактные сигналы по филиалам **залогиненного клиента** (`get_restaurants(user.id)`, 1..N — продукт мультитенантный, число филиалов нигде не захардкожено), переиспользуя существующие route-функции, передаёт их модулю `assistant_ai.py` (по образцу `claude_api.py`), который вызывает Claude и парсит структурированный список советов. `Agent.tsx` тянет `/api/assistant`, проактивно всплывает 1–2 карточками и показывает список с кнопками-действиями. Действия исполняются через существующий механизм `window.dispatchEvent('lg:go', ...)`.
 
 **Tech Stack:** Python 3 / FastAPI (`api.py`), `anthropic` AsyncAnthropic (уже в `requirements.txt`, 0.97.0). React + Vite + TS (`web/src/lg`). Тесты: pytest (Python), `npx tsc -b` (типы фронта).
 
@@ -14,7 +14,8 @@
 - **Грудинг:** Claude получает уже посчитанные нами числа и обязан использовать их. Никаких выдуманных сумм/процентов. Системный промпт это фиксирует.
 - **Деградация:** при отсутствии `ANTHROPIC_API_KEY`, таймауте, ошибке или невалидном JSON — детерминированный фоллбэк `rules_advice(signals)`. Фича всегда что-то возвращает.
 - **Демо:** при `_use_demo_data` — вернуть демо-советы (не звать Claude, не палить ключ).
-- **Изоляция по филиалу:** сигналы собираются по каждому филиалу владельца; в совете указывается филиал.
+- **Мультитенант:** филиалы всегда = `get_restaurants(user.id)` залогиненного клиента (1..N), не захардкоженное число. В совете указывается филиал.
+- **Масштаб (большие сети):** сбор сигналов дросселируется семафором (не более 5–6 параллельных вызовов iiko), чтобы не хаммерить сервер клиента с десятками филиалов. Факт-пейлоад в Claude — только агрегаты (проценты/суммы/топ-1), не сырые списки.
 - **Действия — белый список:** фронт исполняет только `navigate` и `showMetric`; неизвестные типы игнорируются. (Действие `proposeShift` — Фаза 2, вне этого плана.)
 - **Без чата:** текстовый ввод и `reply()` удаляются полностью.
 
@@ -233,11 +234,13 @@ Route-функции в `api.py` — обычные async-функции; выз
 
 ```python
 async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
-    """Компактные сигналы по всем филиалам владельца для ИИ-ассистента.
-    Сбой одного филиала не роняет остальные."""
+    """Компактные сигналы по всем филиалам ЗАЛОГИНЕННОГО клиента (1..N) для ИИ-ассистента.
+    Сбой одного филиала не роняет остальные. Семафор ограничивает нагрузку на iiko
+    у больших сетей (десятки филиалов)."""
     from fastapi import Response as _Resp
     rests = get_restaurants(user.get("id", 0))
     out_branches: List[Dict[str, Any]] = []
+    sem = asyncio.Semaphore(6)  # не более 6 филиалов одновременно → не хаммерим сервер клиента
 
     async def one(r: Dict[str, Any]) -> Dict[str, Any]:
         org = r.get("organization_id")
@@ -272,7 +275,11 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning(f"[assistant] reviews {name}: {e!r}")
         return b
 
-    results = await asyncio.gather(*(one(r) for r in rests), return_exceptions=True)
+    async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
+        async with sem:  # семафор ограничивает число одновременных обращений к iiko
+            return await one(r)
+
+    results = await asyncio.gather(*(throttled(r) for r in rests), return_exceptions=True)
     for r in results:
         if isinstance(r, dict):
             out_branches.append(r)
@@ -326,7 +333,7 @@ _DEMO_ADVICE = [
 
 @app.get("/api/assistant")
 async def assistant(user: Dict = Depends(get_current_user)):
-    """Проактивные советы ИИ-ассистента по всем филиалам владельца."""
+    """Проактивные советы ИИ-ассистента по всем филиалам залогиненного клиента."""
     # демо-режим: не зовём Claude, отдаём демо-советы
     rests = get_restaurants(user.get("id", 0))
     if not rests or _use_demo_data(user, (rests[0].get("organization_id") if rests else "demo-org-1")):
@@ -344,7 +351,7 @@ async def assistant(user: Dict = Depends(get_current_user)):
 curl -s "http://localhost:8000/api/assistant" | python3 -m json.tool | head -40
 ```
 
-Expected: JSON с `advice` (демо-советы, если действуем как демо; реальные советы по филиалам владельца при DEV_TID). Ошибки Claude → в логе строка `[assistant] ... фоллбэк на правила`, но ответ 200 с советами из правил.
+Expected: JSON с `advice` (демо-советы, если действуем как демо; реальные советы по филиалам клиента при DEV_TID). Ошибки Claude → в логе строка `[assistant] ... фоллбэк на правила`, но ответ 200 с советами из правил.
 
 - [ ] **Step 3: Commit**
 
