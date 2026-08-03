@@ -48,6 +48,7 @@ from database import (
 )
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
+import assistant_ai
 from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -6131,6 +6132,28 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(r, dict):
             out_branches.append(r)
     return {"branches": out_branches}
+
+
+_DEMO_ADVICE = [
+    {"id": "demo:fc", "branch": "Демо-ресторан", "severity": "high",
+     "title": "Фудкост выше нормы", "detail": "Фудкост 36% при норме 30% — теряешь ≈ 2,9 млн/мес. Начни с техкарт топ-блюд.",
+     "money": 2900000, "action": {"type": "navigate", "tab": "fc", "hint": None}},
+    {"id": "demo:cn", "branch": "Демо-ресторан", "severity": "med",
+     "title": "Отмены и возвраты", "detail": "Отмены на 52 тыс/мес — разбери топ-причину.",
+     "money": 52000, "action": {"type": "navigate", "tab": "supply", "hint": None}},
+]
+
+
+@app.get("/api/assistant")
+async def assistant(user: Dict = Depends(get_current_user)):
+    """Проактивные советы ИИ-ассистента по всем филиалам залогиненного клиента."""
+    # демо-режим: не зовём Claude, отдаём демо-советы
+    rests = get_restaurants(user.get("id", 0))
+    if not rests or _use_demo_data(user, (rests[0].get("organization_id") if rests else "demo-org-1")):
+        return {"advice": _DEMO_ADVICE, "count": len(_DEMO_ADVICE), "demo": True}
+    signals = await _gather_assistant_signals(user)
+    advice = await assistant_ai.advise(signals)
+    return {"advice": advice, "count": len(advice), "demo": False}
 
 
 # Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.
