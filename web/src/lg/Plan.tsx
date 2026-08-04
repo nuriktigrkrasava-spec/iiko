@@ -90,7 +90,7 @@ export default function Plan() {
           {totals.map((x) => (
             <div key={x.t} style={{ padding: 14, borderRadius: 14, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
               <div style={{ fontSize: 12, color: 'var(--mute)' }}>{TYPE_LABEL[x.t]}</div>
-              <div className="tnum" style={{ fontSize: 24, fontWeight: 680, marginTop: 6, color: 'var(--hi)' }}>{x.f} <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--mute)' }}>заказов · факт</span></div>
+              <div className="tnum" style={{ fontSize: 24, fontWeight: 680, marginTop: 6, color: 'var(--hi)' }}>{x.f} <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--mute)' }}>факт за месяц</span></div>
               <div className="tnum" style={{ fontSize: 12, fontWeight: 600, color: progColor(x.pct), marginTop: 3 }}>{x.p ? `план ${x.p} · ${x.pct}%` : 'план не задан'}</div>
             </div>
           ))}

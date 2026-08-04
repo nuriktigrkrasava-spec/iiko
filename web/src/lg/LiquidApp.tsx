@@ -34,7 +34,7 @@ const SECTIONS: Sec[] = [
   { id: 'exp', group: 'Деньги', label: 'Расходы', icon: 'exp', periodic: true, render: Exp },
   { id: 'supply', group: 'Деньги', label: 'Склад · заявки', icon: 'supply', badge: 'var(--red)', periodic: false, render: Supply },
   { id: 'yoy', group: 'Деньги', label: 'Год к году', icon: 'yoy', periodic: false, render: YoY },
-  { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: true, render: Staff },
+  { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: false, render: Staff },
   { id: 'sched', group: 'Операции', label: 'Расписание', icon: 'sched', periodic: false, render: Schedule },
   { id: 'plan', group: 'Операции', label: 'План', icon: 'anom', periodic: false, render: Plan },
   { id: 'clients', group: 'Гости', label: 'Клиенты · RFM', icon: 'clients', badge: 'var(--grn)', periodic: false, render: Clients },

@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react'
+import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { Glass, Delta } from './ui'
 import { useApi } from '../lib/useApi'
@@ -50,9 +50,6 @@ type Dash = { revenue_today: number; avg_check: number; avg_check_change: number
 type HallTable = { id: string; section: string; number?: number; seats: number; x: number | null; y: number | null; w: number | null; h: number | null; sw?: number; sh?: number; busy: boolean; reserved?: boolean; guests: number }
 type Hall = { connected: boolean; branch?: string; tables?: HallTable[]; sections?: string[]; has_reservations?: boolean; reserved?: number; channels?: { name: string; count: number }[]; guests?: number; open_orders?: number; load?: number }
 type Sales = { channels: { name: string; revenue: number; orders: number }[] }
-type Heat = { cells: { d: number; h: number; orders: number }[]; max: number; peak: { d: number; h: number; orders: number } }
-
-const WD = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
 /* Каналы iiko → 3 типа заказов. Порядок проверок важен: сначала агрегаторы
    (по бренду), затем доставка (по «достав»), остальное — зал/вынос. */
@@ -144,7 +141,6 @@ export default function Home() {
   const dash = useApi<Dash>('dashboard', { period: 'today' })
   const hall = useApi<Hall>('hall')
   const sales = useApi<Sales>('sales', { period: 'today' })
-  const heat = useApi<Heat>('load-heatmap')
   const [zone, setZone] = useState<Zone>('hall')
   const [section, setSection] = useState<string | null>(null)
 
@@ -221,20 +217,6 @@ export default function Home() {
   const chList: { name: string; n: number; d?: number; rev?: number; c: string }[] = demoMode
     ? channels
     : TYPE_META.map((m) => ({ name: m.name, n: grouped[m.key].o, rev: grouped[m.key].r, c: m.c }))
-
-  // Час-пик: пик нагрузки + компактная тепловая сетка день×час из /api/load-heatmap.
-  const heatData = heat.data
-  const heatCells = heatData?.cells?.length ? heatData.cells : []
-  const heatMax = heatData?.max || Math.max(1, ...heatCells.map((c) => c.orders))
-  const peak = heatData?.peak
-  // диапазон часов с активностью — чтобы не рисовать пустые ночные столбцы
-  const heatHours = heatCells.length
-    ? Array.from(new Set(heatCells.filter((c) => c.orders > 0).map((c) => c.h))).sort((a, b) => a - b)
-    : []
-  const hFrom = heatHours.length ? heatHours[0] : 0
-  const hTo = heatHours.length ? heatHours[heatHours.length - 1] : 0
-  const hourRange = heatHours.length ? Array.from({ length: hTo - hFrom + 1 }, (_, i) => hFrom + i) : []
-  const cellAt = (d: number, h: number) => heatCells.find((c) => c.d === d && c.h === h)?.orders || 0
 
   return (
     <>
@@ -328,47 +310,6 @@ export default function Home() {
           ))}
         </div>
       </Glass>
-
-      {/* ЧАС-ПИК — пик нагрузки + компактная тепловая сетка день×час */}
-      {peak && (
-        <Glass span={12}>
-          <div className="eyebrow"><span>Час-пик</span><span className="hint">заказы · день × час</span></div>
-          <div style={{ marginTop: 12, fontSize: 15, color: 'var(--hi)', fontWeight: 550 }}>
-            Пик нагрузки: <b style={{ fontWeight: 700 }}>{WD[peak.d] ?? '—'} {peak.h}:00</b>
-            <span className="tnum" style={{ color: 'var(--mute)', fontWeight: 500 }}> · {peak.orders} заказов</span>
-          </div>
-          {hourRange.length > 0 && (
-            <div style={{ marginTop: 14, overflowX: 'auto', paddingBottom: 4 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: `28px repeat(${hourRange.length}, minmax(14px, 1fr))`, gap: 3, minWidth: 'min-content' }}>
-                {/* заголовок часов */}
-                <span />
-                {hourRange.map((h) => (
-                  <span key={`h-${h}`} className="tnum" style={{ fontSize: 8.5, color: 'var(--mute)', textAlign: 'center' }}>{h}</span>
-                ))}
-                {WD.map((wd, d) => (
-                  <Fragment key={`row-${d}`}>
-                    <span style={{ fontSize: 9.5, color: 'var(--mute)', display: 'flex', alignItems: 'center' }}>{wd}</span>
-                    {hourRange.map((h) => {
-                      const v = cellAt(d, h)
-                      const r = heatMax ? v / heatMax : 0
-                      const c = r > 0.85 ? 'var(--red)' : r > 0.6 ? 'var(--amb)' : 'var(--acc)'
-                      const isPeak = peak.d === d && peak.h === h
-                      return (
-                        <span key={`c-${d}-${h}`} title={`${wd} ${h}:00 · ${v} заказов`} style={{
-                          height: 13, borderRadius: 3,
-                          background: v > 0 ? c : 'var(--glass-2)',
-                          opacity: v > 0 ? (0.25 + 0.75 * r) : 1,
-                          border: isPeak ? '1.5px solid var(--hi)' : '1px solid var(--hair)',
-                        }} />
-                      )
-                    })}
-                  </Fragment>
-                ))}
-              </div>
-            </div>
-          )}
-        </Glass>
-      )}
 
       {/* КАРУСЕЛЬ КАНАЛОВ (Truck&Co Freight Units) */}
       <Glass span={12}>
