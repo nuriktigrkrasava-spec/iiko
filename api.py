@@ -2200,13 +2200,19 @@ async def stock(org_id: str, user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
         return _demo_stock()
     real_org = _get_org_id(org_id, user)
+    key = _cache_key(user.get("id", 0), "stock", real_org, "month")
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
     info = _get_restaurant_info(real_org, user)
     login = info["api_login"]
     date_from, date_to = get_period_dates("month")
     client = get_client(login, info.get("iiko_server"), info.get("api_password"))
     try:
-        return await _stock_balance(client, _olap_dept(real_org, info),
-                                    info.get("org_name", ""), real_org, date_from, date_to)
+        res = await _stock_balance(client, _olap_dept(real_org, info),
+                                   info.get("org_name", ""), real_org, date_from, date_to)
+        _set_cached(key, res)
+        return res
     except Exception as e:
         logger.warning(f"[stock] {real_org}: {e!r}")
         return {"available": False, "rows": [], "total_discrepancy": 0,
@@ -6298,9 +6304,15 @@ async def assistant(user: Dict = Depends(get_current_user)):
     rests = get_restaurants(user.get("id", 0))
     if not rests or _use_demo_data(user, (rests[0].get("organization_id") if rests else "demo-org-1")):
         return {"advice": _DEMO_ADVICE, "count": len(_DEMO_ADVICE), "demo": True}
+    key = _cache_key(user.get("id", 0), "assistant", "all", "month")
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
     signals = await _gather_assistant_signals(user)
     advice = await assistant_ai.advise(signals)
-    return {"advice": advice, "count": len(advice), "demo": False}
+    res = {"advice": advice, "count": len(advice), "demo": False}
+    _set_cached(key, res)
+    return res
 
 
 # ── Вкладка «План»: недельный план по типам каналов (КОЛ-ВО заказов) + факт ──
