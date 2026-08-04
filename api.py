@@ -2160,14 +2160,15 @@ async def _stock_balance(client, dept: str, org_name: str, org_id_for_nom: str,
         price = (close_sum.get(pid, 0.0) / closing[pid]) if closing.get(pid) else float(prices.get(pid, 0) or 0)
         disc = round(actual - sold_q, 2)
         disc_money = round(max(0.0, disc) * price)
+        # Отрицательный остаток в iiko = учёт по товару не ведётся (мусор) → выкидываем целиком:
+        # ни утечку по нему не посчитать, ни «−110 на складе» показывать нельзя.
+        if op < 0 or cl < 0:
+            continue
         # интересны только позиции с движением/расхождением
         if abs(actual) < 0.01 and sold_q < 0.01 and inc < 0.01:
             continue
         issue = None
-        if op < 0 or cl < 0:
-            # отрицательный остаток в iiko → учёт по товару не ведётся, утечку не считаем (мусор)
-            disc_money = 0
-        elif cl <= 0 and sold_q > 0:
+        if cl <= 0 and sold_q > 0:
             issue = "stockout"
         rows.append({
             "position": names.get(pid) or pid[:8], "unit": units.get(pid, ""),
@@ -6232,7 +6233,7 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"[assistant] foodcost {name}: {e!r}")
         try:
-            d = await dashboard(org, _Resp(), "month", user=user)
+            d = await dashboard(org, _Resp(), "month", None, None, None, user=user)
             b["revenue"] = d.get("revenue_today")  # revenue_today = выручка периода
         except Exception as e:
             logger.warning(f"[assistant] dashboard {name}: {e!r}")

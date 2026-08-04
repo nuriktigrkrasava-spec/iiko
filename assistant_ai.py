@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from anthropic import AsyncAnthropic
 
-MODEL = "claude-opus-5"  # по умолчанию (claude-api). insights_service использует opus-4-8.
+MODEL = "claude-haiku-4-5"  # дешёвая модель по просьбе владельца (бюджет). Поднять при желании.
 _client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY")) if os.getenv("ANTHROPIC_API_KEY") else None
 
 DOW_RU = {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Вс"}
@@ -123,8 +123,7 @@ async def advise(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
     try:
         msg = await _client.messages.create(
             model=MODEL,
-            max_tokens=8000,
-            output_config={"effort": "medium"},
+            max_tokens=4000,
             system=_SYSTEM,
             messages=[{"role": "user", "content": json.dumps(signals, ensure_ascii=False)}],
         )
