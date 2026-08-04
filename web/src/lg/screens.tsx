@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback } from './ui'
-import { areaChart, barChart, yoyChart, slope, heatStrip, donut, hbar, legend, color, bar } from './charts'
+import { areaChart, barChart, yoyChart, slope, donut, hbar, legend, color, bar } from './charts'
 import { useApi } from '../lib/useApi'
 import { periodLabel } from '../lib/api'
 import { tenge, tengeShort } from '../lib/format'
@@ -305,10 +305,14 @@ export function Staff() {
   if (sh.error || !sh.data) return <Note>Не удалось загрузить: {sh.error}</Note>
   const staff = [...sh.data.staff].sort((a, b) => b.revenue - a.revenue)
   const maxRev = Math.max(...staff.map((s) => s.revenue), 1)
-  // агрегируем часы из тепловой карты (сумма заказов по часу)
-  const byHour = new Map<number, number>()
-  hm.data?.cells.forEach((c) => byHour.set(c.h, (byHour.get(c.h) || 0) + c.orders))
-  const hours = [...byHour.entries()].sort((a, b) => a[0] - b[0]).map(([h, v]) => ({ h, v }))
+  // час-пик ПО КАЖДОМУ ДНЮ НЕДЕЛИ: пиковый час и его заказы для каждого дня
+  const WD = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+  const perDay = WD.map((wd, d) => {
+    const dayCells = (hm.data?.cells || []).filter((c) => c.d === d)
+    const pk = dayCells.reduce<{ h: number; orders: number } | null>((m, c) => (c.orders > (m?.orders ?? -1) ? c : m), null)
+    return { wd, peakH: pk?.h, peakOrders: pk?.orders ?? 0 }
+  })
+  const maxDayPeak = Math.max(1, ...perDay.map((x) => x.peakOrders))
   const sum = co.data?.summary
   return (
     <>
@@ -317,8 +321,21 @@ export function Staff() {
           note={hm.data ? `Пик — ${hm.data.peak.h}:00, ${hm.data.peak.orders} заказов. Разброс по официантам — ${Math.round((1 - staff[staff.length - 1].revenue / maxRev) * 100)}%.` : 'Смены за период.'} />
       </Glass>
       <Glass span={7}>
-        <Eyebrow t="Загрузка по часам" hint="красный — пик" />
-        {hours.length ? <Chart html={heatStrip(hours)} style={{ marginTop: 0 }} /> : <div style={{ fontSize: 13, color: 'var(--mute)', marginTop: 10 }}>нет данных по часам</div>}
+        <Eyebrow t="Час-пик по дням недели" hint="пиковый час каждого дня · когда ставить больше людей" />
+        {hm.data?.cells?.length ? (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginTop: 12 }}>
+            {perDay.map((x) => {
+              const c = x.peakOrders >= maxDayPeak * 0.85 ? 'var(--red)' : x.peakOrders >= maxDayPeak * 0.6 ? 'var(--amb)' : 'var(--hi)'
+              return (
+                <div key={x.wd} style={{ textAlign: 'center', padding: '10px 4px', borderRadius: 12, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
+                  <div style={{ fontSize: 11, color: 'var(--mute)' }}>{x.wd}</div>
+                  <div className="tnum" style={{ fontSize: 15, fontWeight: 700, marginTop: 4, color: c }}>{x.peakH != null ? `${x.peakH}:00` : '—'}</div>
+                  <div className="tnum" style={{ fontSize: 11, color: 'var(--mute)', marginTop: 2 }}>{x.peakOrders} зак.</div>
+                </div>
+              )
+            })}
+          </div>
+        ) : <div style={{ fontSize: 13, color: 'var(--mute)', marginTop: 10 }}>нет данных по часам</div>}
       </Glass>
       <Glass span={7}>
         <Eyebrow t="Официанты" hint="выручка · заказы · с начала смены" />
