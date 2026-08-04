@@ -131,6 +131,69 @@ class IikoClient:
             resp.raise_for_status()
             return resp.json().get("organizations", [])
 
+    async def terminal_groups(self, org_ids: List[str]) -> List[str]:
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/terminal_groups",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationIds": org_ids})
+            resp.raise_for_status()
+            data = resp.json()
+            return [i["id"] for grp in data.get("terminalGroups", []) for i in grp.get("items", [])]
+
+    async def restaurant_sections(self, tg_ids: List[str]) -> List[Dict[str, Any]]:
+        """Секции зала со схемой (координаты столов): available_restaurant_sections."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/available_restaurant_sections",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"terminalGroupIds": tg_ids, "returnSchema": True})
+            resp.raise_for_status()
+            return resp.json().get("restaurantSections", [])
+
+    async def reserve_available_orgs(self, org_ids: List[str]) -> List[str]:
+        """id организаций, где включён модуль броней (reserve/available_organizations)."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/available_organizations",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationIds": org_ids})
+            resp.raise_for_status()
+            return [o.get("id") for o in resp.json().get("organizations", []) if o.get("id")]
+
+    async def reserve_workload(self, section_ids: List[str], date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """Брони по секциям за окно (reserve/restaurant_sections_workload).
+        Даты в формате 'yyyy-MM-dd HH:mm:ss.fff'."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/restaurant_sections_workload",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"restaurantSectionIds": section_ids, "dateFrom": date_from, "dateTo": date_to})
+            resp.raise_for_status()
+            return resp.json().get("reserves", [])
+
+    async def hall_orders(self, org_id: str, table_ids: List[str], tg_id: str = None) -> List[Dict[str, Any]]:
+        """Открытые заказы зала (New/Bill). init_by_table проталкивает их в Cloud."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            H = {"Authorization": f"Bearer {token}"}
+            if tg_id and table_ids:
+                try:
+                    await client.post(f"{IIKO_CLOUD_BASE}/api/1/order/init_by_table",
+                                      headers=H, json={"organizationId": org_id, "terminalGroupId": tg_id, "tableIds": table_ids})
+                except Exception:
+                    pass
+            if not table_ids:
+                return []
+            resp = await client.post(f"{IIKO_CLOUD_BASE}/api/1/order/by_table",
+                                     headers=H, json={"organizationIds": [org_id], "tableIds": table_ids, "statuses": ["New", "Bill"]})
+            resp.raise_for_status()
+            return resp.json().get("orders", [])
+
     async def get_nomenclature(self, org_id: str) -> Dict[str, Any]:
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -788,6 +851,23 @@ class IikoWebClient:
                         for it in items if it.get("productId")]
         return []
 
+    async def get_balance_rows(self, timestamp: str) -> List[Dict[str, Any]]:
+        """Сырые остатки складов на дату: [{store, product, amount, sum}]. timestamp — 'YYYY-MM-DDTHH:MM:SS.000'."""
+        for attempt in range(2):
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/v2/reports/balance/stores",
+                    params={"key": token, "timestamp": timestamp}
+                )
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data if isinstance(data, list) else data.get("data", [])
+        return []
+
     async def get_stock_prices(self) -> Dict[str, float]:
         """Учётная себестоимость по ингредиентам из остатков складов."""
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
@@ -834,10 +914,16 @@ class IikoWebClient:
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
             # Формат для api.py: {"expenses": [{"items": [{"comment": name, "sum": amount, "category": {"name": cat}}], "dateIncoming": date, "paymentType": {"name": dept}}]}
+            # Группа INCOME_EXPENSES смешивает доходы И расходы — доходные счета
+            # («Торговая выручка…») это НЕ расход, выкидываем, иначе структура расходов врёт.
+            _income_hints = ("выручка", "доход")
             expenses = []
             for r in rows:
                 amount = float(r.get("Sum.ResignedSum") or 0)
                 if amount <= 0:
+                    continue
+                acc_name = (r.get("Account.Name") or "")
+                if any(h in acc_name.lower() for h in _income_hints):
                     continue
                 expenses.append({
                     "id": "",
@@ -1079,11 +1165,12 @@ class IikoWebClient:
         if org_ids and org_ids[0] and org_ids[0] != "demo":
             filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
 
+        # Группируем сразу по товару — иначе позиции накладной взять неоткуда (были пустые).
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id"],
-            "aggregateFields": ["Sum.Incoming"],
+            "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id", "Product.Id", "Product.MeasureUnit"],
+            "aggregateFields": ["Sum.Incoming", "Amount.In"],
             "filters": filters,
         }
         token = await self._ensure_token()
@@ -1101,8 +1188,10 @@ class IikoWebClient:
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
-        # Резолв имён поставщиков по Counteragent.Id (как в get_invoice_items_olap)
+        # Резолв имён поставщиков и товаров (как в get_invoice_items_olap)
         suppliers_by_id: Dict[str, str] = {}
+        names_by_id: Dict[str, str] = {}
+        units_by_id: Dict[str, str] = {}
         if rows and org_ids and org_ids[0] and org_ids[0] != "demo":
             try:
                 for s in await self.get_suppliers(org_ids[0]):
@@ -1110,23 +1199,44 @@ class IikoWebClient:
                         suppliers_by_id[s["id"]] = s.get("name") or s["id"]
             except Exception:
                 pass
+            try:
+                for p in await self.search_nomenclature(org_ids[0], "", limit=10000):
+                    pid = p.get("id")
+                    if pid:
+                        names_by_id[pid] = p.get("name") or ""
+                        units_by_id[pid] = p.get("unit") or ""
+            except Exception:
+                pass
 
-        result = []
+        # Собираем накладные по (день, контрагент); товарные строки идут в items.
+        grouped: Dict[tuple, Dict[str, Any]] = {}
         for r in rows:
-            amount = float(r.get("Sum.Incoming") or 0)
-            if amount <= 0:
+            total = float(r.get("Sum.Incoming") or 0)
+            if total <= 0:
                 continue
             day = str(r.get("DateTime.DateTyped") or "")[:10]
             cid = r.get("Counteragent.Id") or ""
-            result.append({
+            key = (day, cid)
+            inv = grouped.setdefault(key, {
                 "documentNumber": "",
                 "status": "Processed",
                 "supplier": {"name": suppliers_by_id.get(cid) or "—"},
                 "dateIncoming": f"{day}T00:00:00" if day else f"{date_to}T00:00:00",
                 "items": [],
-                "sum": amount,
+                "sum": 0.0,
             })
-        return {"invoiceIncomings": result}
+            inv["sum"] += total
+            pid = r.get("Product.Id") or ""
+            if pid:
+                amount = float(r.get("Amount.In") or 0)
+                inv["items"].append({
+                    "name": names_by_id.get(pid) or "—",
+                    "amount": amount,
+                    "unit": r.get("Product.MeasureUnit") or units_by_id.get(pid, "") or "",
+                    "price": (total / amount) if amount else 0,
+                    "sum": total,
+                })
+        return {"invoiceIncomings": list(grouped.values())}
 
     async def get_olap_columns(self, report_type: str = "TRANSACTIONS") -> List[Dict[str, Any]]:
         """Список доступных OLAP-полей для report_type на этом iikoServer.

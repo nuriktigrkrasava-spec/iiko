@@ -2062,18 +2062,143 @@ def _demo_stock() -> Dict[str, Any]:
             "branch": "Демо Ресторан · Алматы"}
 
 
+async def _stock_balance(client, dept: str, org_name: str, org_id_for_nom: str,
+                         date_from: str, date_to: str) -> Dict[str, Any]:
+    """Строгий баланс склада филиала: было(начало)+приход−остаток(конец)=ушло по факту;
+    сверяем с теоретическим расходом по техкартам → расхождение (утечка) в ₸."""
+    # 1. склады филиала (изоляция) — parentId == org
+    try:
+        stores = await client.get_stores(org_name)
+    except Exception:
+        stores = []
+    store_ids = {s.get("id") for s in stores if s.get("id")}
+
+    start_ts = date_from[:10] + "T00:00:00.000"
+    end_ts = date_to[:10] + "T23:59:59.000"
+    open_rows, close_rows, inc_items, fc = await asyncio.gather(
+        client.get_balance_rows(start_ts),
+        client.get_balance_rows(end_ts),
+        client.get_invoice_items_olap([dept], date_from, date_to),
+        _foodcost_month(client, dept, date_from, date_to),
+        return_exceptions=True,
+    )
+    if isinstance(open_rows, Exception) or isinstance(close_rows, Exception):
+        raise open_rows if isinstance(open_rows, Exception) else close_rows
+
+    def _agg(rows):
+        amt, summ = {}, {}
+        for r in (rows or []):
+            if store_ids and r.get("store") not in store_ids:
+                continue
+            pid = r.get("product")
+            if not pid:
+                continue
+            amt[pid] = amt.get(pid, 0.0) + float(r.get("amount", 0) or 0)
+            summ[pid] = summ.get(pid, 0.0) + float(r.get("sum", 0) or 0)
+        return amt, summ
+
+    opening, _ = _agg(open_rows)
+    closing, close_sum = _agg(close_rows)
+
+    incoming: Dict[str, float] = {}
+    if not isinstance(inc_items, Exception):
+        for it in inc_items:
+            pid = it.get("product_id")
+            if pid:
+                incoming[pid] = incoming.get(pid, 0.0) + float(it.get("amount", 0) or 0)
+
+    # 2. теоретический расход по техкартам (Σ продано×норма ингредиента)
+    consumed: Dict[str, float] = {}
+    dishes = fc[0] if (not isinstance(fc, Exception) and fc) else []
+    try:
+        name_map, prices = await asyncio.gather(client.get_dish_name_map(), client.get_stock_prices())
+        sold = [{"pid": name_map.get(str(d.get("name", "")).strip().lower()), "cnt": float(d.get("count", 0) or 0)}
+                for d in dishes]
+        pids = [s["pid"] for s in sold if s["pid"]]
+        recipes: Dict[str, list] = {}
+        for i in range(0, len(pids), 6):
+            batch = pids[i:i + 6]
+            got = await asyncio.gather(*[_get_recipe_cached(client, p, date_to[:10]) for p in batch],
+                                       return_exceptions=True)
+            for p, items in zip(batch, got):
+                recipes[p] = [] if isinstance(items, Exception) else items
+        stock_pids = set(opening) | set(closing) | set(incoming)
+        for s in sold:
+            rec = recipes.get(s["pid"], [])
+            if rec:
+                for ing in rec:
+                    ip = ing.get("productId")
+                    if ip:
+                        consumed[ip] = consumed.get(ip, 0.0) + s["cnt"] * float(ing.get("amount", 0) or 0)
+            elif s["pid"] in stock_pids:
+                # товар без техкарты, продан напрямую (напитки и т.п.) → расход = продажи
+                consumed[s["pid"]] = consumed.get(s["pid"], 0.0) + s["cnt"]
+    except Exception as e:
+        logger.warning(f"[stock] расход по техкартам {org_name}: {e!r}")
+        prices = {}
+
+    # 3. имена/ед. измерения
+    names: Dict[str, str] = {}
+    units: Dict[str, str] = {}
+    try:
+        for p in await client.search_nomenclature(org_id_for_nom, "", limit=10000):
+            if p.get("id"):
+                names[p["id"]] = p.get("name") or ""
+                units[p["id"]] = p.get("unit") or ""
+    except Exception:
+        pass
+
+    pids_all = set(opening) | set(incoming) | set(closing) | set(consumed)
+    rows = []
+    for pid in pids_all:
+        op = round(opening.get(pid, 0.0), 2)
+        inc = round(incoming.get(pid, 0.0), 2)
+        cl = round(closing.get(pid, 0.0), 2)
+        sold_q = round(consumed.get(pid, 0.0), 2)
+        actual = round(op + inc - cl, 2)
+        # цена = учётная себестоимость (остаток) или из stock_prices
+        price = (close_sum.get(pid, 0.0) / closing[pid]) if closing.get(pid) else float(prices.get(pid, 0) or 0)
+        disc = round(actual - sold_q, 2)
+        disc_money = round(max(0.0, disc) * price)
+        # интересны только позиции с движением/расхождением
+        if abs(actual) < 0.01 and sold_q < 0.01 and inc < 0.01:
+            continue
+        issue = None
+        if op < 0 or cl < 0:
+            # отрицательный остаток в iiko → учёт по товару не ведётся, утечку не считаем (мусор)
+            disc_money = 0
+        elif cl <= 0 and sold_q > 0:
+            issue = "stockout"
+        rows.append({
+            "position": names.get(pid) or pid[:8], "unit": units.get(pid, ""),
+            "opening": op, "incoming": inc, "sold": sold_q, "closing": cl,
+            "actual_used": actual, "discrepancy": disc,
+            "discrepancy_money": disc_money, "price": round(price, 2), "issue": issue,
+        })
+    rows.sort(key=lambda r: r["discrepancy_money"], reverse=True)
+    total = sum(r["discrepancy_money"] for r in rows)
+    return {"available": True, "rows": rows[:60], "total_discrepancy": total, "branch": org_name}
+
+
 @app.get("/api/stock/{org_id}")
 async def stock(org_id: str, user: Dict = Depends(get_current_user)):
-    """Склад: строгий баланс (было+приход−остаток=факт) vs продажи → расхождение в ₸.
-    Изоляция по филиалу (Store/departmentName) — данные филиалов не смешиваются."""
+    """Склад: строгий баланс (было+приход−остаток=ушло по факту) vs расход по техкартам
+    → расхождение (утечка) в ₸. Изоляция по складу филиала."""
     if _use_demo_data(user, org_id):
         return _demo_stock()
-    # TODO(real): остатки iiko на начало/конец + приход из incomingInvoice + расход из продаж,
-    # строго по Store выбранного филиала. Пока честный статус (не 400-ошибка!) — фронт покажет план.
-    info = _get_restaurant_info(_get_org_id(org_id, user), user)
-    return {"available": False, "rows": [], "total_discrepancy": 0,
-            "branch": info.get("org_name", ""),
-            "reason": "Строгий баланс склада для самохостед iiko ещё подключается."}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    login = info["api_login"]
+    date_from, date_to = get_period_dates("month")
+    client = get_client(login, info.get("iiko_server"), info.get("api_password"))
+    try:
+        return await _stock_balance(client, _olap_dept(real_org, info),
+                                    info.get("org_name", ""), real_org, date_from, date_to)
+    except Exception as e:
+        logger.warning(f"[stock] {real_org}: {e!r}")
+        return {"available": False, "rows": [], "total_discrepancy": 0,
+                "branch": info.get("org_name", ""),
+                "reason": "Не удалось собрать баланс склада — обнови через минуту."}
 
 
 @app.get("/api/foodcost/{org_id}")
