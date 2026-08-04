@@ -13,7 +13,7 @@ type Week = { widx: number; from: string; to: string }
 type PlanData = { month: string; weeks: Week[]; types: string[]; plan: Grid; fact: Grid; demo: boolean }
 
 const TYPES = ['hall', 'delivery', 'agg'] as const
-const TYPE_LABEL: Record<string, string> = { hall: 'Зал', delivery: 'Доставка', agg: 'Агрегаторы' }
+const TYPE_LABEL: Record<string, string> = { hall: 'Зал + вынос', delivery: 'Доставка', agg: 'Агрегаторы' }
 const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
 
 const curYm = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }
@@ -90,8 +90,8 @@ export default function Plan() {
           {totals.map((x) => (
             <div key={x.t} style={{ padding: 14, borderRadius: 14, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
               <div style={{ fontSize: 12, color: 'var(--mute)' }}>{TYPE_LABEL[x.t]}</div>
-              <div className="tnum" style={{ fontSize: 22, fontWeight: 680, marginTop: 6, color: 'var(--hi)' }}>{x.f} <span style={{ fontSize: 13, color: 'var(--mute)' }}>/ {x.p}</span></div>
-              <div className="tnum" style={{ fontSize: 12, fontWeight: 650, color: progColor(x.pct), marginTop: 2 }}>{x.p ? x.pct + '% плана' : '— план не задан'}</div>
+              <div className="tnum" style={{ fontSize: 24, fontWeight: 680, marginTop: 6, color: 'var(--hi)' }}>{x.f} <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--mute)' }}>заказов · факт</span></div>
+              <div className="tnum" style={{ fontSize: 12, fontWeight: 600, color: progColor(x.pct), marginTop: 3 }}>{x.p ? `план ${x.p} · ${x.pct}%` : 'план не задан'}</div>
             </div>
           ))}
         </div>
@@ -112,13 +112,14 @@ export default function Plan() {
                     const pct = pv ? Math.round((fv / pv) * 100) : 0
                     return (
                       <td key={t} style={td}>
+                        <div style={{ fontSize: 9, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--mute)', textAlign: 'center', marginBottom: 3 }}>план</div>
                         <input type="number" min={0} value={pv || ''} placeholder="0"
                           onChange={(e) => onCell(w.widx, t, e.target.value)}
                           onBlur={() => commit(w.widx, t)}
                           onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
                           style={inp} />
-                        <div className="tnum" style={{ fontSize: 11, color: pv ? progColor(pct) : 'var(--mute)', marginTop: 4, textAlign: 'center' }}>
-                          факт {fv}{pv ? ` · ${pct}%` : ''}
+                        <div className="tnum" style={{ fontSize: 12, marginTop: 5, textAlign: 'center', color: 'var(--lo)' }}>
+                          факт: <b style={{ color: 'var(--hi)' }}>{fv}</b>{pv ? <span style={{ color: progColor(pct) }}> · {pct}%</span> : null}
                         </div>
                       </td>
                     )
