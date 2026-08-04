@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -50,6 +50,7 @@ from database import (
 from iiko import IikoClient, get_client
 from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
 import assistant_ai
+import social_ig
 import calendar
 from foodcost_calc import compute_recipe_foodcost
 
@@ -6415,6 +6416,83 @@ async def plan_set(org_id: str, payload: PlanSetIn, user: Dict = Depends(get_cur
     else:
         raise HTTPException(status_code=400, detail="widx or all_weeks required")
     return {"ok": True}
+
+
+# ==== Соцсети: Instagram Business через Meta OAuth ====
+# Каркас. Заработает, когда в окружении появятся META_APP_ID/META_APP_SECRET
+# (приложение Meta) и Instagram-аккаунт клиента будет Business + привязан к FB-странице.
+
+def _ig_close_html(msg: str, ok: bool = False) -> str:
+    """Крошечная страница для popup: сообщает опенеру результат и закрывается."""
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<body style='font:15px system-ui;padding:40px;text-align:center;color:#111'>"
+        f"<p>{msg}</p>"
+        "<script>try{window.opener&&window.opener.postMessage("
+        f"{{source:'ig-oauth',ok:{'true' if ok else 'false'}}},'*');}}catch(e){{}}"
+        "setTimeout(function(){window.close();},1200);</script></body>"
+    )
+
+
+@app.get("/api/social/instagram/connect/{org_id}")
+async def ig_connect(org_id: str, request: Request, user: Dict = Depends(get_current_user)):
+    """Ссылка на вход через Facebook. Если приложение Meta не настроено — configured:false."""
+    if not social_ig.is_configured():
+        return {"configured": False,
+                "reason": "Нет META_APP_ID/META_APP_SECRET. Зарегистрируй приложение на "
+                          "developers.facebook.com (тип Business) и добавь ключи в окружение."}
+    real_org = _get_org_id(org_id, user)
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/social/instagram/callback"
+    return {"configured": True, "url": social_ig.authorize_url(redirect_uri, real_org)}
+
+
+@app.get("/api/social/instagram/callback")
+async def ig_callback(request: Request, code: Optional[str] = None,
+                      state: Optional[str] = None, error: Optional[str] = None):
+    """Facebook редиректит сюда после согласия. state = real_org (без auth-заголовка)."""
+    from database import set_social_account, save_social_snapshot
+    if error or not code or not state:
+        return HTMLResponse(_ig_close_html(f"Не удалось подключить Instagram: {error or 'нет кода'}"))
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/social/instagram/callback"
+    try:
+        token = await social_ig.exchange_code(code, redirect_uri)
+        acc = await social_ig.get_ig_account(token)
+        if not acc:
+            return HTMLResponse(_ig_close_html(
+                "Instagram Business-аккаунт не найден. Переведи профиль в Business "
+                "и привяжи к Facebook-странице."))
+        prof = await social_ig.fetch_profile(acc["id"], token)
+        set_social_account(state, "instagram", acc["id"], token,
+                           prof.get("username") or acc.get("username", ""))
+        if prof.get("followers") is not None:
+            save_social_snapshot(state, "instagram", local_now().strftime("%Y-%m-%d"), prof["followers"])
+        return HTMLResponse(_ig_close_html("Instagram подключён ✓", ok=True))
+    except Exception as e:
+        logger.warning(f"[social] ig callback: {e!r}")
+        return HTMLResponse(_ig_close_html("Ошибка подключения Instagram."))
+
+
+@app.get("/api/social/instagram/{org_id}")
+async def ig_data(org_id: str, user: Dict = Depends(get_current_user)):
+    """Данные подключённого Instagram: подписчики, рост за 30 дней, последние посты."""
+    from database import get_social_account, save_social_snapshot, get_social_growth
+    real_org = _get_org_id(org_id, user)
+    acc = get_social_account(real_org, "instagram")
+    if not acc:
+        return {"connected": False, "configured": social_ig.is_configured()}
+    try:
+        prof = await social_ig.fetch_profile(acc["account_id"], acc["token"])
+    except Exception as e:
+        logger.warning(f"[social] ig data: {e!r}")
+        return {"connected": True, "stale": True, "username": acc.get("username")}
+    if prof.get("followers") is not None:
+        save_social_snapshot(real_org, "instagram", local_now().strftime("%Y-%m-%d"), prof["followers"])
+    growth = get_social_growth(real_org, "instagram", days=30)
+    start = growth[0]["followers"] if growth else None
+    delta = (prof["followers"] - start) if (start is not None and prof.get("followers") is not None) else None
+    return {"connected": True, "username": prof.get("username"),
+            "followers": prof.get("followers"), "media_count": prof.get("media_count"),
+            "delta_30d": delta, "growth": growth, "posts": prof.get("posts", [])}
 
 
 # Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.

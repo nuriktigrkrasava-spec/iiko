@@ -967,6 +967,85 @@ def get_rating_history(org_id: str, platform: str, days: int = 30):
     return [dict(r) for r in rows]
 
 
+# ==== Подключённые соцсети (OAuth-токены + снапшоты подписчиков) ====
+# Токен хранится зашифрованным (encrypt_password/ENCRYPTION_KEY), как пароли iiko.
+
+def _ensure_social(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS social_accounts (
+        org_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        account_id TEXT,
+        token TEXT,
+        username TEXT,
+        updated_at TEXT,
+        PRIMARY KEY(org_id, platform)
+    );
+    CREATE TABLE IF NOT EXISTS social_snapshots (
+        org_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        date TEXT NOT NULL,
+        followers INTEGER,
+        PRIMARY KEY(org_id, platform, date)
+    );
+    """)
+
+
+def set_social_account(org_id: str, platform: str, account_id: str,
+                       token: str, username: str = ""):
+    conn = get_db()
+    _ensure_social(conn)
+    conn.execute("""INSERT OR REPLACE INTO social_accounts
+                    (org_id, platform, account_id, token, username, updated_at)
+                    VALUES(?,?,?,?,?,?)""",
+                 (org_id, platform, account_id, encrypt_password(token),
+                  username, datetime.utcnow().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def get_social_account(org_id: str, platform: str) -> Optional[Dict[str, Any]]:
+    """Возвращает {account_id, token(расшифрован), username} или None."""
+    conn = get_db()
+    _ensure_social(conn)
+    row = conn.execute("SELECT * FROM social_accounts WHERE org_id=? AND platform=?",
+                       (org_id, platform)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    d = dict(row)
+    d["token"] = decrypt_password(d.get("token") or "")
+    return d
+
+
+def delete_social_account(org_id: str, platform: str):
+    conn = get_db()
+    _ensure_social(conn)
+    conn.execute("DELETE FROM social_accounts WHERE org_id=? AND platform=?", (org_id, platform))
+    conn.commit()
+    conn.close()
+
+
+def save_social_snapshot(org_id: str, platform: str, date: str, followers):
+    conn = get_db()
+    _ensure_social(conn)
+    conn.execute("""INSERT OR REPLACE INTO social_snapshots(org_id, platform, date, followers)
+                    VALUES(?,?,?,?)""", (org_id, platform, date, followers))
+    conn.commit()
+    conn.close()
+
+
+def get_social_growth(org_id: str, platform: str, days: int = 30):
+    conn = get_db()
+    _ensure_social(conn)
+    rows = conn.execute("""SELECT date, followers FROM social_snapshots
+                           WHERE org_id=? AND platform=? AND date >= date('now', ?)
+                           ORDER BY date""",
+                        (org_id, platform, f"-{days} days")).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 # ==== Ставки для расчёта зарплаты (вкладка «Смены») ====
 
 def init_salary_db():
