@@ -2137,14 +2137,26 @@ async def _stock_balance(client, dept: str, org_name: str, org_id_for_nom: str,
         logger.warning(f"[stock] расход по техкартам {org_name}: {e!r}")
         prices = {}
 
-    # 3. имена/ед. измерения
+    # 3. имена/ед. измерения (unit у части товаров приходит как id единицы → резолвим в «кг/шт/л»)
+    try:
+        munits = await client.get_measure_units_map()
+    except Exception:
+        munits = {}
+
+    def _unit_name(u: str) -> str:
+        if not u:
+            return ""
+        if u in munits:
+            return munits[u]
+        return "" if (len(u) >= 32 and u.count("-") >= 3) else u  # похоже на uuid — не показываем
+
     names: Dict[str, str] = {}
     units: Dict[str, str] = {}
     try:
         for p in await client.search_nomenclature(org_id_for_nom, "", limit=10000):
             if p.get("id"):
                 names[p["id"]] = p.get("name") or ""
-                units[p["id"]] = p.get("unit") or ""
+                units[p["id"]] = _unit_name(p.get("unit") or "")
     except Exception:
         pass
 
