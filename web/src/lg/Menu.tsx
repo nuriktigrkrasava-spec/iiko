@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { useApi } from '../lib/useApi'
 import { Glass, Chart, Bullet, Insight } from './ui'
-import { donut, hbar, legend, color, PALETTE } from './charts'
+import { donut, hbar, legend, color, bar } from './charts'
 import { tengeShort, num } from '../lib/format'
 
 /* ── Формы данных ── */
@@ -84,14 +84,14 @@ export default function Menu() {
   const dishes = [...s.top_dishes].sort((a, b) => b.revenue - a.revenue)
 
   /* Market basket */
-  const pairData = (c?.pairs ?? []).map((p, i) => ({ l: `${p.a} + ${p.b}`, v: p.count, c: color(i) }))
+  const pairData = (c?.pairs ?? []).map((p) => ({ l: `${p.a} + ${p.b}`, v: p.count, c: bar(0) }))
   const heroDishes = c ? Object.keys(c.companions).slice(0, 2) : []
   const strongest = c?.pairs?.[0]
   const DRINK = 700 // средняя цена сопутствующего напитка/допа, ₸
   const upside = strongest ? Math.round(strongest.count * 0.5) * DRINK : 0
 
   /* Способы оплаты */
-  const payData = s.pay_types.map((p, i) => ({ l: p.name, v: +(p.revenue / 1_000_000).toFixed(1), c: color(i) }))
+  const payData = s.pay_types.map((p) => ({ l: p.name, v: p.revenue, disp: tengeShort(p.revenue), c: bar(0) }))
 
   return (
     <>
@@ -110,7 +110,7 @@ export default function Menu() {
             <div className="tnum" style={{ fontSize: 24, fontWeight: 660, letterSpacing: '-.02em', marginTop: 6 }}>{tengeShort(blended)}</div>
           </div>
         </div>
-        <div style={{ height: 8, borderRadius: 6, marginTop: 24, background: `linear-gradient(90deg,${PALETTE.slice(0, 6).join(',')})`, opacity: 0.92 }} />
+        <div style={{ height: 8, borderRadius: 6, marginTop: 24, background: 'linear-gradient(90deg, var(--acc), var(--acc-2))', opacity: 0.92 }} />
       </Glass>
 
       {/* 2 · Каналы */}
@@ -182,7 +182,7 @@ export default function Menu() {
               <div style={{ fontSize: 11, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600, marginBottom: 8 }}>К «{name}» берут</div>
               {(c?.companions[name] ?? []).map((x, i) => (
                 <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 0', borderTop: i ? '1px solid var(--hair-2)' : 'none' }}>
-                  <i style={{ width: 9, height: 9, borderRadius: 3, background: color(i), flex: 'none' }} />
+                  <i style={{ width: 9, height: 9, borderRadius: 3, background: bar(i), flex: 'none' }} />
                   <span style={{ fontSize: 13, color: 'var(--lo)' }}>{x.name}</span>
                   <span className="tnum" style={{ marginLeft: 'auto', fontSize: 13, fontWeight: 650 }}>{num(x.count)} <span style={{ color: 'var(--mute)', fontWeight: 400, fontSize: 11 }}>зак.</span></span>
                 </div>
@@ -194,8 +194,8 @@ export default function Menu() {
 
       {/* 6 · Способы оплаты */}
       <Glass span={12}>
-        <div className="eyebrow"><span>Способы оплаты</span><span className="hint">выручка, млн ₸</span></div>
-        <Chart html={hbar(payData, ' млн')} />
+        <div className="eyebrow"><span>Способы оплаты</span><span className="hint">выручка за месяц (с 1 числа)</span></div>
+        <Chart html={hbar(payData)} />
       </Glass>
     </>
   )
