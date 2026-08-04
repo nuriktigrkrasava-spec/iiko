@@ -6240,8 +6240,9 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
         org = r.get("organization_id")
         name = r.get("organization_name") or "Филиал"
         b: Dict[str, Any] = {"name": name, "foodcost": None, "revenue": None,
-                             "cancels": None, "writeoffs_pct": None, "reviews": [],
-                             "peak": None, "has_recipes": None, "has_socials": None}
+                             "cancels": None, "writeoffs": None, "reviews": [],
+                             "peak": None, "has_recipes": None, "has_socials": None,
+                             "stop_count": None, "stop_items": []}
         try:
             fc = await foodcost(org, "month", 1, user)
             b["has_recipes"] = fc.get("fact_pct") is not None
@@ -6274,6 +6275,19 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
                 b["peak"] = {"day": assistant_ai.DOW_RU.get(pk.get("d")), "hour": pk.get("h")}
         except Exception as e:
             logger.warning(f"[assistant] heatmap {name}: {e!r}")
+        try:
+            st = await stoplist(org, "month", user)
+            stops = [i.get("name") for i in st.get("items", []) if i.get("status") == "stop"]
+            b["stop_count"] = len(stops)
+            b["stop_items"] = stops[:5]
+        except Exception as e:
+            logger.warning(f"[assistant] stoplist {name}: {e!r}")
+        try:
+            wo = await writeoffs(org, "month", user)
+            if wo.get("total_written"):
+                b["writeoffs"] = {"total": wo.get("total_written"), "pct": wo.get("loss_pct")}
+        except Exception as e:
+            logger.warning(f"[assistant] writeoffs {name}: {e!r}")
         return b
 
     async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
