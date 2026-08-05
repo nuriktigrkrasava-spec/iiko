@@ -1513,11 +1513,14 @@ def _widget_token_for(uid: int) -> str:
     return t
 
 
-async def _widget_gather(uid: int) -> Dict[str, Any]:
-    """Реальные числа для виджета: выручка сегодня + Δ ко вчера + недельная искра."""
+async def _widget_gather(uid: int, only_org: Optional[str] = None) -> Dict[str, Any]:
+    """Реальные числа для виджета: выручка сегодня + справка «вчера» + недельная искра.
+    only_org — считать по одному филиалу; иначе сумма по всем филиалам владельца."""
     from fastapi import Response as _Resp
     user = {"id": uid, "username": "", "first_name": ""}
     orgs = get_restaurants(uid)
+    if only_org:
+        orgs = [o for o in orgs if o["organization_id"] == only_org]
     if not orgs:
         return {"connected": False}
 
@@ -1589,7 +1592,10 @@ async def widget_token(request: Request, user: Dict = Depends(get_current_user))
         raise HTTPException(status_code=401, detail="no user")
     t = _widget_token_for(uid)
     base = str(request.base_url).rstrip("/")
-    return {"token": t, "url": f"{base}/w/{t}"}
+    branches = [{"id": o["organization_id"], "name": o["organization_name"],
+                 "url": f"{base}/w/{t}/{o['organization_id']}"}
+                for o in get_restaurants(uid)]
+    return {"token": t, "url": f"{base}/w/{t}", "branches": branches}
 
 
 @app.get("/w/{token}")
@@ -1605,6 +1611,20 @@ async def widget_page(token: str):
         _set_cached(cache_key, data)
     html = _render_widget_page(data)
     return HTMLResponse(html, headers={"Cache-Control": "max-age=120"})
+
+
+@app.get("/w/{token}/{org_id}")
+async def widget_page_branch(token: str, org_id: str):
+    """То же, но по одному филиалу (org_id должен принадлежать владельцу токена)."""
+    uid_s = get_app_state(f"widget_user:{token}")
+    if not uid_s:
+        return HTMLResponse(_render_widget_page({"connected": False}), status_code=404)
+    cache_key = f"widgetpage:{token}:{org_id}"
+    data = _get_cached(cache_key)
+    if data is None:
+        data = await _widget_gather(int(uid_s), only_org=org_id)
+        _set_cached(cache_key, data)
+    return HTMLResponse(_render_widget_page(data), headers={"Cache-Control": "max-age=120"})
 
 
 @app.get("/api/dashboard/{org_id}")

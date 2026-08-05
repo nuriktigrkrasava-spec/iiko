@@ -94,18 +94,23 @@ function SocialOnboard() {
   )
 }
 
-/* Шаг 4 — виджет на домашний экран: личная ссылка (выручка + кнопка накладной). */
+/* Шаг 4 — виджет на домашний экран: личная ссылка (выручка + кнопка накладной).
+   Главная ссылка = итог по всем филиалам; плюс ссылка на каждый филиал отдельно. */
+type WBranch = { id: string; name: string; url: string }
 function WidgetSetup() {
   const [url, setUrl] = useState('')
-  const [copied, setCopied] = useState(false)
+  const [branches, setBranches] = useState<WBranch[]>([])
+  const [copied, setCopied] = useState('')
   useEffect(() => {
-    post<{ url: string }>('/api/widget/token', {}).then((r) => setUrl(r.url)).catch(() => {})
+    post<{ url: string; branches: WBranch[] }>('/api/widget/token', {})
+      .then((r) => { setUrl(r.url); setBranches(r.branches || []) }).catch(() => {})
   }, [])
-  const copy = async () => {
-    if (!url) return
-    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1600) } catch { /* нет доступа к буферу */ }
+  const copy = async (link: string, key: string) => {
+    if (!link) return
+    try { await navigator.clipboard.writeText(link); setCopied(key); setTimeout(() => setCopied(''), 1600) } catch { /* нет доступа к буферу */ }
   }
   const btn: React.CSSProperties = { font: 'inherit', fontSize: 13.5, fontWeight: 600, color: 'var(--hi)', background: 'var(--glass-2)', border: '1px solid var(--hair)', borderRadius: 11, padding: '10px 14px', cursor: 'pointer', textDecoration: 'none', whiteSpace: 'nowrap' }
+  const link: React.CSSProperties = { font: 'inherit', fontSize: 12.5, fontWeight: 600, color: 'var(--acc)', background: 'none', border: 0, cursor: 'pointer', textDecoration: 'none', whiteSpace: 'nowrap' }
   return (
     <Glass span={12}>
       <div className="eyebrow"><span>4 · Виджет на экран</span><span className="hint">выручка + накладная одним тапом</span></div>
@@ -114,9 +119,26 @@ function WidgetSetup() {
       </p>
       <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
         <input readOnly value={url || 'генерирую ссылку…'} onFocus={(e) => e.currentTarget.select()} style={{ ...inp, flex: 1, minWidth: 200 }} />
-        <button onClick={copy} disabled={!url} style={{ ...btn, opacity: url ? 1 : 0.5 }}>{copied ? 'Скопировано ✓' : 'Скопировать'}</button>
+        <button onClick={() => copy(url, 'all')} disabled={!url} style={{ ...btn, opacity: url ? 1 : 0.5 }}>{copied === 'all' ? 'Скопировано ✓' : 'Скопировать'}</button>
         {url && <a href={url} target="_blank" rel="noreferrer" style={btn}>Открыть</a>}
       </div>
+      <div style={{ fontSize: 11.5, color: 'var(--mute)', marginTop: 8 }}>{branches.length > 1 ? 'итог по всем филиалам' : ''}</div>
+
+      {branches.length > 1 && (
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--hair)' }}>
+          <label style={lab}>Или отдельной иконкой по филиалу</label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 4 }}>
+            {branches.map((b) => (
+              <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '9px 2px', borderBottom: '1px solid var(--hair-2, rgba(20,26,44,.06))' }}>
+                <span style={{ fontSize: 13.5, color: 'var(--hi)', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.name}</span>
+                <button onClick={() => copy(b.url, b.id)} style={link}>{copied === b.id ? 'скопировано ✓' : 'копировать'}</button>
+                <a href={b.url} target="_blank" rel="noreferrer" style={link}>открыть</a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <ol style={{ margin: '16px 0 0', padding: '0 0 0 20px', fontSize: 12.5, color: 'var(--lo)', lineHeight: 1.7 }}>
         <li>Открой ссылку в Safari на телефоне.</li>
         <li>Поделиться → «На экран „Домой"».</li>
