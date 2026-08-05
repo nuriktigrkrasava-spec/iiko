@@ -1,6 +1,5 @@
-import { useState, useEffect } from 'react'
 import { useApi } from '../lib/useApi'
-import { getOrg } from '../lib/api'
+import { useInstagram } from '../lib/social'
 import { Glass, Chart, Delta, Orb, Insight, GBar, PlanFallback } from './ui'
 import { donut, hbar, legend } from './charts'
 import { num } from '../lib/format'
@@ -68,31 +67,8 @@ function SocialStatic({ k, l }: { k: string; l: string }) {
 }
 
 /* Живой Instagram: OAuth через Meta. Показывает подписчиков и рост, когда подключён. */
-type IgData = { connected: boolean; configured?: boolean; stale?: boolean; username?: string; followers?: number; media_count?: number; delta_30d?: number | null }
 function InstagramCard() {
-  const [d, setD] = useState<IgData | null>(null)
-  const [msg, setMsg] = useState('')
-  const load = () => fetch('/api/social/instagram/' + getOrg(), { headers: { Accept: 'application/json' } })
-    .then((r) => (r.ok ? r.json() : null)).then((j) => j && setD(j)).catch(() => {})
-  useEffect(() => { load() }, [])
-  useEffect(() => {
-    const onMsg = (e: MessageEvent) => {
-      if (!e?.data || e.data.source !== 'ig-oauth') return
-      if (e.data.ok) { setMsg(''); load() } else setMsg('Подключение отменено.')
-    }
-    window.addEventListener('message', onMsg)
-    return () => window.removeEventListener('message', onMsg)
-  }, [])
-  const connect = async () => {
-    setMsg('')
-    try {
-      const r = await fetch('/api/social/instagram/connect/' + getOrg(), { headers: { Accept: 'application/json' } })
-      const j = await r.json()
-      if (!j.configured) { setMsg(j.reason || 'Meta-приложение ещё не настроено.'); return }
-      window.open(j.url, 'ig-oauth', 'width=600,height=760')
-    } catch { setMsg('Не удалось начать подключение.') }
-  }
-
+  const { data: d, msg, connect } = useInstagram()
   const c = BRAND_COLOR[brandKey('instagram')]
   const on = !!d?.connected
   return (
