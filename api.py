@@ -101,6 +101,10 @@ app.add_middleware(
     allow_headers=["X-Telegram-Init-Data", "Content-Type"],
 )
 
+# Виджет на домашний экран (личная ссылка /w/{token}) — отдельный роутер
+import widget_routes
+app.include_router(widget_routes.router)
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
 DEMO_API_LOGIN = os.getenv("DEMO_API_LOGIN", "demo")
