@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Glass } from './ui'
 import { useInstagram } from '../lib/social'
 import { Brand, BRAND_COLOR, brandKey } from './brands'
@@ -94,6 +94,41 @@ function SocialOnboard() {
   )
 }
 
+/* Шаг 4 — виджет на домашний экран: личная ссылка (выручка + кнопка накладной). */
+function WidgetSetup() {
+  const [url, setUrl] = useState('')
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    post<{ url: string }>('/api/widget/token', {}).then((r) => setUrl(r.url)).catch(() => {})
+  }, [])
+  const copy = async () => {
+    if (!url) return
+    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1600) } catch { /* нет доступа к буферу */ }
+  }
+  const btn: React.CSSProperties = { font: 'inherit', fontSize: 13.5, fontWeight: 600, color: 'var(--hi)', background: 'var(--glass-2)', border: '1px solid var(--hair)', borderRadius: 11, padding: '10px 14px', cursor: 'pointer', textDecoration: 'none', whiteSpace: 'nowrap' }
+  return (
+    <Glass span={12}>
+      <div className="eyebrow"><span>4 · Виджет на экран</span><span className="hint">выручка + накладная одним тапом</span></div>
+      <p style={{ fontSize: 12.5, color: 'var(--lo)', margin: '10px 0 2px', lineHeight: 1.5 }}>
+        Личная ссылка с твоей выручкой. Повесь её иконкой на домашний экран — откроется как мини-приложение: выручка за сегодня и кнопка «Распознать накладную».
+      </p>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+        <input readOnly value={url || 'генерирую ссылку…'} onFocus={(e) => e.currentTarget.select()} style={{ ...inp, flex: 1, minWidth: 200 }} />
+        <button onClick={copy} disabled={!url} style={{ ...btn, opacity: url ? 1 : 0.5 }}>{copied ? 'Скопировано ✓' : 'Скопировать'}</button>
+        {url && <a href={url} target="_blank" rel="noreferrer" style={btn}>Открыть</a>}
+      </div>
+      <ol style={{ margin: '16px 0 0', padding: '0 0 0 20px', fontSize: 12.5, color: 'var(--lo)', lineHeight: 1.7 }}>
+        <li>Открой ссылку в Safari на телефоне.</li>
+        <li>Поделиться → «На экран „Домой"».</li>
+        <li>Готово — иконка показывает выручку, кнопка открывает бота для фото накладной.</li>
+      </ol>
+      <div style={{ marginTop: 14, fontSize: 11.5, color: 'var(--mute)', lineHeight: 1.55, padding: '12px', borderRadius: 12, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
+        Через «Команды»: действие «Открыть URL» с этой ссылкой → «На экран „Домой"». Можно добавить утреннюю автоматизацию — каждое утро уведомление с выручкой.
+      </div>
+    </Glass>
+  )
+}
+
 export default function Onboarding() {
   const [server, setServer] = useState('https://ваш-сервер.iiko.it:443/resto')
   const [login, setLogin] = useState('')
@@ -135,6 +170,7 @@ export default function Onboarding() {
         </div>
       </Glass>
       <SocialOnboard />
+      <WidgetSetup />
     </>
   )
 
@@ -179,6 +215,7 @@ export default function Onboarding() {
       </Glass>
 
       <SocialOnboard />
+      <WidgetSetup />
     </>
   )
 }
