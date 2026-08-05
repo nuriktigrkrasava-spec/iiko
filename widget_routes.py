@@ -12,7 +12,7 @@ import asyncio
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 router = APIRouter()
 
@@ -252,3 +252,30 @@ async def widget_page_branch(token: str, org_id: str):
         data = await _gather(uid, only_org=org_id)
         api._set_cached(cache_key, data)
     return HTMLResponse(_render(data), headers={"Cache-Control": "max-age=120"})
+
+
+# ---- JSON для настоящего тайла (Scriptable / WidgetKit): виджет как «Погода» ----
+
+async def _json_payload(token: str, only_org: Optional[str]):
+    import api
+    uid = _uid_from_token(token)
+    if uid is None:
+        return JSONResponse({"connected": False}, status_code=404)
+    ck = f"widgetjson:{token}:{only_org or 'all'}"
+    data = api._get_cached(ck)
+    if data is None:
+        data = await _gather(uid, only_org=only_org)
+        api._set_cached(ck, data)
+    return JSONResponse({**data, "bot": _WIDGET_BOT_URL},
+                        headers={"Cache-Control": "max-age=120"})
+
+
+@router.get("/api/widget/data/{token}")
+async def widget_data(token: str):
+    """Компактный JSON выручки (для Scriptable-виджета на домашний/локскрин)."""
+    return await _json_payload(token, None)
+
+
+@router.get("/api/widget/data/{token}/{org_id}")
+async def widget_data_branch(token: str, org_id: str):
+    return await _json_payload(token, org_id)
