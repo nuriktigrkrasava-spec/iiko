@@ -452,11 +452,87 @@ def mark_trial_sales_sent(telegram_id: int) -> None:
     conn.close()
 
 
+# ── Управляющие филиалов ──
+# Раньше доступ был только «владелец → все его рестораны». Управляющему нужен
+# ровно его филиал, поэтому заводим отдельную привязку человек↔филиал. Одна
+# точка подключения — get_restaurants ниже: правим её, и весь мини-апп начинает
+# показывать управляющему только его данные, без правок в каждом эндпоинте.
+def _ensure_branch_managers(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS branch_managers (
+        organization_id TEXT NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        name TEXT,
+        added_at TEXT,
+        active INTEGER DEFAULT 1,
+        PRIMARY KEY (organization_id, telegram_id)
+    )""")
+
+
+def add_branch_manager(org_id: str, telegram_id: int, name: str = ""):
+    """Привязывает человека к филиалу. Один человек — ОДИН филиал.
+
+    Прежние привязки этого telegram_id снимаются: иначе, открыв вторую ссылку,
+    управляющий получал бы доступ сразу к двум филиалам, а ссылку легко переслать.
+    """
+    conn = get_db()
+    _ensure_branch_managers(conn)
+    conn.execute("UPDATE branch_managers SET active = 0 WHERE telegram_id = ?",
+                 (int(telegram_id),))
+    conn.execute(
+        """INSERT INTO branch_managers (organization_id, telegram_id, name, added_at, active)
+           VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT(organization_id, telegram_id)
+           DO UPDATE SET name = excluded.name, active = 1, added_at = excluded.added_at""",
+        (org_id, int(telegram_id), name, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def revoke_branch_manager(org_id: str, telegram_id: int):
+    conn = get_db()
+    _ensure_branch_managers(conn)
+    conn.execute(
+        "UPDATE branch_managers SET active = 0 WHERE organization_id = ? AND telegram_id = ?",
+        (org_id, int(telegram_id)))
+    conn.commit()
+    conn.close()
+
+
+def get_branch_managers(org_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_branch_managers(conn)
+    q = "SELECT * FROM branch_managers WHERE active = 1"
+    args: tuple = ()
+    if org_id:
+        q += " AND organization_id = ?"
+        args = (org_id,)
+    rows = conn.execute(q + " ORDER BY added_at DESC", args).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _managed_org_ids(conn, telegram_id: int) -> List[str]:
+    _ensure_branch_managers(conn)
+    rows = conn.execute(
+        "SELECT organization_id FROM branch_managers WHERE telegram_id = ? AND active = 1",
+        (int(telegram_id),)).fetchall()
+    return [r["organization_id"] for r in rows]
+
+
 def get_restaurants(telegram_id: int) -> List[Dict[str, Any]]:
     conn = get_db()
-    rows = conn.execute(
-        "SELECT * FROM restaurants WHERE telegram_id = ? ORDER BY id", (telegram_id,)
-    ).fetchall()
+    # свои рестораны (владелец) + те, где человек назначен управляющим
+    managed = _managed_org_ids(conn, telegram_id)
+    if managed:
+        marks = ",".join("?" * len(managed))
+        rows = conn.execute(
+            f"""SELECT * FROM restaurants WHERE telegram_id = ?
+                   OR organization_id IN ({marks}) ORDER BY id""",
+            (telegram_id, *managed)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM restaurants WHERE telegram_id = ? ORDER BY id", (telegram_id,)
+        ).fetchall()
     conn.close()
     result = []
     seen_org_ids = set()
@@ -646,6 +722,79 @@ def delete_manual_expense(expense_id: int, org_id: str):
     )
     conn.commit()
     conn.close()
+
+
+# ── Задачи с отметкой выполнения (трекер в боте) ──
+# Уведомление без обратной связи — просто шум: непонятно, взялся кто-то за проблему
+# или она висит вторую неделю. Здесь храним, что отправили и что человек ответил.
+def _ensure_bot_tasks(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS bot_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER NOT NULL,
+        organization_id TEXT,
+        branch TEXT,
+        title TEXT NOT NULL,
+        detail TEXT,
+        money REAL,
+        created_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',   -- open | done | later
+        answered_at TEXT,
+        answered_by TEXT
+    )""")
+
+
+def create_bot_task(telegram_id: int, org_id: str, branch: str, title: str,
+                    detail: str = "", money: float = 0) -> int:
+    conn = get_db()
+    _ensure_bot_tasks(conn)
+    cur = conn.execute(
+        """INSERT INTO bot_tasks (telegram_id, organization_id, branch, title,
+               detail, money, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (int(telegram_id), org_id, branch, title, detail, float(money or 0),
+         datetime.now().isoformat()))
+    conn.commit()
+    task_id = cur.lastrowid
+    conn.close()
+    return int(task_id)
+
+
+def answer_bot_task(task_id: int, status: str, who: str = "") -> Optional[Dict[str, Any]]:
+    """Отмечает задачу и возвращает её. None — если такой задачи нет."""
+    conn = get_db()
+    _ensure_bot_tasks(conn)
+    conn.execute(
+        """UPDATE bot_tasks SET status = ?, answered_at = ?, answered_by = ?
+           WHERE id = ?""",
+        (status, datetime.now().isoformat(), who, int(task_id)))
+    conn.commit()
+    row = conn.execute("SELECT * FROM bot_tasks WHERE id = ?", (int(task_id),)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_bot_tasks_all(days: int = 14) -> List[Dict[str, Any]]:
+    """Все задачи трекера за период — для админки владельца и вечернего отчёта."""
+    conn = get_db()
+    _ensure_bot_tasks(conn)
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM bot_tasks WHERE created_at >= ? ORDER BY created_at DESC",
+        (since,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_open_bot_tasks(telegram_id: int, days: int = 14) -> List[Dict[str, Any]]:
+    """Незакрытые задачи владельца за последние дни — для напоминаний."""
+    conn = get_db()
+    _ensure_bot_tasks(conn)
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """SELECT * FROM bot_tasks WHERE telegram_id = ? AND status = 'open'
+           AND created_at >= ? ORDER BY money DESC""",
+        (int(telegram_id), since)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,

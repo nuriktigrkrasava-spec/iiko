@@ -4,11 +4,14 @@ import httpx
 import os
 import hmac
 import hashlib
+import base64
 import html
 import json
 import csv
 import io
 import re
+import calendar
+from difflib import SequenceMatcher
 from datetime import datetime, timedelta, date, timezone
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
@@ -33,6 +36,8 @@ from database import (
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     wipe_demo_user,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
+    create_bot_task, answer_bot_task, get_open_bot_tasks, get_bot_tasks_all,
+    add_branch_manager, revoke_branch_manager, get_branch_managers,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     get_db, decrypt_password,
@@ -915,6 +920,10 @@ async def startup():
     asyncio.create_task(_weekly_users_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
     asyncio.create_task(_daily_shifts_scheduler())
+    # Утренняя сводка: вчерашняя выручка, сравнения, прогноз месяца, стоп-лист
+    asyncio.create_task(_morning_report_scheduler())
+    # Триггеры в течение дня: касса молчит / выручка проваливается
+    asyncio.create_task(_trigger_scheduler())
     # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
     # основной — квоты накладных (см. _build_stats_text, БД у сервисов разные).
     asyncio.create_task(_daily_stats_scheduler())
@@ -4582,6 +4591,78 @@ def _reconcile_amount(it: Dict[str, Any]) -> Tuple[float, float, float, Optional
     return amount, price_out, total, warning
 
 
+# ── Нечёткий подбор товара по названию из накладной ────────────────────────
+# Поставщик пишет «Молоко "Простоквашино" 3,2% 900мл», в iiko лежит «Молоко 3,2%».
+# Поиск подстрокой по всей строке тут не находит ничего — клиенту приходилось
+# сопоставлять руками каждую позицию. Считаем похожесть по словам.
+
+# Слова, которые есть у всех и различать товары не помогают.
+_MATCH_STOP = {
+    "ооо", "тоо", "ип", "зао", "оао", "гост", "ту", "шт", "уп", "упак", "упаковка",
+    "пак", "пачка", "бут", "бутылка", "банка", "кг", "гр", "г", "мл", "л", "литр",
+    "кор", "коробка", "лоток", "пэт", "ваккум", "вакуум", "св", "охл", "зам",
+    "замороженный", "охлажденный", "свежий", "новый", "продукт", "товар",
+}
+_MATCH_MIN_SCORE = float(os.getenv("INVOICE_MATCH_MIN", "0.55"))
+
+
+def _match_tokens(s: str) -> List[str]:
+    """Название → значимые слова: без брендов в кавычках, чисел, единиц и мусора."""
+    s = (s or "").lower().replace("ё", "е")
+    s = re.sub(r"[«»\"'`]+", " ", s)          # бренд в кавычках только мешает
+    s = re.sub(r"[^a-zа-я0-9]+", " ", s)
+    out = []
+    for w in s.split():
+        if w.isdigit() or len(w) < 2:
+            continue
+        if w in _MATCH_STOP:
+            continue
+        if re.fullmatch(r"\d+[a-zа-я]*", w):   # «900мл», «3»
+            continue
+        out.append(w)
+    return out
+
+
+def _match_score(inv_name: str, prod_name: str) -> float:
+    """0..1 — насколько товар из iiko похож на строку накладной.
+
+    Половина веса — доля слов накладной, нашедшихся в названии товара (с учётом
+    склонений: сравниваем по началу слова), половина — общая похожесть строк.
+    """
+    a, b = _match_tokens(inv_name), _match_tokens(prod_name)
+    if not a or not b:
+        return 0.0
+    hit = 0
+    for x in a:
+        stem = x[:max(4, len(x) - 2)]
+        if any(y.startswith(stem) or x.startswith(y[:max(4, len(y) - 2)]) for y in b):
+            hit += 1
+    coverage = hit / len(a)
+    ratio = SequenceMatcher(None, " ".join(a), " ".join(b)).ratio()
+    return 0.6 * coverage + 0.4 * ratio
+
+
+def _best_product_match(products: List[Dict[str, Any]], name: str
+                        ) -> Tuple[Optional[Dict[str, Any]], float, bool]:
+    """Лучший товар, оценка и уверенность.
+
+    Возвращаем кандидата всегда, когда он дотянул до порога, даже если рядом есть
+    похожий: подставить вариант и дать поправить одним тапом полезнее, чем оставить
+    строку пустой. Спорные случаи помечаем неуверенными — редактор их подсветит.
+    """
+    best, best_s, second_s = None, 0.0, 0.0
+    for p in products:
+        s = _match_score(name, p.get("name") or "")
+        if s > best_s:
+            best, second_s, best_s = p, best_s, s
+        elif s > second_s:
+            second_s = s
+    if best_s < _MATCH_MIN_SCORE:
+        return None, best_s, False
+    confident = best_s >= 0.75 and (best_s - second_s) >= 0.06
+    return best, best_s, confident
+
+
 async def _auto_match_items(client, org_id: str,
                              items: List[Dict[str, Any]]
                              ) -> Tuple[List[Dict], List[str], List[str]]:
@@ -4592,24 +4673,33 @@ async def _auto_match_items(client, org_id: str,
     несовместимые (уп vs кг и т.п.) не трогаем, но честно предупреждаем.
     """
     sendable, unmatched, unit_warnings = [], [], []
+    # Номенклатуру берём один раз целиком (внутри клиента она кэшируется на 30 мин)
+    # и сравниваем локально — это и точнее поиска подстрокой, и без запроса на позицию.
+    catalog: List[Dict[str, Any]] = []
+    if any(not it.get("iiko_product_id") for it in (items or [])):
+        try:
+            catalog = await client.search_nomenclature(org_id, "", limit=100000)
+        except Exception as e:
+            logger.warning(f"[invoice-match] номенклатура org={org_id}: {e!r}")
+
     for it in (items or []):
         # Если уже сопоставлено в редакторе — используем
         prod_id = it.get("iiko_product_id")
         prod_unit = it.get("iiko_unit") or ""
-        if not prod_id:
-            try:
-                matches = await client.search_nomenclature(org_id, it.get("name", ""), limit=1)
-            except Exception as e:
-                logger.warning(f"[invoice-match] iiko search_nomenclature failed for org={org_id}, name='{it.get('name', '')}': {e}")
-                matches = []
-            if matches:
-                prod_id = matches[0].get("id")
-                prod_unit = matches[0].get("unit") or ""
+        if not prod_id and catalog:
+            best, score, confident = _best_product_match(catalog, it.get("name", ""))
+            if best:
+                prod_id = best.get("id")
+                prod_unit = best.get("unit") or ""
                 # Аннотируем саму позицию, чтобы сохранённый черновик нёс сопоставление
                 # (редактор показывает «✓ сопоставлено», повторная отправка не теряет id).
                 it["iiko_product_id"] = prod_id
-                it["iiko_product_name"] = matches[0].get("name") or it.get("name")
+                it["iiko_product_name"] = best.get("name") or it.get("name")
                 it["iiko_unit"] = prod_unit
+                # Подобрано машиной, а не человеком: редактор пометит «проверьте»
+                it["auto_matched"] = True
+                it["match_score"] = round(score, 2)
+                it["needs_review"] = not confident
         if not prod_id:
             unmatched.append(it.get("name", "—"))
             continue
@@ -4901,12 +4991,14 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
             organization_id=org_id, dedup_hash=dedup_hash,
             status="needs_mapping",
         )
+        auto_n = sum(1 for x in items if x.get("auto_matched"))
         names_preview = ", ".join(unmatched[:5])
         more = f" и ещё {len(unmatched)-5}" if len(unmatched) > 5 else ""
+        done_line = (f"✅ Подобрано автоматически: {auto_n} из {len(items)}\n" if auto_n else "")
         await _tg_edit(chat_id, msg_id,
-            f"⚠️ Не сопоставлено {len(unmatched)} позиций: {names_preview}{more}\n\n"
+            f"{done_line}⚠️ Осталось выбрать вручную ({len(unmatched)}): {names_preview}{more}\n\n"
             f"📋 Накладная сохранена как черновик. Открой Mini App → Расходы → Накладные, "
-            f"нажми ✏️ чтобы выбрать товары вручную и отправить.")
+            f"нажми ✏️ — подобранное уже проставлено, поправь остальное и отправь.")
         _drop_pending(chat_id)
         return
 
@@ -5237,6 +5329,29 @@ async def telegram_webhook(request: Request):
                 except Exception:
                     pass
 
+            # Трекер задач: отметка «сделал / не успел». Не зависит от pending —
+            # это отдельный поток, приходит из уведомлений, а не из накладной.
+            if action.startswith("task:"):
+                _, what, sid = (action.split(":", 2) + ["", ""])[:3]
+                who = (cb.get("from") or {}).get("first_name") or str(chat_id)
+                try:
+                    task = answer_bot_task(int(sid), "done" if what == "done" else "later", who)
+                except Exception as e:
+                    logger.warning(f"[task] отметка {sid}: {e!r}")
+                    task = None
+                if not task:
+                    await _tg_edit(chat_id, msg_id, "⚠️ Задача не найдена (возможно, устарела)")
+                    return {"ok": True}
+                mark = "✅ <b>Сделано</b>" if what == "done" else "⏳ <b>Отложено</b>"
+                when = local_now().strftime("%d.%m %H:%M")
+                money_line = (f"\n💸 На кону было: {format_money(task['money'])}"
+                              if task.get("money") else "")
+                await _tg_edit(chat_id, msg_id,
+                               f"📌 <b>{task['title']}</b>\n<i>{task['branch']}</i>\n\n"
+                               f"{task.get('detail') or ''}{money_line}\n\n"
+                               f"{mark} · {who}, {when}")
+                return {"ok": True}
+
             pending = _get_pending_by_chat(chat_id)
 
             # Отмена — работает даже если pending нет
@@ -5470,6 +5585,55 @@ async def telegram_webhook(request: Request):
             # пушах владельцу (/stats, /today, дайджест). Deep-link и так [A-Za-z0-9_-].
             raw_source = parts[1].strip() if len(parts) > 1 else ""
             source = re.sub(r"[^0-9A-Za-z_\-]", "", raw_source)[:64] or "direct"
+
+            # Приглашение управляющего: /start inv_<org>_<подпись>. Подпись на
+            # ENCRYPTION_KEY — по чужой ссылке к филиалу не подключиться.
+            if source.startswith("inv_"):
+                org_id = _org_from_invite(source)
+                if not org_id:
+                    await _tg_send(chat_id, "❌ Ссылка недействительна или устарела.")
+                    return {"ok": True}
+                rest = next((r for r in get_all_restaurants()
+                             if r["organization_id"] == org_id), None)
+                if not rest:
+                    await _tg_send(chat_id, "❌ Филиал не найден.")
+                    return {"ok": True}
+
+                # Ссылка на две активации: одну владелец тратит на проверку,
+                # вторую — сам управляющий. Дальше мертва, чтобы пересланная
+                # ссылка не открывала филиал кому попало. Повторный вход тем же
+                # человеком активацию не тратит.
+                used_key = f"invite_used:{org_id}"
+                used = [x for x in (get_app_state(used_key) or "").split(",") if x]
+                if str(telegram_id) not in used:
+                    if len(used) >= INVITE_MAX_USES:
+                        await _tg_send(chat_id,
+                                       "🔒 Ссылка исчерпана — по ней уже подключились.\n"
+                                       "Попросите владельца выдать новую.")
+                        try:
+                            await _tg_send(rest["telegram_id"],
+                                           f"⚠️ По ссылке <b>{rest.get('organization_name')}</b> "
+                                           f"пытался подключиться @{username or telegram_id} "
+                                           f"(id {telegram_id}) — активации исчерпаны.")
+                        except Exception:
+                            pass
+                        return {"ok": True}
+                    set_app_state(used_key, ",".join(used + [str(telegram_id)]))
+
+                who = username or str(telegram_id)
+                add_branch_manager(org_id, telegram_id, who)
+                branch = rest.get("organization_name", "филиал")
+                await _tg_send(chat_id,
+                               f"✅ Вы подключены как управляющий:\n<b>{branch}</b>\n\n"
+                               f"Открывайте мини-апп — увидите данные только своего "
+                               f"филиала. Задачи будут приходить сюда, отмечайте кнопками.")
+                try:  # владельцу — чтобы знал, кто подключился
+                    await _tg_send(rest["telegram_id"],
+                                   f"👤 К филиалу <b>{branch}</b> подключился управляющий: "
+                                   f"@{who} (id {telegram_id})")
+                except Exception as e:
+                    logger.warning(f"[invite] notify owner: {e!r}")
+                return {"ok": True}
             if DEMO_ONLY:
                 try:
                     is_new = record_acquisition(telegram_id, username, source)
@@ -5491,6 +5655,60 @@ async def telegram_webhook(request: Request):
         if text in ("/faq", "/help"):
             await _tg_send(chat_id, FAQ_MENU_TEXT, _faq_menu_kb())
             return {"ok": True}
+        # ── Админка владельца: филиалы, доступы, отчёт по задачам ──
+        # Владелец — тот, к кому привязаны рестораны. Управляющий эти команды
+        # не получит: у него в restaurants нет своих строк, только доступ.
+        if text in ("/branches", "/filiali"):
+            owned = [r for r in get_all_restaurants() if r["telegram_id"] == telegram_id]
+            if not owned:
+                await _tg_send(chat_id, "Команда доступна владельцу сети.")
+                return {"ok": True}
+            mgrs = get_branch_managers()
+            L = ["🏢 <b>Филиалы и доступы</b>", ""]
+            for r in owned:
+                org, nm = r["organization_id"], r.get("organization_name", "—")
+                who = [m for m in mgrs if m["organization_id"] == org]
+                L.append(f"<b>{nm}</b>")
+                if who:
+                    L.append("  👤 " + ", ".join(f"@{m.get('name') or m['telegram_id']}"
+                                                 for m in who))
+                else:
+                    L.append("  ⚠️ управляющий не подключён")
+                L.append(f"  🔗 {invite_link_for(org)}")
+                L.append("")
+            L.append("Отправьте ссылку управляющему — он нажмёт «Старт» "
+                     "и получит доступ только к своему филиалу.")
+            await _tg_send(chat_id, "\n".join(L))
+            return {"ok": True}
+
+        if text in ("/tasks", "/zadachi"):
+            owned = [r for r in get_all_restaurants() if r["telegram_id"] == telegram_id]
+            if not owned:
+                await _tg_send(chat_id, "Команда доступна владельцу сети.")
+                return {"ok": True}
+            names = {r.get("organization_name") for r in owned}
+            rows = [t for t in get_bot_tasks_all(14) if t.get("branch") in names]
+            if not rows:
+                await _tg_send(chat_id, "За две недели задач не отправлялось.")
+                return {"ok": True}
+            done = [t for t in rows if t.get("status") == "done"]
+            openn = [t for t in rows if t.get("status") == "open"]
+            L = [f"📋 <b>Задачи за 14 дней: {len(done)} из {len(rows)} закрыто</b>", ""]
+            by: Dict[str, List[Dict[str, Any]]] = {}
+            for t in rows:
+                by.setdefault(t.get("branch") or "—", []).append(t)
+            for nm, ts in sorted(by.items(), key=lambda kv: -sum(
+                    1 for x in kv[1] if x.get("status") == "open")):
+                d = sum(1 for x in ts if x.get("status") == "done")
+                icon = "✅" if d == len(ts) else ("🔴" if d == 0 else "🟡")
+                L.append(f"{icon} {nm[:28]} — {d}/{len(ts)}")
+            if openn:
+                money = sum(float(t.get("money") or 0) for t in openn)
+                L.append(f"\nБез ответа {len(openn)} задач"
+                         + (f" · на кону {format_money(money)}" if money else ""))
+            await _tg_send(chat_id, "\n".join(L))
+            return {"ok": True}
+
         if text == "/stats" and chat_id == OWNER_CHAT_ID:
             try:
                 body = _build_stats_text()
@@ -6087,6 +6305,491 @@ async def _send_daily_shifts_report() -> bool:
             except Exception as e:
                 logger.warning(f"[daily_shifts] send {tg_id}: {e}")
     return True
+
+
+MORNING_HOUR_LOCAL = int(os.getenv("MORNING_HOUR_LOCAL", "9"))
+
+
+async def _branch_morning(r: Dict[str, Any], yd: date) -> Optional[Dict[str, Any]]:
+    """Утренние цифры одного филиала: выручка по дням месяца + стоп-лист.
+
+    Выручку берём ОДНИМ OLAP на весь месяц с группировкой по дате — из него
+    достаём и вчера, и позавчера, и тот же день неделю назад, и факт месяца
+    для прогноза. Раньше это были бы четыре отдельных запроса на филиал.
+    """
+    name = r.get("organization_name") or "Филиал"
+    client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+    dept = name  # iikoWeb OLAP фильтрует Department по названию, не по UUID
+    month_start = yd.replace(day=1)
+    # неделю назад может быть в прошлом месяце — тянем с более раннего края
+    since = min(month_start, yd - timedelta(days=7))
+    try:
+        rep = await client.olap_report(dept, since.isoformat(), yd.isoformat(),
+                                       ["OpenDate.Typed"], ["DishAmountSum"])
+    except Exception as e:
+        logger.warning(f"[morning] выручка {name}: {e!r}")
+        return None
+
+    by_day: Dict[str, float] = {}
+    for row in rep.get("data", []):
+        d = str(row.get("OpenDate.Typed") or "")[:10]
+        if d:
+            by_day[d] = by_day.get(d, 0.0) + float(row.get("DishAmountSum") or 0)
+
+    rev = by_day.get(yd.isoformat(), 0.0)
+    prev_day = by_day.get((yd - timedelta(days=1)).isoformat(), 0.0)
+    prev_week = by_day.get((yd - timedelta(days=7)).isoformat(), 0.0)
+    mtd = sum(v for d, v in by_day.items() if d >= month_start.isoformat())
+    # Типичный день филиала = медиана по месяцу. Нужна, чтобы отличить настоящий
+    # сбой («0 ₸ там, где обычно 3 млн») от филиала, который столько и делает.
+    vals = sorted(v for d, v in by_day.items() if v > 0 and d != yd.isoformat())
+    typical = vals[len(vals) // 2] if vals else 0.0
+    days_done = yd.day
+    days_in_month = calendar.monthrange(yd.year, yd.month)[1]
+    forecast = (mtd / days_done * days_in_month) if days_done else 0.0
+
+    stops: List[str] = []
+    lows: List[str] = []
+    try:
+        stop_data, nomen = await asyncio.gather(
+            client.get_stop_lists([dept]), client.get_nomenclature(r["organization_id"]),
+            return_exceptions=True)
+        if not isinstance(stop_data, Exception) and not isinstance(nomen, Exception):
+            id_to_name = {p["id"]: p.get("name", "") for p in nomen.get("products", [])}
+            for loc in stop_data.get("productionLocations", []):
+                for item in loc.get("stopList", {}).get("items", []):
+                    nm = id_to_name.get(item.get("productId", ""), "")
+                    if not nm:
+                        continue
+                    (stops if float(item.get("balance") or 0) <= 0 else lows).append(nm)
+    except Exception as e:
+        logger.warning(f"[morning] стоп-лист {name}: {e!r}")
+
+    return {"name": name, "org": r.get("organization_id", ""),
+            "rev": rev, "prev_day": prev_day, "prev_week": prev_week,
+            "mtd": mtd, "forecast": forecast, "typical": typical,
+            "stops": sorted(set(stops)), "lows": sorted(set(lows))}
+
+
+def _branch_alerts(x: Dict[str, Any]) -> List[Tuple[int, str]]:
+    """Что в филиале требует внимания. (вес, строка) — вес задаёт порядок.
+
+    Только то, на что владелец реально может отреагировать сегодня. Рост рейтинга
+    на 0.2 сюда не попадает: это приятно, но это не задача на утро.
+    """
+    out: List[Tuple[int, str]] = []
+    rev, typ = x["rev"], x["typical"]
+    if typ > 0 and rev <= 0:
+        out.append((100, f"🔴 <b>{x['name'][:26]}</b> — 0 ₸ в кассе "
+                         f"(обычно ≈ {format_money(typ)}). Похоже на сбой, не на спад."))
+    elif typ > 0 and rev < typ * 0.5:
+        out.append((80, f"🔴 <b>{x['name'][:26]}</b> — {format_money(rev)} "
+                        f"при обычных {format_money(typ)} (−{round((1 - rev / typ) * 100)}%)"))
+    elif x["prev_week"] > 0 and rev < x["prev_week"] * 0.75:
+        out.append((50, f"🟡 <b>{x['name'][:26]}</b> — {format_money(rev)}, "
+                        f"{_fmt_delta(rev, x['prev_week'])} к тому же дню недели"))
+    if x["stops"]:
+        out.append((60, f"🟡 <b>{x['name'][:26]}</b> — на стопе {len(x['stops'])}: "
+                        f"{', '.join(x['stops'][:3])}"))
+    return out
+
+
+async def _send_morning_report() -> bool:
+    """Утренняя сводка владельцу: вчера + сравнения + прогноз месяца + стоп-лист.
+
+    Рассылка идёт ПО ВЛАДЕЛЬЦУ: каждый telegram_id получает только те филиалы,
+    что привязаны к нему. У кого один филиал — придёт про один; у кого вся сеть —
+    про всю сеть. Отдельной ролевой модели для этого не нужно.
+    """
+    from database import get_all_restaurants
+    rests = get_all_restaurants()
+    if not rests or not BOT_TOKEN:
+        return False
+    yd = (local_now() - timedelta(days=1)).date()
+
+    by_owner: Dict[int, list] = {}
+    for r in rests:
+        by_owner.setdefault(r["telegram_id"], []).append(r)
+
+    sent = 0
+    for tg_id, owner_rests in by_owner.items():
+        sem = asyncio.Semaphore(4)
+
+        async def one(rr):
+            async with sem:
+                return await _branch_morning(rr, yd)
+
+        results = [x for x in await asyncio.gather(*(one(r) for r in owner_rests))
+                   if isinstance(x, dict)]
+        results = [x for x in results if x["rev"] or x["stops"] or x["lows"]]
+        if not results:
+            continue
+        results.sort(key=lambda x: x["rev"], reverse=True)
+        multi = len(results) > 1
+
+        # ДАЙДЖЕСТ, а не выгрузка. Владельцу 13 филиалов список из 40 карточек
+        # нечитаем: там рост рейтинга на 0.2 стоит рядом с потерей 3 млн ₸.
+        # Даём итог + только то, что требует действия; остальное — в мини-аппе.
+        L = [f"☀️ <b>Утро. Вчера, {yd.strftime('%d.%m')}</b>"]
+        if multi:
+            tot = sum(x["rev"] for x in results)
+            tot_pd = sum(x["prev_day"] for x in results)
+            tot_pw = sum(x["prev_week"] for x in results)
+            tot_fc = sum(x["forecast"] for x in results)
+            L.append(f"\n💰 По сети: <b>{format_money(tot)}</b>")
+            L.append(f"   к позавчера {_fmt_delta_money(tot, tot_pd)}")
+            L.append(f"   к {RU_DOW_PREV[yd.weekday()]} {_fmt_delta_money(tot, tot_pw)}")
+            L.append(f"   📈 прогноз месяца ≈ {format_money(tot_fc)}")
+        else:
+            x = results[0]
+            L.append(f"\n<b>{x['name']}</b>")
+            L.append(f"💰 {format_money(x['rev'])}")
+            L.append(f"   к позавчера {_fmt_delta_money(x['rev'], x['prev_day'])}")
+            L.append(f"   к {RU_DOW_PREV[yd.weekday()]} {_fmt_delta_money(x['rev'], x['prev_week'])}")
+            L.append(f"   📈 прогноз месяца ≈ {format_money(x['forecast'])}")
+
+        alerts = sorted((a for x in results for a in _branch_alerts(x)),
+                        key=lambda t: -t[0])
+        if alerts:
+            L.append("\n<b>Требует внимания:</b>")
+            L += [text for _, text in alerts[:5]]
+            if len(alerts) > 5:
+                L.append(f"…и ещё {len(alerts) - 5} — смотри в мини-аппе")
+        elif multi:
+            L.append("\nПо филиалам всё ровно — резких провалов нет.")
+
+        if multi:
+            calm = len(results) - len({t.split("<b>")[1].split("</b>")[0]
+                                       for _, t in alerts if "<b>" in t})
+            if calm > 0 and alerts:
+                L.append(f"\nОстальные {calm} филиалов без отклонений.")
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": tg_id, "text": "\n".join(L[:80]),
+                                   "parse_mode": "HTML"})
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[morning] send {tg_id}: {e!r}")
+    logger.info(f"[morning] отправлено {sent} владельцам")
+    return True
+
+
+# ── Триггерные уведомления: то, что нельзя отложить до утра ──────────────────
+# Проверяем в течение дня и сравниваем «сколько филиал обычно делает К ЭТОМУ ЧАСУ
+# в этот день недели» с тем, что есть сейчас. Без поправки на час и день недели
+# сравнение бессмысленно: в 13:00 вторника норма совсем не та, что в 21:00 субботы.
+TRIGGER_FROM_HOUR = int(os.getenv("TRIGGER_FROM_HOUR", "13"))   # раньше днём судить рано
+TRIGGER_TO_HOUR = int(os.getenv("TRIGGER_TO_HOUR", "22"))
+TRIGGER_MIN_TYPICAL = 50_000  # филиалы с копеечной нормой не дёргаем
+
+
+async def _branch_intraday(r: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
+    """Выручка филиала на текущий час против нормы этого дня недели.
+
+    Один OLAP на филиал: выручка по дате × часу за 4 недели. Из него считаем,
+    сколько обычно накапливается к этому часу в этот день недели (медиана).
+    """
+    name = r.get("organization_name") or "Филиал"
+    today = now.date()
+    since = today - timedelta(days=28)
+    client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+    try:
+        rep = await client.olap_report(name, since.isoformat(), today.isoformat(),
+                                       ["OpenDate.Typed", "HourOpen"], ["DishAmountSum"])
+    except Exception as e:
+        logger.warning(f"[trigger] {name}: {e!r}")
+        return None
+
+    by_day_hour: Dict[str, Dict[int, float]] = {}
+    for row in rep.get("data", []):
+        d = str(row.get("OpenDate.Typed") or "")[:10]
+        try:
+            h = int(str(row.get("HourOpen", "")).split(":")[0])
+        except Exception:
+            continue
+        if d:
+            by_day_hour.setdefault(d, {})[h] = by_day_hour.get(d, {}).get(h, 0.0) \
+                + float(row.get("DishAmountSum") or 0)
+
+    hour = now.hour
+    cum = lambda hrs: sum(v for h, v in hrs.items() if h <= hour)  # noqa: E731
+    today_rev = cum(by_day_hour.get(today.isoformat(), {}))
+    # норма — медиана по тем же дням недели за прошлые 4 недели, к этому же часу
+    peers = [cum(by_day_hour.get((today - timedelta(days=7 * k)).isoformat(), {}))
+             for k in range(1, 5)]
+    peers = sorted(v for v in peers if v > 0)
+    typical = peers[len(peers) // 2] if peers else 0.0
+    return {"name": name, "org": r["organization_id"], "now": today_rev, "typical": typical}
+
+
+async def _send_trigger_alerts() -> int:
+    """Проверяет филиалы в течение дня и шлёт только срочное. Возвращает число писем."""
+    from database import get_all_restaurants
+    rests = get_all_restaurants()
+    if not rests or not BOT_TOKEN:
+        return 0
+    now = local_now()
+    today = now.date().isoformat()
+
+    by_owner: Dict[int, list] = {}
+    for r in rests:
+        by_owner.setdefault(r["telegram_id"], []).append(r)
+
+    sent = 0
+    for tg_id, owner_rests in by_owner.items():
+        sem = asyncio.Semaphore(4)
+
+        async def one(rr):
+            async with sem:
+                return await _branch_intraday(rr, now)
+
+        rows = [x for x in await asyncio.gather(*(one(r) for r in owner_rests))
+                if isinstance(x, dict)]
+        lines = []
+        for x in rows:
+            if x["typical"] < TRIGGER_MIN_TYPICAL:
+                continue
+            if x["now"] <= 0:
+                kind, text = "silent", (
+                    f"🔴 <b>{x['name'][:28]}</b> — касса молчит. К {now:%H:%M} обычно "
+                    f"уже {format_money(x['typical'])}, сейчас 0 ₸.\n"
+                    f"Проверь, открылся ли филиал и синхронизируется ли касса.")
+            elif x["now"] < x["typical"] * 0.4:
+                kind, text = "slump", (
+                    f"🟡 <b>{x['name'][:28]}</b> — к {now:%H:%M} {format_money(x['now'])} "
+                    f"при обычных {format_money(x['typical'])} "
+                    f"(−{round((1 - x['now'] / x['typical']) * 100)}%).")
+            else:
+                continue
+            # один и тот же сигнал по филиалу — один раз за день, иначе это спам
+            key = f"trigger:{tg_id}:{x['org']}:{kind}:{today}"
+            if get_app_state(key):
+                continue
+            set_app_state(key, "1")
+            lines.append(text)
+
+        if not lines:
+            continue
+        msg = "⚡️ <b>Требует внимания сейчас</b>\n\n" + "\n\n".join(lines[:6])
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as c:
+                await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": tg_id, "text": msg, "parse_mode": "HTML"})
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[trigger] send {tg_id}: {e!r}")
+    return sent
+
+
+async def _trigger_scheduler():
+    """Днём каждые 2 часа проверяет филиалы на срочные отклонения."""
+    while True:
+        try:
+            now = local_now()
+            if TRIGGER_FROM_HOUR <= now.hour <= TRIGGER_TO_HOUR:
+                n = await _send_trigger_alerts()
+                if n:
+                    logger.info(f"[trigger] отправлено {n} владельцам")
+        except Exception as e:
+            logger.warning(f"[trigger] цикл: {e!r}")
+        await asyncio.sleep(7200)
+
+
+# Имя бота для deep-link. Задаётся переменной, чтобы демо- и боевой бот
+# не разъезжались: у них разные username при одном коде.
+BOT_USERNAME = os.getenv("BOT_USERNAME", "iikoanalyzebot")
+# Сколько раз можно активировать ссылку-приглашение: владелец проверяет сам +
+# подключается управляющий. Больше — ссылка мертва (её легко переслать).
+INVITE_MAX_USES = int(os.getenv("INVITE_MAX_USES", "2"))
+
+
+def _invite_sign(org_id: str) -> str:
+    """Подпись филиала для ссылки-приглашения. Тот же ключ, что у виджета."""
+    secret = (os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY")
+              or "iiko-widget-fallback").encode()
+    mac = hmac.new(secret, f"invite:{org_id}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:16]
+
+
+def invite_link_for(org_id: str) -> str:
+    """t.me/<бот>?start=inv_<8 симв. org>_<подпись> — короче лимита deep-link."""
+    return (f"https://t.me/{BOT_USERNAME}?start="
+            f"inv_{org_id.replace('-', '')[:12]}_{_invite_sign(org_id)}")
+
+
+def _org_from_invite(payload: str) -> Optional[str]:
+    """Достаёт org_id из ссылки, проверяя подпись. None — если подделка."""
+    try:
+        _, short, sig = payload.split("_", 2)
+    except ValueError:
+        return None
+    for r in get_all_restaurants():
+        oid = r.get("organization_id") or ""
+        if oid.replace("-", "")[:12] == short and hmac.compare_digest(_invite_sign(oid), sig):
+            return oid
+    return None
+
+
+async def _send_task(tg_id: int, org_id: str, branch: str, title: str,
+                     detail: str = "", money: float = 0) -> Optional[int]:
+    """Шлёт задачу с кнопками «Сделал» / «Не успел» и запоминает её.
+
+    Уведомление без обратной связи — шум: непонятно, взялся человек за проблему
+    или она висит вторую неделю. Кнопка превращает сообщение в трекер.
+    """
+    if not BOT_TOKEN:
+        return None
+    task_id = create_bot_task(tg_id, org_id, branch, title, detail, money)
+    money_line = f"\n💸 На кону: <b>{format_money(money)}</b>" if money else ""
+    text = (f"📌 <b>{title}</b>\n"
+            f"<i>{branch}</i>\n\n{detail}{money_line}")
+    kb = {"inline_keyboard": [[
+        {"text": "✅ Сделал", "callback_data": f"task:done:{task_id}"},
+        {"text": "⏳ Не успел", "callback_data": f"task:later:{task_id}"},
+    ]]}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as c:
+            r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": tg_id, "text": text,
+                                   "parse_mode": "HTML", "reply_markup": kb})
+        if not r.json().get("ok"):
+            logger.warning(f"[task] send {tg_id}: {r.text[:200]}")
+            return None
+    except Exception as e:
+        logger.warning(f"[task] send {tg_id}: {e!r}")
+        return None
+    return task_id
+
+
+@app.get("/api/admin/branches")
+async def admin_branches(user: Dict = Depends(get_current_user)):
+    """Админка владельца: филиалы, их управляющие, ссылки-приглашения, задачи.
+
+    Только владельцу: управляющий видит свой филиал в мини-аппе, но раздавать
+    доступы и смотреть чужие отметки не должен.
+    """
+    tid = int(user.get("id", 0) or 0)
+    owned = [r for r in get_all_restaurants() if r["telegram_id"] == tid]
+    if not owned:
+        raise HTTPException(status_code=403, detail="доступно только владельцу")
+
+    tasks = get_bot_tasks_all(days=14)
+    mgrs = get_branch_managers()
+    out = []
+    for r in owned:
+        org, name = r["organization_id"], r.get("organization_name", "")
+        t = [x for x in tasks if x.get("branch") == name]
+        done = sum(1 for x in t if x.get("status") == "done")
+        out.append({
+            "org_id": org, "name": name,
+            "invite": invite_link_for(org),
+            "managers": [{"telegram_id": m["telegram_id"], "name": m.get("name"),
+                          "added_at": m.get("added_at")}
+                         for m in mgrs if m["organization_id"] == org],
+            "tasks_total": len(t), "tasks_done": done,
+            "tasks_open": sum(1 for x in t if x.get("status") == "open"),
+            "money_open": round(sum(float(x.get("money") or 0)
+                                    for x in t if x.get("status") != "done")),
+        })
+    out.sort(key=lambda x: (-x["tasks_open"], x["name"]))
+    return {"branches": out,
+            "total_tasks": sum(b["tasks_total"] for b in out),
+            "total_done": sum(b["tasks_done"] for b in out)}
+
+
+@app.get("/api/admin/test-notify/{token}")
+async def admin_test_notify(token: str):
+    """Разово шлёт тестовый отчёт обоим id из CHASPIK_TG_IDS.
+
+    Нужен потому, что с рабочей машины api.telegram.org недоступен, а увидеть
+    текст на живых данных надо. Доступ — по тому же подписанному токену, что и
+    виджет (подпись на ENCRYPTION_KEY), и только для id из CHASPIK_TG_IDS.
+    """
+    uid = widget_routes._uid_from_token(token)
+    if uid is None or uid not in CHASPIK_TG_IDS:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN не задан")
+
+    from database import get_all_restaurants
+    rests = [r for r in get_all_restaurants() if r["telegram_id"] == uid]
+    if not rests:
+        raise HTTPException(status_code=404, detail="у этого id нет филиалов")
+
+    yd = (local_now() - timedelta(days=1)).date()
+    sem = asyncio.Semaphore(4)
+
+    async def one(rr):
+        async with sem:
+            return await _branch_morning(rr, yd)
+
+    rows = [x for x in await asyncio.gather(*(one(r) for r in rests)) if isinstance(x, dict)]
+    rows = [x for x in rows if x["rev"] or x["stops"] or x["lows"]]
+    if not rows:
+        raise HTTPException(status_code=404, detail="нет данных за вчера")
+    rows.sort(key=lambda x: x["rev"], reverse=True)
+
+    tot = sum(x["rev"] for x in rows)
+    L = [f"🧪 <b>Тестовый отчёт</b> · вчера, {yd.strftime('%d.%m')}",
+         f"\n💰 По сети: <b>{format_money(tot)}</b>",
+         f"   к позавчера {_fmt_delta_money(tot, sum(x['prev_day'] for x in rows))}",
+         f"   к {RU_DOW_PREV[yd.weekday()]} {_fmt_delta_money(tot, sum(x['prev_week'] for x in rows))}",
+         f"   📈 прогноз месяца ≈ {format_money(sum(x['forecast'] for x in rows))}"]
+
+    alerts = sorted((a for x in rows for a in _branch_alerts(x)), key=lambda t: -t[0])
+    if alerts:
+        L.append("\n<b>Требует внимания:</b>")
+        L += [t for _, t in alerts[:5]]
+    else:
+        L.append("\nПо филиалам всё ровно — резких провалов нет.")
+
+    # в тестовом отчёте даём и полный список: надо увидеть все цифры разом
+    L.append(f"\n<b>Все филиалы ({len(rows)}):</b>")
+    for x in rows:
+        L.append(f"· {x['name'][:30]} — {format_money(x['rev'])} "
+                 f"{_fmt_delta(x['rev'], x['prev_week'])}")
+
+    text, out = "\n".join(L), {}
+    async with httpx.AsyncClient(timeout=25.0) as c:
+        for target in sorted(CHASPIK_TG_IDS):
+            try:
+                r = await c.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                 json={"chat_id": target, "text": text, "parse_mode": "HTML"})
+                out[str(target)] = "ok" if r.json().get("ok") else r.text[:160]
+            except Exception as e:
+                out[str(target)] = repr(e)[:160]
+
+    # Задача с кнопками — из самой крупной проблемы, найденной в данных
+    worst = max(rows, key=lambda x: x["typical"] - x["rev"]) if rows else None
+    tasks = {}
+    if worst:
+        gap = max(0.0, worst["typical"] - worst["rev"])
+        for target in sorted(CHASPIK_TG_IDS):
+            tid = await _send_task(
+                target, worst.get("org", ""), worst["name"],
+                "Разобрать провал по выручке",
+                f"Вчера {format_money(worst['rev'])} при обычных "
+                f"{format_money(worst['typical'])}. Проверь смену, кассу и стоп-лист "
+                f"— и отметь кнопкой, когда разберёшься.", gap)
+            tasks[str(target)] = tid
+    return {"sent": out, "tasks": tasks, "branches": len(rows)}
+
+
+async def _morning_report_scheduler():
+    """Каждое утро в MORNING_HOUR_LOCAL — вчерашняя выручка, прогноз, стоп-лист."""
+    while True:
+        try:
+            now = local_now()
+            if now.hour >= MORNING_HOUR_LOCAL:
+                today_str = now.date().isoformat()
+                if get_app_state("morning_report_last_sent") != today_str:
+                    if await _send_morning_report():
+                        set_app_state("morning_report_last_sent", today_str)
+        except Exception as e:
+            logger.warning(f"[morning] цикл: {e!r}")
+        await asyncio.sleep(600)
 
 
 async def _daily_shifts_scheduler():
