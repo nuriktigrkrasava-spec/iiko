@@ -6399,12 +6399,37 @@ def _branch_alerts(x: Dict[str, Any]) -> List[Tuple[int, str]]:
     return out
 
 
-async def _send_morning_report() -> bool:
-    """Утренняя сводка владельцу: вчера + сравнения + прогноз месяца + стоп-лист.
+def _report_recipients(rests: List[Dict[str, Any]]) -> Dict[int, List[Dict[str, Any]]]:
+    """Кому какие филиалы слать: {telegram_id: [филиалы]}.
 
-    Рассылка идёт ПО ВЛАДЕЛЬЦУ: каждый telegram_id получает только те филиалы,
-    что привязаны к нему. У кого один филиал — придёт про один; у кого вся сеть —
-    про всю сеть. Отдельной ролевой модели для этого не нужно.
+    Владельцу — все его точки, управляющему — те, к которым он привязан. Раньше
+    рассылка шла только по restaurants.telegram_id, поэтому управляющие видели
+    свой филиал в мини-аппе, но ни утреннего дайджеста, ни триггеров не получали.
+    Управляющий двух филиалов получает одно письмо на оба — как владелец на сеть.
+    """
+    from database import get_branch_managers
+    out: Dict[int, List[Dict[str, Any]]] = {}
+    for r in rests:
+        out.setdefault(int(r["telegram_id"]), []).append(r)
+    by_org = {r.get("organization_id"): r for r in rests}
+    for m in get_branch_managers():
+        r = by_org.get(m["organization_id"])
+        if not r:
+            continue
+        mine = out.setdefault(int(m["telegram_id"]), [])
+        # владелец, назначенный управляющим сам себе, не должен получить дубль
+        if not any(x.get("organization_id") == r.get("organization_id") for x in mine):
+            mine.append(r)
+    return out
+
+
+async def _send_morning_report() -> bool:
+    """Утренняя сводка: вчера + сравнения + прогноз месяца + стоп-лист.
+
+    Каждый telegram_id получает только свои филиалы (см. _report_recipients):
+    у кого один — придёт про один, у кого сеть — про сеть. Отдельной ролевой
+    модели для этого не нужно. Филиалы считаем ОДИН раз на всех: иначе точка,
+    у которой есть и владелец, и управляющий, дёргала бы OLAP дважды.
     """
     from database import get_all_restaurants
     rests = get_all_restaurants()
@@ -6412,20 +6437,20 @@ async def _send_morning_report() -> bool:
         return False
     yd = (local_now() - timedelta(days=1)).date()
 
-    by_owner: Dict[int, list] = {}
-    for r in rests:
-        by_owner.setdefault(r["telegram_id"], []).append(r)
+    sem = asyncio.Semaphore(4)
+
+    async def one(rr):
+        async with sem:
+            return await _branch_morning(rr, yd)
+
+    computed = await asyncio.gather(*(one(r) for r in rests), return_exceptions=True)
+    by_org: Dict[str, Dict[str, Any]] = {x["org"]: x for x in computed
+                                         if isinstance(x, dict) and x.get("org")}
 
     sent = 0
-    for tg_id, owner_rests in by_owner.items():
-        sem = asyncio.Semaphore(4)
-
-        async def one(rr):
-            async with sem:
-                return await _branch_morning(rr, yd)
-
-        results = [x for x in await asyncio.gather(*(one(r) for r in owner_rests))
-                   if isinstance(x, dict)]
+    for tg_id, own_rests in _report_recipients(rests).items():
+        results = [by_org[o] for o in
+                   (r.get("organization_id") for r in own_rests) if o in by_org]
         results = [x for x in results if x["rev"] or x["stops"] or x["lows"]]
         if not results:
             continue
@@ -6477,7 +6502,7 @@ async def _send_morning_report() -> bool:
             sent += 1
         except Exception as e:
             logger.warning(f"[morning] send {tg_id}: {e!r}")
-    logger.info(f"[morning] отправлено {sent} владельцам")
+    logger.info(f"[morning] отправлено {sent} получателям")
     return True
 
 
@@ -6538,20 +6563,20 @@ async def _send_trigger_alerts() -> int:
     now = local_now()
     today = now.date().isoformat()
 
-    by_owner: Dict[int, list] = {}
-    for r in rests:
-        by_owner.setdefault(r["telegram_id"], []).append(r)
+    sem = asyncio.Semaphore(4)
+
+    async def one(rr):
+        async with sem:
+            return await _branch_intraday(rr, now)
+
+    computed = await asyncio.gather(*(one(r) for r in rests), return_exceptions=True)
+    by_org: Dict[str, Dict[str, Any]] = {x["org"]: x for x in computed
+                                         if isinstance(x, dict) and x.get("org")}
 
     sent = 0
-    for tg_id, owner_rests in by_owner.items():
-        sem = asyncio.Semaphore(4)
-
-        async def one(rr):
-            async with sem:
-                return await _branch_intraday(rr, now)
-
-        rows = [x for x in await asyncio.gather(*(one(r) for r in owner_rests))
-                if isinstance(x, dict)]
+    for tg_id, own_rests in _report_recipients(rests).items():
+        rows = [by_org[o] for o in
+                (r.get("organization_id") for r in own_rests) if o in by_org]
         lines = []
         for x in rows:
             if x["typical"] < TRIGGER_MIN_TYPICAL:
@@ -6596,7 +6621,7 @@ async def _trigger_scheduler():
             if TRIGGER_FROM_HOUR <= now.hour <= TRIGGER_TO_HOUR:
                 n = await _send_trigger_alerts()
                 if n:
-                    logger.info(f"[trigger] отправлено {n} владельцам")
+                    logger.info(f"[trigger] отправлено {n} получателям")
         except Exception as e:
             logger.warning(f"[trigger] цикл: {e!r}")
         await asyncio.sleep(7200)
