@@ -468,22 +468,30 @@ def _ensure_branch_managers(conn):
     )""")
 
 
-def add_branch_manager(org_id: str, telegram_id: int, name: str = ""):
-    """Привязывает человека к филиалу. Один человек — ОДИН филиал.
+def add_branch_manager(org_id, telegram_id: int, name: str = ""):
+    """Привязывает человека к филиалам ссылки. Набор задаёт ССЫЛКА, а не история.
 
-    Прежние привязки этого telegram_id снимаются: иначе, открыв вторую ссылку,
-    управляющий получал бы доступ сразу к двум филиалам, а ссылку легко переслать.
+    Прежние привязки этого telegram_id снимаются и ставятся ровно те, что пришли:
+    открыв вторую ссылку, управляющий не копит доступы — а одна ссылка при этом
+    может открывать сразу несколько филиалов (один управляющий на два адреса).
+
+    org_id — строка или список строк.
     """
+    org_ids = [org_id] if isinstance(org_id, str) else list(org_id)
+    if not org_ids:
+        return
     conn = get_db()
     _ensure_branch_managers(conn)
     conn.execute("UPDATE branch_managers SET active = 0 WHERE telegram_id = ?",
                  (int(telegram_id),))
-    conn.execute(
-        """INSERT INTO branch_managers (organization_id, telegram_id, name, added_at, active)
-           VALUES (?, ?, ?, ?, 1)
-           ON CONFLICT(organization_id, telegram_id)
-           DO UPDATE SET name = excluded.name, active = 1, added_at = excluded.added_at""",
-        (org_id, int(telegram_id), name, datetime.now().isoformat()))
+    now = datetime.now().isoformat()
+    for oid in org_ids:
+        conn.execute(
+            """INSERT INTO branch_managers (organization_id, telegram_id, name, added_at, active)
+               VALUES (?, ?, ?, ?, 1)
+               ON CONFLICT(organization_id, telegram_id)
+               DO UPDATE SET name = excluded.name, active = 1, added_at = excluded.added_at""",
+            (oid, int(telegram_id), name, now))
     conn.commit()
     conn.close()
 

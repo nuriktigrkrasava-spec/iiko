@@ -5586,53 +5586,58 @@ async def telegram_webhook(request: Request):
             raw_source = parts[1].strip() if len(parts) > 1 else ""
             source = re.sub(r"[^0-9A-Za-z_\-]", "", raw_source)[:64] or "direct"
 
-            # Приглашение управляющего: /start inv_<org>_<подпись>. Подпись на
-            # ENCRYPTION_KEY — по чужой ссылке к филиалу не подключиться.
-            if source.startswith("inv_"):
-                org_id = _org_from_invite(source)
-                if not org_id:
+            # Приглашение управляющего: /start inv_<org>_<подпись> на один филиал
+            # или inv<N>_<org>…_<подпись> на несколько (один человек — два адреса).
+            # Подпись на ENCRYPTION_KEY — по чужой ссылке к филиалу не подключиться.
+            if re.match(r"^inv\d*_", source):
+                org_ids = _orgs_from_invite(source)
+                if not org_ids:
                     await _tg_send(chat_id, "❌ Ссылка недействительна или устарела.")
                     return {"ok": True}
-                rest = next((r for r in get_all_restaurants()
-                             if r["organization_id"] == org_id), None)
-                if not rest:
+                rests = [r for r in get_all_restaurants()
+                         if r["organization_id"] in org_ids]
+                if len(rests) != len(org_ids):
                     await _tg_send(chat_id, "❌ Филиал не найден.")
                     return {"ok": True}
 
                 # Ссылка на две активации: одну владелец тратит на проверку,
                 # вторую — сам управляющий. Дальше мертва, чтобы пересланная
                 # ссылка не открывала филиал кому попало. Повторный вход тем же
-                # человеком активацию не тратит.
-                used_key = f"invite_used:{org_id}"
+                # человеком активацию не тратит. У ссылки на пару филиалов свой
+                # счётчик: она отдельная ссылка, а не сумма одиночных.
+                used_key = f"invite_used:{','.join(org_ids)}"
+                names = ", ".join(r.get("organization_name", "филиал") for r in rests)
                 used = [x for x in (get_app_state(used_key) or "").split(",") if x]
                 if str(telegram_id) not in used:
                     if len(used) >= INVITE_MAX_USES:
                         await _tg_send(chat_id,
                                        "🔒 Ссылка исчерпана — по ней уже подключились.\n"
                                        "Попросите владельца выдать новую.")
-                        try:
-                            await _tg_send(rest["telegram_id"],
-                                           f"⚠️ По ссылке <b>{rest.get('organization_name')}</b> "
-                                           f"пытался подключиться @{username or telegram_id} "
-                                           f"(id {telegram_id}) — активации исчерпаны.")
-                        except Exception:
-                            pass
+                        for owner in {r["telegram_id"] for r in rests}:
+                            try:
+                                await _tg_send(owner,
+                                               f"⚠️ По ссылке <b>{names}</b> "
+                                               f"пытался подключиться @{username or telegram_id} "
+                                               f"(id {telegram_id}) — активации исчерпаны.")
+                            except Exception:
+                                pass
                         return {"ok": True}
                     set_app_state(used_key, ",".join(used + [str(telegram_id)]))
 
                 who = username or str(telegram_id)
-                add_branch_manager(org_id, telegram_id, who)
-                branch = rest.get("organization_name", "филиал")
+                add_branch_manager(org_ids, telegram_id, who)
+                what = "филиалы" if len(rests) > 1 else "филиал"
                 await _tg_send(chat_id,
-                               f"✅ Вы подключены как управляющий:\n<b>{branch}</b>\n\n"
+                               f"✅ Вы подключены как управляющий:\n<b>{names}</b>\n\n"
                                f"Открывайте мини-апп — увидите данные только своего "
-                               f"филиала. Задачи будут приходить сюда, отмечайте кнопками.")
-                try:  # владельцу — чтобы знал, кто подключился
-                    await _tg_send(rest["telegram_id"],
-                                   f"👤 К филиалу <b>{branch}</b> подключился управляющий: "
-                                   f"@{who} (id {telegram_id})")
-                except Exception as e:
-                    logger.warning(f"[invite] notify owner: {e!r}")
+                               f"{what}. Задачи будут приходить сюда, отмечайте кнопками.")
+                for owner in {r["telegram_id"] for r in rests}:  # владельцу — кто подключился
+                    try:
+                        await _tg_send(owner,
+                                       f"👤 К <b>{names}</b> подключился управляющий: "
+                                       f"@{who} (id {telegram_id})")
+                    except Exception as e:
+                        logger.warning(f"[invite] notify owner: {e!r}")
                 return {"ok": True}
             if DEMO_ONLY:
                 try:
@@ -6613,23 +6618,61 @@ def _invite_sign(org_id: str) -> str:
     return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:16]
 
 
+def _invite_sign_many(org_ids: List[str]) -> str:
+    """Подпись ссылки на несколько филиалов: подписываем набор целиком, иначе из
+    двух честных ссылок можно было бы склеить третью."""
+    secret = (os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY")
+              or "iiko-widget-fallback").encode()
+    mac = hmac.new(secret, ("invite:" + ",".join(org_ids)).encode(),
+                   hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:16]
+
+
 def invite_link_for(org_id: str) -> str:
     """t.me/<бот>?start=inv_<8 симв. org>_<подпись> — короче лимита deep-link."""
     return (f"https://t.me/{BOT_USERNAME}?start="
             f"inv_{org_id.replace('-', '')[:12]}_{_invite_sign(org_id)}")
 
 
-def _org_from_invite(payload: str) -> Optional[str]:
-    """Достаёт org_id из ссылки, проверяя подпись. None — если подделка."""
-    try:
-        _, short, sig = payload.split("_", 2)
-    except ValueError:
-        return None
+def invite_link_for_many(org_ids: List[str]) -> str:
+    """Одна ссылка на несколько филиалов: inv<N>_<short1>…_<подпись>.
+
+    Число филиалов вынесено В ПРЕФИКС, а не отделено ещё одним подчёркиванием:
+    в подписи «_» встречается (base64url), поэтому отделить её от хвоста можно,
+    только зная заранее, сколько частей идёт до неё. Два филиала — 47 символов
+    из 64 допустимых в deep-link, три — 60.
+    """
+    if len(org_ids) == 1:
+        return invite_link_for(org_ids[0])
+    shorts = "_".join(o.replace("-", "")[:12] for o in org_ids)
+    return (f"https://t.me/{BOT_USERNAME}?start="
+            f"inv{len(org_ids)}_{shorts}_{_invite_sign_many(org_ids)}")
+
+
+def _orgs_from_invite(payload: str) -> List[str]:
+    """Филиалы из ссылки с проверкой подписи. Пустой список — подделка.
+
+    Понимает оба формата: старый inv_<short>_<подпись> на один филиал и
+    inv<N>_<short>…_<подпись> на несколько. Старые ссылки работают как работали.
+    """
+    m = re.match(r"^inv(\d*)_", payload)
+    if not m:
+        return []
+    n = int(m.group(1) or 1)
+    parts = payload.split("_", n + 1)          # ["invN", short1, …, подпись]
+    if len(parts) != n + 2:
+        return []
+    shorts, sig = parts[1:-1], parts[-1]
+    by_short = {}
     for r in get_all_restaurants():
         oid = r.get("organization_id") or ""
-        if oid.replace("-", "")[:12] == short and hmac.compare_digest(_invite_sign(oid), sig):
-            return oid
-    return None
+        if oid:
+            by_short[oid.replace("-", "")[:12]] = oid
+    orgs = [by_short[s] for s in shorts if s in by_short]
+    if len(orgs) != n:
+        return []
+    expect = _invite_sign(orgs[0]) if n == 1 else _invite_sign_many(orgs)
+    return orgs if hmac.compare_digest(expect, sig) else []
 
 
 async def _send_task(tg_id: int, org_id: str, branch: str, title: str,
