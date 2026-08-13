@@ -6312,7 +6312,9 @@ async def _send_daily_shifts_report() -> bool:
     return True
 
 
-MORNING_HOUR_LOCAL = int(os.getenv("MORNING_HOUR_LOCAL", "9"))
+# 11:00 по Казахстану (local_now — UTC+5): к этому часу управляющий уже на точке
+# и может отреагировать, в отличие от 9 утра, когда филиал ещё закрыт.
+MORNING_HOUR_LOCAL = int(os.getenv("MORNING_HOUR_LOCAL", "11"))
 
 
 async def _branch_morning(r: Dict[str, Any], yd: date) -> Optional[Dict[str, Any]]:
@@ -6493,6 +6495,12 @@ async def _send_morning_report() -> bool:
                                        for _, t in alerts if "<b>" in t})
             if calm > 0 and alerts:
                 L.append(f"\nОстальные {calm} филиалов без отклонений.")
+
+        # Управляющему — напоминание, что бот принимает накладные. Владельцу не шлём:
+        # он это и так знает, а лишняя строка в сводке по сети только мешает.
+        if not any(int(r["telegram_id"]) == tg_id for r in rests):
+            L.append("\n📸 Накладные можно пробивать прямо здесь — "
+                     "пришлите фото накладной в этот чат.")
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as c:

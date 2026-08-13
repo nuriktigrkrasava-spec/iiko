@@ -100,16 +100,11 @@ def test_manager_of_unknown_branch_ignored(api, monkeypatch):
 
 # ── филиал считается один раз на всех получателей ───────────────────────────
 
-def test_branch_computed_once_for_owner_and_manager(api, monkeypatch):
-    """Точка с владельцем и управляющим не должна дёргать OLAP дважды."""
-    _managers(monkeypatch, [
-        {"organization_id": ORG_A, "telegram_id": ALBINA, "name": "albina"},
-        {"organization_id": ORG_B, "telegram_id": ALBINA, "name": "albina"},
-    ])
-    calls = []
-
+def _run_morning(api, monkeypatch, calls=None):
+    """Гоняет утреннюю рассылку на фейковых цифрах. Возвращает [(chat_id, text)]."""
     async def fake_branch(r, yd):
-        calls.append(r["organization_id"])
+        if calls is not None:
+            calls.append(r["organization_id"])
         return {"name": r["organization_name"], "org": r["organization_id"],
                 "rev": 100.0, "prev_day": 90.0, "prev_week": 80.0,
                 "mtd": 1000.0, "forecast": 2000.0, "typical": 95.0,
@@ -129,7 +124,7 @@ def test_branch_computed_once_for_owner_and_manager(api, monkeypatch):
             return False
 
         async def post(self, url, json=None, **kw):
-            sends.append(json["chat_id"])
+            sends.append((json["chat_id"], json["text"]))
             return FakeResp()
 
     monkeypatch.setattr(api, "_branch_morning", fake_branch)
@@ -137,5 +132,33 @@ def test_branch_computed_once_for_owner_and_manager(api, monkeypatch):
     monkeypatch.setattr(api.httpx, "AsyncClient", lambda *a, **kw: FakeClient())
 
     assert asyncio.run(api._send_morning_report()) is True
+    return sends
+
+
+def test_branch_computed_once_for_owner_and_manager(api, monkeypatch):
+    """Точка с владельцем и управляющим не должна дёргать OLAP дважды."""
+    _managers(monkeypatch, [
+        {"organization_id": ORG_A, "telegram_id": ALBINA, "name": "albina"},
+        {"organization_id": ORG_B, "telegram_id": ALBINA, "name": "albina"},
+    ])
+    calls = []
+    sends = _run_morning(api, monkeypatch, calls)
     assert sorted(calls) == sorted([ORG_A, ORG_B, ORG_C])   # ровно по одному разу
-    assert sorted(sends) == sorted([OWNER, ALBINA])         # оба получили письмо
+    assert sorted(c for c, _ in sends) == sorted([OWNER, ALBINA])  # оба получили письмо
+
+
+def test_invoice_hint_only_for_managers(api, monkeypatch):
+    """Про накладные напоминаем управляющему; владельцу эта строка не нужна."""
+    _managers(monkeypatch, [
+        {"organization_id": ORG_A, "telegram_id": ALBINA, "name": "albina"},
+    ])
+    sends = _run_morning(api, monkeypatch)
+    by_id = dict(sends)
+    assert "Накладные можно пробивать прямо здесь" in by_id[ALBINA]
+    assert "Накладные можно пробивать прямо здесь" not in by_id[OWNER]
+
+
+def test_morning_hour_is_11_local(api):
+    """Владелец просил 11:00 по Казахстану; local_now — UTC+5."""
+    assert api.MORNING_HOUR_LOCAL == 11
+    assert api.local_now().utcoffset().total_seconds() == 5 * 3600
