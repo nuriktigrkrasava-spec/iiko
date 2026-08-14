@@ -270,9 +270,19 @@ HELP = [
 
 
 def _owner_orgs(uid: int) -> List[Dict[str, Any]]:
+    """Филиалы, которыми человек распоряжается в консоли.
+
+    Берём тот же источник, что и панель — get_restaurants(uid). Через
+    get_all_restaurants() нельзя: она схлопывает дубли по организации, а на
+    проде одна и та же точка заведена под несколькими аккаунтами, и владелец
+    в отфильтрованном списке просто не находился.
+
+    Область действия команд равна тому, что человек и так видит на экране:
+    написать можно только управляющим своих филиалов.
+    """
     import api
-    return [r for r in api.get_all_restaurants()
-            if int(r["telegram_id"]) == int(uid) and in_journals(r.get("organization_name"))]
+    return [r for r in api.get_restaurants(int(uid))
+            if in_journals(r.get("organization_name"))]
 
 
 def _managers_of(orgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

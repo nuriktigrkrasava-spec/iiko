@@ -224,3 +224,17 @@ def test_escape_blocks_tag_injection(board):
     jr, _ = board
     out = jr._esc("**<script>alert(1)</script>**")
     assert "<script>" not in out and "&lt;script&gt;" in out
+
+
+def test_console_scope_survives_duplicate_registrations(board, monkeypatch):
+    """На проде одна точка заведена под несколькими аккаунтами: get_all_restaurants
+    схлопывает дубли и может оставить чужую строку. Консоль должна брать филиалы
+    оттуда же, откуда панель, иначе владелец теряет доступ к своим командам."""
+    jr, _ = board
+    import api
+    # дубль: та же организация, но первой идёт строка другого аккаунта
+    monkeypatch.setattr(api, "get_all_restaurants", lambda: [
+        {"organization_id": ORG_A, "organization_name": "Астана, ул. Бухар Жырау 36",
+         "telegram_id": 111},
+    ])
+    assert len(jr._owner_orgs(OWNER)) == 2      # видит свои через get_restaurants
