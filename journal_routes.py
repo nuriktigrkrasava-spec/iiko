@@ -322,9 +322,9 @@ async def journals_say(token: str, body: Dict[str, Any]):
     mgrs = _managers_of(orgs)
     log: List[List[str]] = []
 
-    async def send(tg_id: int, msg: str) -> bool:
+    async def send(tg_id: int, msg: str, kb: Optional[dict] = None) -> bool:
         try:
-            await api._tg_send(int(tg_id), msg)
+            await api._tg_send(int(tg_id), msg, kb)
             return True
         except Exception as e:
             log.append(["err", f"{tg_id}: {e!r}"[:160]])
@@ -333,7 +333,9 @@ async def journals_say(token: str, body: Dict[str, Any]):
     if not text.startswith("/"):
         if not mgrs:
             return JSONResponse({"log": [["err", "Ни один управляющий не подключён — писать некому."]]})
-        head = "📣 <b>Сообщение от руководства</b>\n\n"
+        # Без шапки: владелец пишет живым людям, а не рассылает циркуляр.
+        # Приписка «Сообщение от руководства» к каждой строчке только мешает.
+        head = ""
         sent = 0
         # Один человек может вести два филиала — шлём ему ОДНО сообщение,
         # а не по копии на каждый адрес.
@@ -413,7 +415,8 @@ async def journals_say(token: str, body: Dict[str, Any]):
             missing = [d for d in due if d[2] == slot and d not in have]
             if not missing:
                 continue
-            if await send(m["telegram_id"], api.journal_slot_message(slot, missing)):
+            if await send(m["telegram_id"], api.journal_slot_message(slot, missing),
+                          api._journal_kb(slot, missing, org)):
                 n += 1
                 log.append(["ok", f"→ {short_name(by_org[org].get('organization_name'))}"
                                   f" · не сдано {len(missing)}"])

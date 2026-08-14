@@ -238,3 +238,41 @@ def test_console_scope_survives_duplicate_registrations(board, monkeypatch):
          "telegram_id": 111},
     ])
     assert len(jr._owner_orgs(OWNER)) == 2      # видит свои через get_restaurants
+
+
+# ── кнопки задания ──────────────────────────────────────────────────────────
+
+def test_slot_survives_callback_roundtrip(board):
+    """Слот «10:45» содержит двоеточие — тот же символ, что разделяет поля в
+    callback_data. Без кодирования слот превращался в «45», и сдача не сходилась
+    ни с одним заданием: фото уходило в никуда."""
+    import api
+    for slot in set(J.CLEAN_SLOTS + J.TEMP_SLOTS):
+        assert api._slot_from_code(api._slot_code(slot)) == slot
+
+
+def test_callback_carries_branch_and_slot(board):
+    """Филиал зашит в кнопку — управляющий двух адресов ничего не выбирает."""
+    import api
+    kb = api._journal_kb("10:45", [("clean", "hall", "10:45")], ORG_A)
+    data = kb["inline_keyboard"][0][0]["callback_data"]
+    bits = data.split(":")
+    assert bits[0] == "jr" and bits[1] == "c" and bits[2] == "hall"
+    assert api._slot_from_code(bits[3]) == "10:45"
+    assert bits[4] == api._jshort(ORG_A)
+    assert len(bits) == 5                    # разбор однозначен
+
+
+def test_temp_button_shape(board):
+    import api
+    kb = api._journal_kb("11:00", [("temp", "", "11:00")], ORG_B)
+    bits = kb["inline_keyboard"][0][0]["callback_data"].split(":")
+    assert bits[1] == "t" and api._slot_from_code(bits[2]) == "11:00"
+    assert bits[3] == api._jshort(ORG_B) and len(bits) == 4
+
+
+def test_callback_data_fits_telegram_limit(board):
+    """Telegram режет callback_data на 64 байтах."""
+    import api
+    kb = api._journal_kb("10:45", [("clean", "kitchen", "10:45")], ORG_A)
+    assert len(kb["inline_keyboard"][0][0]["callback_data"].encode()) <= 64

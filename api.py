@@ -5378,24 +5378,16 @@ async def telegram_webhook(request: Request):
                 if not orgs:
                     await _tg_send(chat_id, "Вы не привязаны ни к одному филиалу с журналами.")
                     return {"ok": True}
-                if op == "o":                       # филиал выбран: jr:o:<short>:<хвост>
-                    org = _org_by_short(orgs, bits[2])
-                    kind = "temp" if bits[3] == "t" else "clean"
-                    zone = "" if kind == "temp" else bits[4]
-                    slot = bits[-1]
-                    if not org:
-                        await _tg_send(chat_id, "Филиал не найден.")
-                        return {"ok": True}
-                    await _journal_start(chat_id, who, org, kind, zone, slot)
-                    return {"ok": True}
-                if op in ("c", "t"):                # зона или замер
-                    slot = bits[-1]
+                if op in ("c", "t"):    # jr:c:<зона>:<ччмм>:<филиал> | jr:t:<ччмм>:<филиал>
                     zone = bits[2] if op == "c" else ""
-                    if len(orgs) > 1:               # управляющий двух адресов
-                        suffix = f"c:{zone}:{slot}" if op == "c" else f"t:{slot}"
-                        await _journal_ask_branch(chat_id, orgs, suffix)
+                    code = bits[3] if op == "c" else bits[2]
+                    short = bits[4] if op == "c" else bits[3]
+                    slot = _slot_from_code(code)
+                    if not slot:
+                        await _tg_edit(chat_id, msg_id, "⚠️ Задание устарело — дождитесь следующего.")
                         return {"ok": True}
-                    await _journal_start(chat_id, who, orgs[0],
+                    org = _org_by_short(orgs, short) or orgs[0]
+                    await _journal_start(chat_id, who, org,
                                          "temp" if op == "t" else "clean", zone, slot)
                     return {"ok": True}
                 return {"ok": True}
@@ -6903,21 +6895,31 @@ def journal_slot_message(slot: str, missing: List[Tuple[str, str, str]]) -> str:
     return "\n".join(L)
 
 
-def _journal_kb(slot: str, missing: List[Tuple[str, str, str]]) -> dict:
+def _slot_code(slot: str) -> str:
+    """«10:45» → «1045». В callback_data двоеточие — разделитель полей, и слот
+    со своим двоеточием разваливал разбор: слот превращался в «45», а сдача не
+    сходилась ни с одним заданием."""
+    return slot.replace(":", "")
+
+
+def _slot_from_code(code: str) -> Optional[str]:
     import journals as J
+    return next((s for s in set(J.CLEAN_SLOTS + J.TEMP_SLOTS)
+                 if _slot_code(s) == code), None)
+
+
+def _journal_kb(slot: str, missing: List[Tuple[str, str, str]], org_id: str) -> dict:
+    """Кнопки задания. Филиал зашит в саму кнопку — управляющий двух адресов
+    получает два отдельных задания и ничего не выбирает руками."""
+    import journals as J
+    code, short = _slot_code(slot), _jshort(org_id)
     rows = []
     for z in [m[1] for m in missing if m[0] == "clean"]:
         rows.append([{"text": f"{J.ZONES[z]['emoji']} {J.ZONES[z]['title']}",
-                      "callback_data": f"jr:c:{z}:{slot}"}])
+                      "callback_data": f"jr:c:{z}:{code}:{short}"}])
     if any(m[0] == "temp" for m in missing):
-        rows.append([{"text": "🌡 Температура", "callback_data": f"jr:t:{slot}"}])
+        rows.append([{"text": "🌡 Температура", "callback_data": f"jr:t:{code}:{short}"}])
     return {"inline_keyboard": rows} if rows else None
-
-
-async def _journal_ask_branch(chat_id: int, orgs: List[Dict[str, Any]], suffix: str):
-    rows = [[{"text": r.get("organization_name") or "Филиал",
-              "callback_data": f"jr:o:{_jshort(r['organization_id'])}:{suffix}"}] for r in orgs]
-    await _tg_send(chat_id, "За какой филиал сдаёте?", {"inline_keyboard": rows})
 
 
 async def _journal_start(chat_id: int, telegram_id: int, org: Dict[str, Any],
@@ -7035,7 +7037,7 @@ async def _journal_send_slot(slot: str) -> int:
             await _tg_send(int(m["telegram_id"]),
                            journal_slot_message(slot, missing) +
                            f"\n\n<i>{rests[org].get('organization_name')}</i>",
-                           _journal_kb(slot, missing))
+                           _journal_kb(slot, missing, org))
             sent += 1
         except Exception as e:
             logger.warning(f"[journal] slot {slot} → {m['telegram_id']}: {e!r}")
