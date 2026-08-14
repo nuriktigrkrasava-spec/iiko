@@ -298,7 +298,15 @@ async def journals_say(token: str, body: Dict[str, Any]):
         return JSONResponse({"log": []})
     orgs = _owner_orgs(uid)
     if not orgs:
-        return JSONResponse({"log": [["err", "Команды доступны владельцу сети."]]})
+        # Показываем, что именно увидел сервер: «доступ запрещён» без цифр
+        # заставляет гадать, а на проде и в копии базы данные разные.
+        allr = api.get_all_restaurants()
+        mine = [r for r in allr if str(r.get("telegram_id")) == str(uid)]
+        return JSONResponse({"log": [
+            ["err", "Команды доступны владельцу сети."],
+            ["info", f"uid={uid} · всего точек {len(allr)} · ваших {len(mine)} · "
+                     f"из них в журналах {sum(1 for r in mine if in_journals(r.get('organization_name')))}"],
+        ]})
 
     by_org = {r["organization_id"]: r for r in orgs}
     mgrs = _managers_of(orgs)
