@@ -5352,6 +5352,28 @@ async def telegram_webhook(request: Request):
                                f"{mark} · {who}, {when}")
                 return {"ok": True}
 
+            # Оживить исчерпанную ссылку-приглашение. Ссылка постоянная (подпись
+            # не меняется), «умирает» только счётчик активаций — его и сбрасываем.
+            if action.startswith("invreset:"):
+                who_id = int((cb.get("from") or {}).get("id") or 0)
+                short = action.split(":", 1)[1]
+                owned = [r for r in get_all_restaurants()
+                         if int(r["telegram_id"]) == who_id]
+                rest = next((r for r in owned
+                             if (r["organization_id"] or "").replace("-", "")[:12] == short), None)
+                if not rest:
+                    await _tg_edit(chat_id, msg_id,
+                                   "⚠️ Филиал не найден или он не ваш.")
+                    return {"ok": True}
+                org_id = rest["organization_id"]
+                set_app_state(f"invite_used:{org_id}", "")
+                await _tg_edit(
+                    chat_id, msg_id,
+                    f"♻️ Ссылка снова активна: <b>{rest.get('organization_name')}</b>\n"
+                    f"Доступно активаций: {INVITE_MAX_USES}\n\n"
+                    f"{invite_link_for(org_id)}")
+                return {"ok": True}
+
             pending = _get_pending_by_chat(chat_id)
 
             # Отмена — работает даже если pending нет
@@ -5613,12 +5635,18 @@ async def telegram_webhook(request: Request):
                         await _tg_send(chat_id,
                                        "🔒 Ссылка исчерпана — по ней уже подключились.\n"
                                        "Попросите владельца выдать новую.")
+                        # Кнопка прямо в предупреждении: владелец узнаёт о проблеме
+                        # и чинит её одним нажатием, не вспоминая команду.
+                        kb = {"inline_keyboard": [
+                            [{"text": f"♻️ Оживить: {r.get('organization_name') or 'филиал'}",
+                              "callback_data": f"invreset:{(r['organization_id'] or '').replace('-', '')[:12]}"}]
+                            for r in rests]}
                         for owner in {r["telegram_id"] for r in rests}:
                             try:
                                 await _tg_send(owner,
                                                f"⚠️ По ссылке <b>{names}</b> "
                                                f"пытался подключиться @{username or telegram_id} "
-                                               f"(id {telegram_id}) — активации исчерпаны.")
+                                               f"(id {telegram_id}) — активации исчерпаны.", kb)
                             except Exception:
                                 pass
                         return {"ok": True}
@@ -5683,7 +5711,25 @@ async def telegram_webhook(request: Request):
                 L.append("")
             L.append("Отправьте ссылку управляющему — он нажмёт «Старт» "
                      "и получит доступ только к своему филиалу.")
+            L.append("Ссылка перестала пускать? — /ozhivit")
             await _tg_send(chat_id, "\n".join(L))
+            return {"ok": True}
+
+        # Ссылка не ломается и не протухает — кончаются активации (INVITE_MAX_USES).
+        # Даём владельцу сбросить счётчик самому, не дожидаясь правки в коде.
+        if text in ("/ozhivit", "/reset"):
+            owned = [r for r in get_all_restaurants() if r["telegram_id"] == telegram_id]
+            if not owned:
+                await _tg_send(chat_id, "Команда доступна владельцу сети.")
+                return {"ok": True}
+            rows = [[{"text": r.get("organization_name") or "Филиал",
+                      "callback_data": f"invreset:{(r['organization_id'] or '').replace('-', '')[:12]}"}]
+                    for r in owned]
+            await _tg_send(chat_id,
+                           "♻️ <b>Оживить ссылку</b>\n\n"
+                           "Выберите филиал — счётчик активаций обнулится, "
+                           "и по той же ссылке снова можно будет подключиться.",
+                           {"inline_keyboard": rows})
             return {"ok": True}
 
         if text in ("/tasks", "/zadachi"):
