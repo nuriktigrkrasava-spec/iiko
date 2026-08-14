@@ -26,8 +26,14 @@ router = APIRouter()
 
 def _esc(t: str) -> str:
     """Текст владельца уходит в Telegram с parse_mode=HTML — экранируем, иначе
-    одна угловая скобка обрушит всю рассылку."""
-    return html.escape(t or "")
+    одна угловая скобка обрушит всю рассылку.
+
+    После экранирования возвращаем ровно один приём разметки: **жирный**.
+    Порядок важен — сначала escape, потом разметка, иначе через «**» можно
+    было бы протащить произвольный тег.
+    """
+    s = html.escape(t or "")
+    return re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s, flags=re.S)
 
 
 _RU_DOW = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
@@ -311,11 +317,19 @@ async def journals_say(token: str, body: Dict[str, Any]):
             return JSONResponse({"log": [["err", "Ни один управляющий не подключён — писать некому."]]})
         head = "📣 <b>Сообщение от руководства</b>\n\n"
         sent = 0
+        # Один человек может вести два филиала — шлём ему ОДНО сообщение,
+        # а не по копии на каждый адрес.
+        seen: set = set()
         for m in mgrs:
-            if await send(m["telegram_id"], head + _esc(text)):
+            tg = int(m["telegram_id"])
+            if tg in seen:
+                continue
+            seen.add(tg)
+            where = ", ".join(short_name(by_org[x["organization_id"]].get("organization_name"))
+                              for x in mgrs if int(x["telegram_id"]) == tg)
+            if await send(tg, head + _esc(text)):
                 sent += 1
-                log.append(["ok", f'→ {short_name(by_org[m["organization_id"]].get("organization_name"))}'
-                                  f' · @{m.get("name") or m["telegram_id"]}'])
+                log.append(["ok", f'→ {where} · @{m.get("name") or tg}'])
         log.append(["info", f"Отправлено получателям: {sent}"])
         return JSONResponse({"log": log})
 

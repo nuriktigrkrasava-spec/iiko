@@ -209,3 +209,18 @@ def test_workshop_and_hub_excluded(board):
     assert not jr.in_journals("Астана, ул. Алпамыс 61 (ЦЕХ)")
     assert jr.in_journals("Астана, ул. Бухар Жырау 36")
     assert not jr.in_journals("Актобе, ул. Локомотивная 7")
+
+
+def test_bold_markup_survives_escaping(board):
+    """**жирный** доезжает тегом, а угловые скобки — экранированными."""
+    jr, _ = board
+    out = jr._esc("Норма **≤ −18 °C** для <морозильника>")
+    assert "<b>≤ −18 °C</b>" in out
+    assert "&lt;морозильника&gt;" in out
+
+
+def test_escape_blocks_tag_injection(board):
+    """Через «**» нельзя протащить произвольный тег."""
+    jr, _ = board
+    out = jr._esc("**<script>alert(1)</script>**")
+    assert "<script>" not in out and "&lt;script&gt;" in out
