@@ -67,10 +67,15 @@ def short_name(full: str) -> str:
 # Журналы ведут только филиалы Астаны — так решил владелец. Регионы остаются в
 # выручке и накладных, но чистоту, температуру и остатки не сдают.
 JOURNAL_CITY = "Астана"
+# Оба на Алпамыс 61: заготовочный цех и распредцентр. Это не гостевые точки —
+# зала и санузла для гостей там нет, а в знаменателе «сдано N из M» они
+# завышали план на две трети слота.
+JOURNAL_SKIP = ("(КЦ)", "(ЦЕХ)")
 
 
 def in_journals(full: str) -> bool:
-    return (full or "").startswith(JOURNAL_CITY)
+    s = full or ""
+    return s.startswith(JOURNAL_CITY) and not any(m in s for m in JOURNAL_SKIP)
 
 
 def _payload(row) -> Dict[str, Any]:

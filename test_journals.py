@@ -200,3 +200,12 @@ def test_short_name_shortens_astana_addresses(board):
     jr, _ = board
     assert jr.short_name("Астана, ул. Бухар Жырау 36") == "Бухар Жырау"
     assert jr.short_name("Астана, ул. Кажымукана 16") == "Кажымукана"
+
+
+def test_workshop_and_hub_excluded(board):
+    """Цех и распредцентр на Алпамыс 61 — не гостевые точки, журналы не ведут."""
+    jr, _ = board
+    assert not jr.in_journals("Астана, ул. Алпамыс 61 (КЦ)")
+    assert not jr.in_journals("Астана, ул. Алпамыс 61 (ЦЕХ)")
+    assert jr.in_journals("Астана, ул. Бухар Жырау 36")
+    assert not jr.in_journals("Актобе, ул. Локомотивная 7")
