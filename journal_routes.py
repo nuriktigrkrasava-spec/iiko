@@ -164,6 +164,8 @@ def build_board(uid: int, now: Optional[datetime] = None) -> Dict[str, Any]:
             "temp": {s: v for s, v in temp_rows.items()},
             "temp_alarms": alarms,
             "stock": ("stock", "", J.STOCK_SLOT) in have,
+            # уже введённые остатки — форма подставит их, чтобы не набивать заново
+            "stock_counts": next((_payload(e) for e in mine if e["kind"] == "stock"), {}),
         })
 
         # дыры — то, ради чего экран открывают
@@ -609,7 +611,54 @@ PAGE = r'''<!doctype html>
   .status .sp{margin-left:auto}
   footer{color:var(--ink-3);font-size:11px;line-height:1.7;padding-top:10px;border-top:1px solid var(--line)}
 
-  /* ── консоль ── */
+  /* ── остатки ── */
+let PLACE=0, COUNTS={};
+function stockRender(){
+  const b=DATA.branches.find(x=>x.org===CUR);
+  document.getElementById("st-b").textContent=b?b.n:"—";
+  const places=DATA.stock_places;
+  document.getElementById("st-places").innerHTML=places.map((p,i)=>{
+    const c=Object.keys(COUNTS[p.key]||{}).length;
+    return '<button type="button" aria-pressed="'+(i===PLACE)+'" data-i="'+i+'">'+
+      esc(p.title)+(c?' <span class="c">'+c+'</span>':'')+'</button>';}).join("");
+  document.querySelectorAll("#st-places button").forEach(x=>x.addEventListener("click",()=>{
+    PLACE=+x.dataset.i; stockRender();}));
+  const p=places[PLACE], have=COUNTS[p.key]||{};
+  document.getElementById("st-items").innerHTML=p.items.map(it=>{
+    const v=have[it]??"";
+    return '<div class="it'+(v!==""?" filled":"")+'"><label for="i-'+esc(it)+'">'+esc(it)+
+      '</label><input id="i-'+esc(it)+'" type="number" step="any" inputmode="decimal" value="'+
+      esc(v)+'" data-k="'+esc(it)+'"></div>';}).join("");
+  document.querySelectorAll("#st-items input").forEach(inp=>inp.addEventListener("input",()=>{
+    COUNTS[p.key]=COUNTS[p.key]||{};
+    if(inp.value==="")delete COUNTS[p.key][inp.dataset.k];
+    else COUNTS[p.key][inp.dataset.k]=parseFloat(inp.value);
+    inp.parentElement.classList.toggle("filled",inp.value!=="");
+    stockSum();
+  }));
+  stockSum();
+}
+function stockSum(){
+  const total=DATA.stock_places.reduce((a,p)=>a+p.items.length,0);
+  const done=Object.values(COUNTS).reduce((a,o)=>a+Object.keys(o).length,0);
+  document.getElementById("st-sum").textContent="заполнено "+done+" из "+total;
+}
+document.getElementById("st-save").addEventListener("click",async()=>{
+  if(!CUR){document.getElementById("st-msg").textContent="сначала выберите филиал";return;}
+  const btn=document.getElementById("st-save"), msg=document.getElementById("st-msg");
+  btn.disabled=true; msg.textContent="сохраняю…";
+  try{
+    const r=await fetch("/api/journals/stock/"+TOKEN,{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({org:CUR,counts:COUNTS})});
+    const j=await r.json();
+    msg.textContent=j.ok?"сохранено в "+new Date().toLocaleTimeString("ru").slice(0,5):("ошибка: "+(j.error||""));
+    if(j.ok)load();
+  }catch(e){msg.textContent="сеть недоступна";}
+  btn.disabled=false;
+});
+
+/* ── консоль ── */
   .con{display:flex;flex-direction:column;gap:0}
   .con-out{max-height:210px;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:2px}
   .cl{font-size:11.5px;display:flex;gap:8px}
@@ -628,6 +677,30 @@ PAGE = r'''<!doctype html>
   }
   .con-in button:disabled{opacity:.45;cursor:default}
   .hint{padding:0 12px 9px;font-size:10.5px;color:var(--ink-3);line-height:1.6}
+  /* ── остатки ── */
+  .pl{display:flex;flex-wrap:wrap;gap:1px;background:var(--line-2);border-bottom:1px solid var(--line-2)}
+  .pl button{
+    flex:1 1 auto;font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;
+    background:var(--surface);color:var(--ink-3);border:0;padding:7px 9px;cursor:pointer;text-align:left;
+  }
+  .pl button[aria-pressed="true"]{background:var(--sel-bg);color:var(--ink);box-shadow:inset 2px 0 0 var(--ink)}
+  .pl button .c{color:var(--ok)}
+  .items2{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:1px;background:var(--line-2)}
+  .it{display:flex;align-items:center;gap:8px;background:var(--surface);padding:6px 10px}
+  .it label{flex:1;min-width:0;font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .it input{
+    width:74px;flex:none;background:var(--inset);border:1px solid var(--line);color:var(--ink);
+    font-family:var(--mono);font-size:12.5px;padding:3px 6px;text-align:right;
+  }
+  .it input:focus{outline:1px solid var(--ink);border-color:var(--ink)}
+  .it.filled input{border-color:var(--ok);color:var(--ok)}
+  .save{display:flex;align-items:center;gap:12px;padding:9px 12px;border-top:1px solid var(--line-2)}
+  .save button{
+    font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    background:var(--ink);color:var(--surface);border:0;padding:7px 16px;cursor:pointer;
+  }
+  .save button:disabled{opacity:.45;cursor:default}
+  .save .msg{font-size:11px;color:var(--ink-3)}
   .load{padding:36px 0;text-align:center;color:var(--ink-3);font-size:12px;letter-spacing:.1em;text-transform:uppercase}
 </style></head><body>
 <div class="wrap">
@@ -670,6 +743,15 @@ PAGE = r'''<!doctype html>
   <div class="box">
     <div class="box-h"><span class="tag">Журнал <b>событий</b></span><span class="tag" id="log-sum"></span></div>
     <div class="log" id="log"></div>
+  </div>
+
+  <div class="box">
+    <div class="box-h"><span class="tag">Остатки <b id="st-b">—</b></span>
+      <span class="tag" id="st-sum"></span></div>
+    <div class="pl" id="st-places"></div>
+    <div class="items2" id="st-items"></div>
+    <div class="save"><button id="st-save" type="button">Сохранить</button>
+      <span class="msg" id="st-msg">заполняются раз в день, по местам хранения</span></div>
   </div>
 
   <div class="box con">
@@ -780,6 +862,7 @@ function drawGraph(){
 function sel(org){
   CUR=org;
   const b=DATA.branches.find(x=>x.org===org); if(!b)return;
+  COUNTS=JSON.parse(JSON.stringify(b.stock_counts||{})); stockRender();
   document.querySelectorAll(".node").forEach(n=>n.classList.toggle("sel",n.dataset.id===org));
   document.querySelectorAll("tr.row").forEach(r=>r.classList.toggle("sel",r.dataset.id===org));
   document.getElementById("pen").innerHTML=b.penalty?"штраф <b>"+b.penalty+"</b> за 7 дней":"штрафов нет";
@@ -825,6 +908,53 @@ function sel(org){
     '<div class="grp"><div class="grp-h"><span class="grp-n">Остатки</span>'+
       '<span class="st '+(b.stock?"ok":"part")+'">'+(b.stock?"сданы":"не сданы")+'</span></div></div>';
 }
+
+/* ── остатки ── */
+let PLACE=0, COUNTS={};
+function stockRender(){
+  const b=DATA.branches.find(x=>x.org===CUR);
+  document.getElementById("st-b").textContent=b?b.n:"—";
+  const places=DATA.stock_places;
+  document.getElementById("st-places").innerHTML=places.map((p,i)=>{
+    const c=Object.keys(COUNTS[p.key]||{}).length;
+    return '<button type="button" aria-pressed="'+(i===PLACE)+'" data-i="'+i+'">'+
+      esc(p.title)+(c?' <span class="c">'+c+'</span>':'')+'</button>';}).join("");
+  document.querySelectorAll("#st-places button").forEach(x=>x.addEventListener("click",()=>{
+    PLACE=+x.dataset.i; stockRender();}));
+  const p=places[PLACE], have=COUNTS[p.key]||{};
+  document.getElementById("st-items").innerHTML=p.items.map(it=>{
+    const v=have[it]??"";
+    return '<div class="it'+(v!==""?" filled":"")+'"><label for="i-'+esc(it)+'">'+esc(it)+
+      '</label><input id="i-'+esc(it)+'" type="number" step="any" inputmode="decimal" value="'+
+      esc(v)+'" data-k="'+esc(it)+'"></div>';}).join("");
+  document.querySelectorAll("#st-items input").forEach(inp=>inp.addEventListener("input",()=>{
+    COUNTS[p.key]=COUNTS[p.key]||{};
+    if(inp.value==="")delete COUNTS[p.key][inp.dataset.k];
+    else COUNTS[p.key][inp.dataset.k]=parseFloat(inp.value);
+    inp.parentElement.classList.toggle("filled",inp.value!=="");
+    stockSum();
+  }));
+  stockSum();
+}
+function stockSum(){
+  const total=DATA.stock_places.reduce((a,p)=>a+p.items.length,0);
+  const done=Object.values(COUNTS).reduce((a,o)=>a+Object.keys(o).length,0);
+  document.getElementById("st-sum").textContent="заполнено "+done+" из "+total;
+}
+document.getElementById("st-save").addEventListener("click",async()=>{
+  if(!CUR){document.getElementById("st-msg").textContent="сначала выберите филиал";return;}
+  const btn=document.getElementById("st-save"), msg=document.getElementById("st-msg");
+  btn.disabled=true; msg.textContent="сохраняю…";
+  try{
+    const r=await fetch("/api/journals/stock/"+TOKEN,{method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({org:CUR,counts:COUNTS})});
+    const j=await r.json();
+    msg.textContent=j.ok?"сохранено в "+new Date().toLocaleTimeString("ru").slice(0,5):("ошибка: "+(j.error||""));
+    if(j.ok)load();
+  }catch(e){msg.textContent="сеть недоступна";}
+  btn.disabled=false;
+});
 
 /* ── консоль ── */
 const out=document.getElementById("con-out");

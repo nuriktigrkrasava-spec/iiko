@@ -6843,6 +6843,8 @@ async def _send_task(tg_id: int, org_id: str, branch: str, title: str,
 # время фото по-прежнему уходит в распознавание накладной, как и раньше.
 _JOURNAL_MODE: Dict[int, Dict[str, Any]] = {}
 JOURNAL_MODE_MIN = int(os.getenv("JOURNAL_MODE_MIN", "15"))
+# Насколько слот может опоздать и всё ещё быть разосланным
+JOURNAL_LATE_MIN = int(os.getenv("JOURNAL_LATE_MIN", "90"))
 
 
 def _journal_orgs_for(telegram_id: int) -> List[Dict[str, Any]]:
@@ -7056,6 +7058,13 @@ async def _journal_scheduler():
                     continue
                 key = f"journal_slot_sent:{slot}:{today}"
                 if get_app_state(key):
+                    continue
+                # Давно просроченный слот не рассылаем: после перезапуска сервиса
+                # днём человек иначе получает пачку утренних заданий разом.
+                late = now.hour * 60 + now.minute - J._hm(slot)
+                if late > JOURNAL_LATE_MIN:
+                    set_app_state(key, "skipped")
+                    logger.info(f"[journal] слот {slot} просрочен на {late} мин — пропущен")
                     continue
                 n = await _journal_send_slot(slot)
                 set_app_state(key, str(n))

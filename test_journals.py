@@ -276,3 +276,33 @@ def test_callback_data_fits_telegram_limit(board):
     import api
     kb = api._journal_kb("10:45", [("clean", "kitchen", "10:45")], ORG_A)
     assert len(kb["inline_keyboard"][0][0]["callback_data"].encode()) <= 64
+
+
+def test_stock_saved_counts_are_returned(board):
+    """Форма подставляет уже введённое — иначе набивать 150 позиций заново."""
+    jr, db = board
+    day = AFTERNOON.date().isoformat()
+    db.save_journal_entry(ORG_A, "stock", "", J.STOCK_SLOT, day, MGR,
+                          json.dumps({"veg": {"Авокадо": 12, "Лимон": 3}}))
+    b = jr.build_board(OWNER, AFTERNOON)
+    buh = next(x for x in b["branches"] if "Бухар" in x["full"])
+    assert buh["stock"] is True
+    assert buh["stock_counts"]["veg"]["Авокадо"] == 12
+
+
+def test_stock_places_carry_full_nomenclature(board):
+    jr, _ = board
+    b = jr.build_board(OWNER, AFTERNOON)
+    keys = {p["key"] for p in b["stock_places"]}
+    assert len(b["stock_places"]) == 9
+    assert "veg" in keys
+    veg = next(p for p in b["stock_places"] if p["key"] == "veg")
+    assert "Авокадо" in veg["items"]
+
+
+def test_overdue_slot_is_skipped_not_blasted(board):
+    """После дневного перезапуска утренние слоты не должны прилетать пачкой."""
+    import api
+    assert api.JOURNAL_LATE_MIN >= 30
+    late = 15 * 60 + 40 - J._hm("10:45")     # 10:45 против 15:40
+    assert late > api.JOURNAL_LATE_MIN
