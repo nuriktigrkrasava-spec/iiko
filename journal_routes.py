@@ -84,6 +84,27 @@ def in_journals(full: str) -> bool:
     return s.startswith(JOURNAL_CITY) and not any(m in s for m in JOURNAL_SKIP)
 
 
+# В iiko названия записаны казахскими буквами («Бейбітшілік» через «і»), а ищут
+# их русской раскладкой («бейбитшилик»). Для строкового сравнения это разные
+# символы, и филиал просто не находился.
+_KZ_FOLD = str.maketrans({
+    "і": "и", "ө": "о", "ә": "а", "ғ": "г", "қ": "к",
+    "ң": "н", "ұ": "у", "ү": "у", "һ": "х", "ї": "и",
+})
+
+
+def fold(s: str) -> str:
+    return (s or "").lower().translate(_KZ_FOLD)
+
+
+def find_branch(orgs: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    """Филиалы, подходящие под обрывок названия, независимо от раскладки."""
+    q = fold(query).strip()
+    if not q:
+        return []
+    return [r for r in orgs if q in fold(r.get("organization_name"))]
+
+
 def _payload(row) -> Dict[str, Any]:
     try:
         return json.loads(row.get("payload") or "{}")
@@ -376,10 +397,11 @@ async def journals_say(token: str, body: Dict[str, Any]):
     if cmd in ("оживить", "ozhivit", "reset"):
         if not rest:
             return JSONResponse({"log": [["err", "Укажите филиал: /оживить кажымукана"]]})
-        hit = [r for r in orgs if rest.lower() in (r.get("organization_name") or "").lower()]
+        hit = find_branch(orgs, rest)
         if len(hit) != 1:
             return JSONResponse({"log": [["err",
-                "Не нашёл филиал" if not hit else "Под описание попало несколько — уточните"]]})
+                "Не нашёл филиал" if not hit else
+                "Подошло несколько: " + ", ".join(short_name(h.get("organization_name")) for h in hit)]]})
         set_app_state(f'invite_used:{hit[0]["organization_id"]}', "")
         return JSONResponse({"log": [
             ["ok", f'{short_name(hit[0].get("organization_name"))} — счётчик сброшен'],
@@ -389,10 +411,11 @@ async def journals_say(token: str, body: Dict[str, Any]):
         bits = rest.split(maxsplit=1)
         if len(bits) < 2:
             return JSONResponse({"log": [["err", "Формат: /филиал кажымукана текст сообщения"]]})
-        hit = [r for r in orgs if bits[0].lower() in (r.get("organization_name") or "").lower()]
+        hit = find_branch(orgs, bits[0])
         if len(hit) != 1:
             return JSONResponse({"log": [["err",
-                "Не нашёл филиал" if not hit else "Под описание попало несколько — уточните"]]})
+                "Не нашёл филиал" if not hit else
+                "Подошло несколько: " + ", ".join(short_name(h.get("organization_name")) for h in hit)]]})
         who = [m for m in mgrs if m["organization_id"] == hit[0]["organization_id"]]
         if not who:
             return JSONResponse({"log": [["err", "К этому филиалу никто не подключён"]]})

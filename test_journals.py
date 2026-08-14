@@ -306,3 +306,31 @@ def test_overdue_slot_is_skipped_not_blasted(board):
     assert api.JOURNAL_LATE_MIN >= 30
     late = 15 * 60 + 40 - J._hm("10:45")     # 10:45 против 15:40
     assert late > api.JOURNAL_LATE_MIN
+
+
+# ── поиск филиала по названию ───────────────────────────────────────────────
+
+KZ = [{"organization_id": "x1", "organization_name": "Астана, ул. Бейбітшілік 71"},
+      {"organization_id": "x2", "organization_name": "Астана, ул. Кажымукана 16"},
+      {"organization_id": "x3", "organization_name": "Астана, ул. Бухар Жырау 36"}]
+
+
+def test_russian_spelling_finds_kazakh_name(board):
+    """В iiko «Бейбітшілік» через казахскую «і», а ищут русской раскладкой."""
+    jr, _ = board
+    assert len(jr.find_branch(KZ, "бейбитшилик")) == 1
+    assert len(jr.find_branch(KZ, "Бейбітшілік")) == 1
+    assert len(jr.find_branch(KZ, "БЕЙБ")) == 1
+
+
+def test_search_is_case_and_fragment_tolerant(board):
+    jr, _ = board
+    assert len(jr.find_branch(KZ, "кажымукана")) == 1
+    assert len(jr.find_branch(KZ, "жырау")) == 1
+
+
+def test_ambiguous_and_empty_queries(board):
+    jr, _ = board
+    assert len(jr.find_branch(KZ, "астана")) == 3      # общее слово — неоднозначно
+    assert jr.find_branch(KZ, "") == []
+    assert jr.find_branch(KZ, "сыганак") == []
