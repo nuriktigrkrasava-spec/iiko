@@ -591,6 +591,108 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+# ── Журналы филиала: чистота, температура, остатки ──────────────────────────
+# Одна таблица на все три журнала: у них общий скелет (филиал + слот + дата +
+# кто сдал), а различия целиком в payload. Три почти одинаковые таблицы пришлось
+# бы джойнить в каждом отчёте.
+def _ensure_journals(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS journal_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT NOT NULL,
+        telegram_id INTEGER,
+        kind TEXT NOT NULL,          -- clean | temp | stock
+        zone TEXT NOT NULL DEFAULT '',-- hall/kitchen/wc для чистоты, иначе ''
+        slot TEXT NOT NULL,
+        day TEXT NOT NULL,           -- YYYY-MM-DD, локальная дата филиала
+        payload TEXT,                -- JSON: file_id фото / показания / остатки
+        status TEXT DEFAULT 'ok',    -- ok | dup
+        note TEXT,
+        created_at TEXT
+    )""")
+    # Пересдача заменяет предыдущую попытку, а не плодит строки.
+    conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS ix_journal_slot
+        ON journal_entries (organization_id, kind, zone, slot, day)""")
+    conn.execute("""CREATE INDEX IF NOT EXISTS ix_journal_day
+        ON journal_entries (day, organization_id)""")
+    # Хэши присланных фото: ловим пересланное вчерашнее фото без ИИ и бесплатно.
+    conn.execute("""CREATE TABLE IF NOT EXISTS journal_photos (
+        sha TEXT NOT NULL,
+        organization_id TEXT NOT NULL,
+        zone TEXT NOT NULL,
+        day TEXT NOT NULL,
+        file_id TEXT,
+        PRIMARY KEY (sha, organization_id)
+    )""")
+
+
+def save_journal_entry(org_id: str, kind: str, zone: str, slot: str, day: str,
+                       telegram_id: int, payload: str, status: str = "ok",
+                       note: str = "") -> int:
+    conn = get_db()
+    _ensure_journals(conn)
+    cur = conn.execute(
+        """INSERT INTO journal_entries
+             (organization_id, telegram_id, kind, zone, slot, day, payload,
+              status, note, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(organization_id, kind, zone, slot, day) DO UPDATE SET
+             telegram_id = excluded.telegram_id, payload = excluded.payload,
+             status = excluded.status, note = excluded.note,
+             created_at = excluded.created_at""",
+        (org_id, int(telegram_id or 0), kind, zone, slot, day, payload,
+         status, note, datetime.now().isoformat()))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def get_journal_entries(day: str, org_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_journals(conn)
+    q = "SELECT * FROM journal_entries WHERE day = ?"
+    args: tuple = (day,)
+    if org_id:
+        q += " AND organization_id = ?"
+        args = (day, org_id)
+    rows = conn.execute(q, args).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_journal_range(since: str, until: str) -> List[Dict[str, Any]]:
+    """Записи за период — для штрафных баллов и дисциплины."""
+    conn = get_db()
+    _ensure_journals(conn)
+    rows = conn.execute(
+        "SELECT * FROM journal_entries WHERE day >= ? AND day <= ?",
+        (since, until)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def seen_photo(sha: str, org_id: str) -> Optional[Dict[str, Any]]:
+    """Присылали ли уже это фото. Совпадение = попытка сдать старый кадр."""
+    conn = get_db()
+    _ensure_journals(conn)
+    row = conn.execute(
+        "SELECT * FROM journal_photos WHERE sha = ? AND organization_id = ?",
+        (sha, org_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def remember_photo(sha: str, org_id: str, zone: str, day: str, file_id: str):
+    conn = get_db()
+    _ensure_journals(conn)
+    conn.execute(
+        """INSERT INTO journal_photos (sha, organization_id, zone, day, file_id)
+           VALUES (?, ?, ?, ?, ?) ON CONFLICT(sha, organization_id) DO NOTHING""",
+        (sha, org_id, zone, day, file_id))
+    conn.commit()
+    conn.close()
+
+
 def get_app_state(key: str) -> Optional[str]:
     conn = get_db()
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()

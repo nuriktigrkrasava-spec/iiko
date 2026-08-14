@@ -38,6 +38,8 @@ from database import (
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     create_bot_task, answer_bot_task, get_open_bot_tasks, get_bot_tasks_all,
     add_branch_manager, revoke_branch_manager, get_branch_managers,
+    save_journal_entry, get_journal_entries, get_journal_range,
+    seen_photo, remember_photo,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     get_db, decrypt_password,
@@ -109,6 +111,8 @@ app.add_middleware(
 # Виджет на домашний экран (личная ссылка /w/{token}) — отдельный роутер
 import widget_routes
 app.include_router(widget_routes.router)
+import journal_routes
+app.include_router(journal_routes.router)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MINIAPP_URL = os.getenv("MINIAPP_URL", "https://iiko.onrender.com")
@@ -924,6 +928,8 @@ async def startup():
     asyncio.create_task(_morning_report_scheduler())
     # Триггеры в течение дня: касса молчит / выручка проваливается
     asyncio.create_task(_trigger_scheduler())
+    # Журналы: задание на слот тем, кто ещё не сдал
+    asyncio.create_task(_journal_scheduler())
     # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
     # основной — квоты накладных (см. _build_stats_text, БД у сервисов разные).
     asyncio.create_task(_daily_stats_scheduler())
@@ -5352,6 +5358,48 @@ async def telegram_webhook(request: Request):
                                f"{mark} · {who}, {when}")
                 return {"ok": True}
 
+            # Журналы: выбор зоны/замера, выбор филиала, «Готово», отмена.
+            if action.startswith("jr:"):
+                who = int((cb.get("from") or {}).get("id") or chat_id)
+                bits = action.split(":")
+                op = bits[1] if len(bits) > 1 else ""
+                orgs = _journal_orgs_for(who)
+                if op == "cancel":
+                    _JOURNAL_MODE.pop(chat_id, None)
+                    await _tg_edit(chat_id, msg_id, "✖️ <i>Сдача отменена</i>")
+                    return {"ok": True}
+                if op == "done":
+                    st = _journal_mode(chat_id)
+                    if not st or st["kind"] != "clean":
+                        await _tg_edit(chat_id, msg_id, "⚠️ Сдача уже закрыта или устарела.")
+                        return {"ok": True}
+                    await _journal_finish_clean(chat_id, who, st)
+                    return {"ok": True}
+                if not orgs:
+                    await _tg_send(chat_id, "Вы не привязаны ни к одному филиалу с журналами.")
+                    return {"ok": True}
+                if op == "o":                       # филиал выбран: jr:o:<short>:<хвост>
+                    org = _org_by_short(orgs, bits[2])
+                    kind = "temp" if bits[3] == "t" else "clean"
+                    zone = "" if kind == "temp" else bits[4]
+                    slot = bits[-1]
+                    if not org:
+                        await _tg_send(chat_id, "Филиал не найден.")
+                        return {"ok": True}
+                    await _journal_start(chat_id, who, org, kind, zone, slot)
+                    return {"ok": True}
+                if op in ("c", "t"):                # зона или замер
+                    slot = bits[-1]
+                    zone = bits[2] if op == "c" else ""
+                    if len(orgs) > 1:               # управляющий двух адресов
+                        suffix = f"c:{zone}:{slot}" if op == "c" else f"t:{slot}"
+                        await _journal_ask_branch(chat_id, orgs, suffix)
+                        return {"ok": True}
+                    await _journal_start(chat_id, who, orgs[0],
+                                         "temp" if op == "t" else "clean", zone, slot)
+                    return {"ok": True}
+                return {"ok": True}
+
             # Оживить исчерпанную ссылку-приглашение. Ссылка постоянная (подпись
             # не меняется), «умирает» только счётчик активаций — его и сбрасываем.
             if action.startswith("invreset:"):
@@ -5590,6 +5638,12 @@ async def telegram_webhook(request: Request):
             image_bytes, mime = file_data
             if not mime:
                 mime = "image/jpeg"
+            # Режим журнала перехватывает фото ДО распознавания накладной —
+            # иначе снимок зала уедет в Claude и заведёт мусорную накладную.
+            jst = _journal_mode(chat_id)
+            if jst and jst["kind"] == "clean":
+                await _journal_take_photo(chat_id, telegram_id, jst, file_id, image_bytes)
+                return {"ok": True}
             mgid = message.get("media_group_id")
             if mgid:
                 await _buffer_album_photo(chat_id, telegram_id, username, mgid,
@@ -5600,6 +5654,12 @@ async def telegram_webhook(request: Request):
 
         # === TEXT ===
         text = message.get("text") or ""
+        # Показания температуры принимаем только в режиме замера: девять чисел
+        # в обычном чате — это скорее всего не термометр, а что-то ещё.
+        jst = _journal_mode(chat_id)
+        if jst and jst["kind"] == "temp" and text and not text.startswith("/"):
+            await _journal_take_temp(chat_id, telegram_id, jst, text)
+            return {"ok": True}
         if text == "/start" or text.startswith("/start "):
             parts = text.split(maxsplit=1)
             # Вручную набранный «/start <текст>» может содержать HTML — неэкранированный
@@ -6783,6 +6843,225 @@ async def _send_task(tg_id: int, org_id: str, branch: str, title: str,
         logger.warning(f"[task] send {tg_id}: {e!r}")
         return None
     return task_id
+
+
+# ── Журналы: чистота фото, температура числом ───────────────────────────────
+# Главная развилка — как отличить фото чек-листа от фото накладной. Не гадаем:
+# сдача начинается с кнопки, и до «Готово» чат в режиме журнала. Всё остальное
+# время фото по-прежнему уходит в распознавание накладной, как и раньше.
+_JOURNAL_MODE: Dict[int, Dict[str, Any]] = {}
+JOURNAL_MODE_MIN = int(os.getenv("JOURNAL_MODE_MIN", "15"))
+
+
+def _journal_orgs_for(telegram_id: int) -> List[Dict[str, Any]]:
+    """Филиалы, за которые человек сдаёт журналы (только города из in_journals)."""
+    from journal_routes import in_journals
+    return [r for r in get_restaurants(int(telegram_id))
+            if in_journals(r.get("organization_name"))]
+
+
+def _jshort(org_id: str) -> str:
+    return (org_id or "").replace("-", "")[:12]
+
+
+def _org_by_short(orgs: List[Dict[str, Any]], short: str) -> Optional[Dict[str, Any]]:
+    return next((r for r in orgs if _jshort(r["organization_id"]) == short), None)
+
+
+def _journal_mode(chat_id: int) -> Optional[Dict[str, Any]]:
+    """Активный режим сдачи, если он не протух. Иначе чат снова про накладные."""
+    st = _JOURNAL_MODE.get(chat_id)
+    if not st:
+        return None
+    if local_now().timestamp() > st["until"]:
+        _JOURNAL_MODE.pop(chat_id, None)
+        return None
+    return st
+
+
+def journal_slot_message(slot: str, missing: List[Tuple[str, str, str]]) -> str:
+    """Задание на слот: что именно сдать. Критерии приходят вместе с заданием —
+    человек не должен помнить наизусть десять пунктов по залу."""
+    import journals as J
+    zones = [m[1] for m in missing if m[0] == "clean"]
+    kinds = {m[0] for m in missing}
+    L = [f"🗒 <b>Слот {slot}</b> — {J.SLOT_LABEL.get(slot, '')}", ""]
+    if zones:
+        L.append("<b>Чистота.</b> По каждой зоне — кнопка ниже, затем фото:")
+        for z in zones:
+            zz = J.ZONES[z]
+            L.append(f"{zz['emoji']} <b>{zz['title']}</b> — " + ", ".join(zz["shots"]))
+        L.append("")
+        L.append(f"<i>{J.CLEAN_PRINCIPLES}</i>")
+    if "temp" in kinds:
+        if zones:
+            L.append("")
+        L.append(f"🌡 <b>Температура</b> — {len(J.CAMERAS)} камер, ответ одним сообщением.")
+    if "stock" in kinds:
+        L.append("")
+        L.append("📦 <b>Остатки</b> — заполняются на сайте, ссылка у владельца.")
+    return "\n".join(L)
+
+
+def _journal_kb(slot: str, missing: List[Tuple[str, str, str]]) -> dict:
+    import journals as J
+    rows = []
+    for z in [m[1] for m in missing if m[0] == "clean"]:
+        rows.append([{"text": f"{J.ZONES[z]['emoji']} {J.ZONES[z]['title']}",
+                      "callback_data": f"jr:c:{z}:{slot}"}])
+    if any(m[0] == "temp" for m in missing):
+        rows.append([{"text": "🌡 Температура", "callback_data": f"jr:t:{slot}"}])
+    return {"inline_keyboard": rows} if rows else None
+
+
+async def _journal_ask_branch(chat_id: int, orgs: List[Dict[str, Any]], suffix: str):
+    rows = [[{"text": r.get("organization_name") or "Филиал",
+              "callback_data": f"jr:o:{_jshort(r['organization_id'])}:{suffix}"}] for r in orgs]
+    await _tg_send(chat_id, "За какой филиал сдаёте?", {"inline_keyboard": rows})
+
+
+async def _journal_start(chat_id: int, telegram_id: int, org: Dict[str, Any],
+                         kind: str, zone: str, slot: str):
+    import journals as J
+    _JOURNAL_MODE[chat_id] = {
+        "kind": kind, "zone": zone, "slot": slot, "org": org["organization_id"],
+        "org_name": org.get("organization_name") or "Филиал", "photos": [],
+        "until": local_now().timestamp() + JOURNAL_MODE_MIN * 60,
+    }
+    if kind == "temp":
+        await _tg_send(chat_id, J.temp_task_text(slot))
+    else:
+        await _tg_send(chat_id, J.clean_task_text(zone, slot) +
+                       f"\n\n<i>{org.get('organization_name')}</i>",
+                       {"inline_keyboard": [[{"text": "✅ Готово", "callback_data": "jr:done"},
+                                             {"text": "✖️ Отмена", "callback_data": "jr:cancel"}]]})
+
+
+async def _journal_take_photo(chat_id: int, telegram_id: int, st: Dict[str, Any],
+                              file_id: str, image_bytes: bytes) -> None:
+    """Кладём кадр в текущую сдачу. Дубликат ловим хэшем — бесплатно и без ИИ."""
+    import journals as J
+    sha = hashlib.sha256(image_bytes).hexdigest()
+    day = local_now().date().isoformat()
+    seen = seen_photo(sha, st["org"])
+    if seen and seen.get("day") != day:
+        await _tg_send(chat_id, f"♻️ Это фото уже присылали {seen['day']}. "
+                                f"Нужен свежий кадр — сделайте новый снимок.")
+        return
+    if len(st["photos"]) >= J.MAX_PHOTOS:
+        await _tg_send(chat_id, f"Достаточно, уже {J.MAX_PHOTOS} кадров. Жмите «Готово».")
+        return
+    remember_photo(sha, st["org"], st["zone"], day, file_id)
+    st["photos"].append({"file_id": file_id, "sha": sha})
+    st["until"] = local_now().timestamp() + JOURNAL_MODE_MIN * 60
+    need = max(0, J.MIN_PHOTOS - len(st["photos"]))
+    tail = f"ещё минимум {need}" if need else "можно жать «Готово»"
+    await _tg_send(chat_id, f"📸 Принято {len(st['photos'])} — {tail}.")
+
+
+async def _journal_finish_clean(chat_id: int, telegram_id: int, st: Dict[str, Any]) -> bool:
+    import journals as J
+    if len(st["photos"]) < J.MIN_PHOTOS:
+        await _tg_send(chat_id, f"Пока {len(st['photos'])} из {J.MIN_PHOTOS} кадров — "
+                                f"пришлите ещё.")
+        return False
+    day = local_now().date().isoformat()
+    save_journal_entry(st["org"], "clean", st["zone"], st["slot"], day, telegram_id,
+                       json.dumps({"photos": st["photos"]}, ensure_ascii=False))
+    _JOURNAL_MODE.pop(chat_id, None)
+    z = J.ZONES[st["zone"]]
+    await _tg_send(chat_id, f"✅ {z['emoji']} <b>{z['title']}</b> · слот {st['slot']} принят "
+                            f"({len(st['photos'])} фото).\n<i>{st['org_name']}</i>")
+    return True
+
+
+async def _journal_take_temp(chat_id: int, telegram_id: int, st: Dict[str, Any],
+                             text: str) -> bool:
+    import journals as J
+    vals, err = J.parse_temps(text)
+    if err:
+        await _tg_send(chat_id, f"⚠️ {err}")
+        return False
+    day = local_now().date().isoformat()
+    save_journal_entry(st["org"], "temp", "", st["slot"], day, telegram_id,
+                       json.dumps(vals, ensure_ascii=False))
+    _JOURNAL_MODE.pop(chat_id, None)
+    alarms = J.temp_alarms(vals)
+    if alarms:
+        lines = [f"• {a['title']}: {a['value']:+g} °C при норме {a['norm']}" for a in alarms]
+        await _tg_send(chat_id, "🔴 <b>Замер принят, но есть отклонения:</b>\n" + "\n".join(lines)
+                       + "\n\nПроверьте камеру и сообщите управляющему.")
+        # владельцу — сразу, это дороже любой пыли на полу
+        rest = next((r for r in get_all_restaurants()
+                     if r["organization_id"] == st["org"]), None)
+        if rest:
+            try:
+                await _tg_send(int(rest["telegram_id"]),
+                               f"🔴 <b>{rest.get('organization_name')}</b> · замер {st['slot']}\n"
+                               + "\n".join(lines))
+            except Exception as e:
+                logger.warning(f"[journal] alarm to owner: {e!r}")
+    else:
+        await _tg_send(chat_id, f"✅ Замер {st['slot']} принят — все камеры в норме.\n"
+                                f"<i>{st['org_name']}</i>")
+    return True
+
+
+async def _journal_send_slot(slot: str) -> int:
+    """Рассылка задания по слоту тем, кто ещё не сдал."""
+    import journals as J
+    from journal_routes import in_journals
+    if not BOT_TOKEN:
+        return 0
+    now = local_now()
+    day = now.date().isoformat()
+    due = [d for d in J.due_items(now) if d[2] == slot]
+    if not due:
+        return 0
+    entries = get_journal_entries(day)
+    rests = {r["organization_id"]: r for r in get_all_restaurants()
+             if in_journals(r.get("organization_name"))}
+    sent = 0
+    for m in get_branch_managers():
+        org = m["organization_id"]
+        if org not in rests:
+            continue
+        have = {(e["kind"], e["zone"], e["slot"]) for e in entries
+                if e["organization_id"] == org and e["status"] == "ok"}
+        missing = [d for d in due if d not in have]
+        if not missing:
+            continue
+        try:
+            await _tg_send(int(m["telegram_id"]),
+                           journal_slot_message(slot, missing) +
+                           f"\n\n<i>{rests[org].get('organization_name')}</i>",
+                           _journal_kb(slot, missing))
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[journal] slot {slot} → {m['telegram_id']}: {e!r}")
+    return sent
+
+
+async def _journal_scheduler():
+    """Напоминания по слотам. Каждый слот шлём один раз в день — метка в app_state."""
+    import journals as J
+    while True:
+        try:
+            now = local_now()
+            today = now.date().isoformat()
+            for slot in sorted(set(J.CLEAN_SLOTS + J.TEMP_SLOTS), key=lambda s: J._hm(s)):
+                if not J.slot_is_due(slot, now):
+                    continue
+                key = f"journal_slot_sent:{slot}:{today}"
+                if get_app_state(key):
+                    continue
+                n = await _journal_send_slot(slot)
+                set_app_state(key, str(n))
+                if n:
+                    logger.info(f"[journal] слот {slot}: задание ушло {n} управляющим")
+        except Exception as e:
+            logger.warning(f"[journal] цикл: {e!r}")
+        await asyncio.sleep(300)
 
 
 @app.get("/api/admin/branches")
