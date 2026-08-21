@@ -385,6 +385,9 @@ async def journals_say(token: str, body: Dict[str, Any]):
         return JSONResponse({"log": [["info", h] for h in HELP]})
 
     if cmd in ("серверы", "servers"):
+        # Серверы касаются ВСЕХ филиалов, а не только тех, что ведут журналы:
+        # регионы точно так же читают отстающий центральный.
+        orgs = api.get_restaurants(int(uid))
         # Каждый филиал должен читать свой сервер: центральный отстаёт в течение
         # дня и путает смены соседних филиалов (одна концепция на двоих).
         from datetime import timedelta as _td
