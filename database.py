@@ -693,6 +693,23 @@ def remember_photo(sha: str, org_id: str, zone: str, day: str, file_id: str):
     conn.close()
 
 
+def set_restaurant_server(org_id: str, server: str) -> int:
+    """Прописывает филиалу его собственный сервер iiko. Возвращает число строк.
+
+    Обновляем ВСЕ строки организации, а не только строку владельца: на проде одна
+    и та же точка заведена под несколькими аккаунтами, и сервер — свойство точки,
+    а не аккаунта. Иначе часть пользователей осталась бы на центральном.
+    """
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE restaurants SET iiko_server = ? WHERE organization_id = ?",
+        (server, org_id))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
+
+
 def get_app_state(key: str) -> Optional[str]:
     conn = get_db()
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()

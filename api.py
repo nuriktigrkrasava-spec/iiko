@@ -7104,6 +7104,58 @@ async def _journal_scheduler():
         await asyncio.sleep(300)
 
 
+# Серверы филиалов. Список выдан владельцем; какой из них какой — определяется
+# запросом, а не догадкой: на каждом сервере смотрим, у какого подразделения
+# были продажи. Справочник подразделений для этого не годится — корпоративная
+# структура реплицирована на все серверы одинаково.
+BRANCH_SERVER_HOSTS = [
+    "ss-saryarka-new", "ss-turk-new", "ss-kostanai", "saya-cc", "saya-sushi-aktau",
+    "ss-mira", "ss-e10", "saya-sushi-aktobe", "saya-chubar", "saya-sushi-buhar-zhyrau",
+    "saya-sushi-alpamys", "saya-sushi-pavlodar", "saya-sushi-kaldayakova",
+    "saya-sushi-boikehana-25a", "ss-atr", "ss-mom",
+]
+CENTRAL_HOST = "saya-co"
+
+
+def branch_server_url(host: str) -> str:
+    return f"https://{host}.iiko.it:443"
+
+
+async def discover_branch_servers(login: str, password: str, day: str
+                                  ) -> Dict[str, Any]:
+    """Один OLAP на сервер: у кого там были продажи. Возвращает
+    {dept_name: host} и список серверов без продаж/недоступных."""
+    sem = asyncio.Semaphore(4)
+
+    async def probe(host: str):
+        client = get_client(login, branch_server_url(host), password)
+        async with sem:
+            try:
+                rep = await client.olap_report(None, day, day,
+                                               ["Department"], ["DishAmountSum"])
+                rows = [(str(x.get("Department") or ""), float(x.get("DishAmountSum") or 0))
+                        for x in rep.get("data", [])]
+                return host, "ok", [(d, v) for d, v in rows if d and v > 0]
+            except Exception as e:
+                return host, str(e)[:80], []
+
+    found: Dict[str, str] = {}
+    idle: List[str] = []
+    failed: Dict[str, str] = {}
+    for host, status, rows in await asyncio.gather(
+            *(probe(h) for h in BRANCH_SERVER_HOSTS)):
+        if status != "ok":
+            failed[host] = status
+        elif not rows:
+            idle.append(host)
+        elif len(rows) > 1:
+            # Несколько филиалов с продажами — это центральный, не филиальный.
+            failed[host] = f"продажи у {len(rows)} филиалов — похоже на центральный"
+        else:
+            found[rows[0][0]] = host
+    return {"found": found, "idle": idle, "failed": failed}
+
+
 @app.get("/api/admin/branches")
 async def admin_branches(user: Dict = Depends(get_current_user)):
     """Админка владельца: филиалы, их управляющие, ссылки-приглашения, задачи.

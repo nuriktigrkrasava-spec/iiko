@@ -285,6 +285,7 @@ async def journals_stock(token: str, body: Dict[str, Any]):
 HELP = [
     "просто текст          — уйдёт всем управляющим в Telegram",
     "/кто                  — кто подключён к филиалам",
+    "/серверы [применить]  — свой сервер у каждого филиала",
     "/напомнить            — повторить задание текущего слота тем, кто не сдал",
     "/филиал <часть> <текст> — написать одному филиалу",
     "/оживить <часть>      — сбросить счётчик исчерпанной ссылки",
@@ -382,6 +383,42 @@ async def journals_say(token: str, body: Dict[str, Any]):
 
     if cmd in ("помощь", "help", "?"):
         return JSONResponse({"log": [["info", h] for h in HELP]})
+
+    if cmd in ("серверы", "servers"):
+        # Каждый филиал должен читать свой сервер: центральный отстаёт в течение
+        # дня и путает смены соседних филиалов (одна концепция на двоих).
+        from datetime import timedelta as _td
+        from database import set_restaurant_server
+        apply = rest.strip().lower() in ("применить", "apply", "да")
+        if not apply:
+            for r in sorted(orgs, key=lambda x: x.get("organization_name") or ""):
+                host = (r.get("iiko_server") or "").replace("https://", "").split(".")[0]
+                mark = "ok" if host and host != api.CENTRAL_HOST else "err"
+                log.append([mark, f'{short_name(r.get("organization_name")):22} {host or "—"}'])
+            log.append(["info", "«/серверы применить» — определить и записать свои серверы"])
+            return JSONResponse({"log": log})
+
+        day = (api.local_now().date() - _td(days=1)).isoformat()
+        seed = orgs[0]
+        res = await api.discover_branch_servers(
+            seed["api_login"], seed.get("api_password"), day)
+        found = res["found"]
+        saved = 0
+        for r in orgs:
+            name = r.get("organization_name") or ""
+            host = found.get(name)
+            if not host:
+                log.append(["err", f"{short_name(name):22} сервер не найден — остаётся центральный"])
+                continue
+            n = set_restaurant_server(r["organization_id"], api.branch_server_url(host))
+            saved += 1
+            log.append(["ok", f"{short_name(name):22} → {host}  (строк {n})"])
+        for h in res["idle"]:
+            log.append(["info", f"{h} — продаж нет, не привязан"])
+        for h, why in res["failed"].items():
+            log.append(["info", f"{h} — {why}"])
+        log.append(["info", f"записано филиалов: {saved} из {len(orgs)}"])
+        return JSONResponse({"log": log})
 
     if cmd in ("кто", "who"):
         for r in orgs:
