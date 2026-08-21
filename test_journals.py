@@ -334,3 +334,27 @@ def test_ambiguous_and_empty_queries(board):
     assert len(jr.find_branch(KZ, "астана")) == 3      # общее слово — неоднозначно
     assert jr.find_branch(KZ, "") == []
     assert jr.find_branch(KZ, "сыганак") == []
+
+
+# ── выручка филиала: защита от чужой смены ──────────────────────────────────
+
+def test_shift_sanity_ratio_is_tight():
+    """Оплаченное не может заметно превышать проданное — запас только на
+    округления и правки при приёмке смены."""
+    import api
+    assert 1.0 <= api.SHIFT_SANITY_RATIO <= 1.10
+
+
+def test_contaminated_selection_is_rejected():
+    """Калдаякова: 588 821 своих + 458 470 чужих = 1 047 291 при продажах
+    845 480. Оплатить больше, чем продано, нельзя — выборку надо отбросить."""
+    import api
+    picked, gross = 1_047_291.0, 845_480.0
+    assert picked > gross * api.SHIFT_SANITY_RATIO
+
+
+def test_clean_selection_passes():
+    """Нормальный филиал: оплачено меньше проданного из-за скидок — берём смены."""
+    import api
+    picked, gross = 588_821.0, 845_480.0
+    assert picked <= gross * api.SHIFT_SANITY_RATIO

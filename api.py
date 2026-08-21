@@ -162,6 +162,11 @@ _cache_time: Dict[str, datetime] = {}
 _CACHE_TTL = timedelta(minutes=3)
 
 
+# Насколько оплаченное может превысить проданное, прежде чем считать выборку
+# смен загрязнённой. Небольшой запас — на округления и правки при приёмке смены.
+SHIFT_SANITY_RATIO = float(os.getenv("SHIFT_SANITY_RATIO", "1.02"))
+
+
 def _cache_key(user_id: int, endpoint: str, org_id: str, period: str) -> str:
     return f"{user_id}:{endpoint}:{org_id}:{period}"
 
@@ -1160,13 +1165,17 @@ async def branch_shift_sessions(client, dept: str, date_from: str, date_to: str
         try:
             r = await client.olap_report(dept, date_from, date_to,
                                          ["Conception.Code"], ["DishAmountSum"])
-            return {str(x.get("Conception.Code")) for x in r.get("data", [])
-                    if x.get("Conception.Code") is not None}, None
+            data = r.get("data", [])
+            # Из этого же ответа берём валовую выручку филиала — она нужна ниже
+            # как потолок вменяемости. Отдельный запрос ради неё не нужен.
+            gross = sum(float(x.get("DishAmountSum") or 0) for x in data)
+            return ({str(x.get("Conception.Code")) for x in data
+                     if x.get("Conception.Code") is not None}, gross), None
         except Exception as e:
-            return set(), str(e)[:160]
+            return (set(), 0.0), str(e)[:160]
 
     # cashshifts и OLAP-коды концепции — параллельно (уменьшает лаг)
-    sessions, (codes, codes_err) = await asyncio.gather(_fetch_sessions(), _fetch_codes())
+    sessions, ((codes, gross), codes_err) = await asyncio.gather(_fetch_sessions(), _fetch_codes())
     dbg["session_count"] = len(sessions)
     if codes_err:
         dbg["codes_err"] = codes_err
@@ -1196,6 +1205,19 @@ async def branch_shift_sessions(client, dept: str, date_from: str, date_to: str
             dbg["selected_sessions"] = 0
             return None, dbg
     dbg["selected_sessions"] = len(sel)
+
+    # Проверка вменяемости. Концепция — не филиал: на общем сервере две точки
+    # могут делить одну концепцию, и тогда чужая смена целиком приезжает сюда.
+    # Поймано на Калдаяковой: 588 821 своих + 458 470 чужих = 1 047 291, что
+    # больше всей проданной выручки филиала (845 480). Оплатить больше, чем
+    # продано, нельзя — значит выборка загрязнена, и брать её нельзя.
+    picked = client.cashshifts_revenue(sel) or 0.0
+    if gross > 0 and picked > gross * SHIFT_SANITY_RATIO:
+        dbg["contaminated"] = {"picked": round(picked), "gross": round(gross)}
+        logger.warning(f"[shifts] {dept}: смены дают {picked:,.0f} при продажах "
+                       f"{gross:,.0f} — чужая смена в выборке, откат на OLAP")
+        return None, dbg
+
     return sel, dbg
 
 
@@ -1236,7 +1258,11 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
         try:
             r = await client.olap_report(
                 _olap_dept(real_org, info), date_from, date_to,
-                ["OpenDate.Typed"], ["GuestNum", "DishAmountSum", "OrdersCount"]
+                # DishDiscountSumInt (после скидок) = реально оплачено и сходится
+                # с кассой; DishAmountSum (до скидок) её завышает. Держим обе:
+                # первая идёт в выручку, вторая осталась ради совместимости графика.
+                ["OpenDate.Typed"],
+                ["GuestNum", "DishAmountSum", "DishDiscountSumInt", "OrdersCount"]
             )
             return r.get("data", [])
         except Exception as e:
@@ -1275,7 +1301,10 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
     try:
         results = await asyncio.gather(*(fetch_one(o) for o in orgs))
         all_rows = [row for batch in results for row in batch]
-        olap_total = sum(float(r.get("DishAmountSum") or 0) for r in all_rows)
+        # Откат считаем по оплаченному, а не по проданному до скидок: иначе при
+        # отказе от смен выручка филиала подскакивает на величину всех скидок.
+        olap_total = sum(float(r.get("DishDiscountSumInt") or r.get("DishAmountSum") or 0)
+                         for r in all_rows)
         guests = sum(float(r.get("GuestNum") or 0) for r in all_rows)
         orders = sum(float(r.get("OrdersCount") or 0) for r in all_rows)
 
