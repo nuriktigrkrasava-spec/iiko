@@ -8,7 +8,6 @@ import base64
 import html
 import json
 import csv
-import io
 import re
 import calendar
 from difflib import SequenceMatcher
@@ -17,7 +16,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -36,13 +35,11 @@ from database import (
     get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
     wipe_demo_user,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
-    create_bot_task, answer_bot_task, get_open_bot_tasks, get_bot_tasks_all,
-    add_branch_manager, revoke_branch_manager, get_branch_managers,
-    save_journal_entry, get_journal_entries, get_journal_range,
-    seen_photo, remember_photo,
+    create_bot_task, answer_bot_task, get_bot_tasks_all,
+    add_branch_manager, get_branch_managers,
+    save_journal_entry, get_journal_entries, seen_photo, remember_photo,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
-    get_db, decrypt_password,
     save_pending_invoice, get_pending_invoice, get_pending_invoice_by_chat,
     delete_pending_invoice_by_chat,
     get_plan_url, set_plan_url,
@@ -52,8 +49,8 @@ from database import (
     get_quota, quota_available, consume_quota, add_quota_extra,
     reset_quota_if_due, should_notify_limit, quota_stats,
 )
-from iiko import IikoClient, get_client
-from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
+from iiko import get_client
+from claude_api import analyze_invoice_photos, analyze_invoice_text
 from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1621,7 +1618,6 @@ async def shifts(org_id: str, user: Dict = Depends(get_current_user)):
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     today = local_now().date()
-    tomorrow = (today + timedelta(days=1)).isoformat()
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
     try:
         result = await client.olap_report(
@@ -5041,7 +5037,7 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
     # Оператор проверит/исправит филиал, поставщика, дату, позиции в Mini App
     # и сам нажмёт «Создать черновик в iiko». Так нет дублей/сирот в iiko, и
     # ошибки сопоставления (филиал/поставщик) исправляются без перепробивки.
-    inv_id = save_bot_invoice(
+    save_bot_invoice(
         telegram_id=pending["telegram_id"],
         telegram_user=pending.get("username") or "",
         raw_text="[ФОТО]",
@@ -5062,8 +5058,8 @@ async def _finalize_send(chat_id: int, msg_id: int, pending: dict,
             + ("\n  … и ещё " + str(len(unit_warnings) - 8) if len(unit_warnings) > 8 else "")
             + "\nКоличество могло распознаться не в той единице — поправь в редакторе.\n")
            if unit_warnings else "")
-        + f"\nОткрой Mini App → Расходы → Накладные → ✏️ проверь филиал/поставщика "
-        f"и нажми «Создать черновик в iiko».")
+        + "\nОткрой Mini App → Расходы → Накладные → ✏️ проверь филиал/поставщика "
+        "и нажми «Создать черновик в iiko».")
     _drop_pending(chat_id)
 
 

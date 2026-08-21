@@ -5,7 +5,7 @@ import hashlib
 import re
 import secrets
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -1504,8 +1504,6 @@ class IikoWebClient:
                 ET.SubElement(ie, "sum").text = str(it.get("sum") or 0)
                 ET.SubElement(ie, "store").text = str(store_id)
             return b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
-
-        token = await self._ensure_token()
 
         async def _post(xml_body: bytes) -> Dict[str, Any]:
             import logging

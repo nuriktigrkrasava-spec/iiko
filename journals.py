@@ -8,7 +8,7 @@
 (напоминание в слот), и на сайт (панель контроля), и в промпт ИИ, если его
 когда-нибудь включат. Три копии одних и тех же критериев разъехались бы.
 """
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 # ── Слоты ───────────────────────────────────────────────────────────────────
