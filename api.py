@@ -3301,6 +3301,11 @@ async def invoice_edit_get(pending_id: str, user: Dict = Depends(get_current_use
     result = pending.get("result") or {}
     rests = _get_user_orgs(pending["telegram_id"])
     org_id_for_search = rests[0]["organization_id"] if rests else None
+    # Страховка: накладная могла распознаться до появления пред-сопоставления или
+    # в момент, когда iiko не отдал справочник. Пробуем ещё раз при открытии.
+    if any(not it.get("iiko_product_id") for it in (result.get("items") or [])):
+        await _prematch_pending(pending)
+        _persist_pending(pending)
     return {
         "pending_id": pending_id,
         "supplier": result.get("supplier"),
@@ -4414,7 +4419,15 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
     lines.append(f"📅 Дата: {date_str}")
 
     if items:
-        lines.append(f"\n<b>Позиции ({len(items)}):</b>")
+        # Сколько уже подставлено автоматически — видно сразу, не открывая редактор
+        matched = sum(1 for it in items if it.get("iiko_product_id"))
+        review = sum(1 for it in items if it.get("iiko_product_id") and it.get("needs_review"))
+        head = f"\n<b>Позиции ({len(items)}):</b>"
+        if matched:
+            head += f"  <i>сопоставлено {matched} из {len(items)}</i>"
+            if review:
+                head += f", <i>проверить {review}</i>"
+        lines.append(head)
         for it in items[:15]:
             nm = it.get("name", "—") or "—"
             qty = it.get("quantity")
@@ -4424,7 +4437,10 @@ def _format_invoice_v2(p: dict, status: str = "preview") -> str:
             qty_s = "—" if qty is None else str(qty)
             ppu_s = "—" if ppu is None else _fmt_kzt(ppu)
             tot_s = "—" if tot is None else _fmt_kzt(tot)
-            lines.append(f"• {nm}: {qty_s} {un} × {ppu_s} ₸ = {tot_s} ₸")
+            mark = ""
+            if it.get("iiko_product_id"):
+                mark = " 🔎" if it.get("needs_review") else " ✓"
+            lines.append(f"• {nm}{mark}: {qty_s} {un} × {ppu_s} ₸ = {tot_s} ₸")
         if len(items) > 15:
             lines.append(f"  … ещё {len(items)-15} позиций")
 
@@ -4920,7 +4936,7 @@ _CATALOG_REFRESH_MIN = float(os.getenv("NOMENCLATURE_REFRESH_MIN", "10"))
 
 def _apply_match(it: Dict[str, Any], catalog: List[Dict[str, Any]],
                  memory: Dict[str, Dict[str, Any]],
-                 by_id: Dict[str, Dict[str, Any]]) -> bool:
+                 by_id: Dict[str, Dict[str, Any]], source_key: str = "") -> bool:
     """Ставит позиции товар iiko. True — если получилось.
     Порядок: память исправлений оператора → скоринг по словам."""
     best, score, confident = None, 0.0, False
@@ -4936,6 +4952,10 @@ def _apply_match(it: Dict[str, Any], catalog: List[Dict[str, Any]],
     it["iiko_product_id"] = best.get("id")
     it["iiko_product_name"] = best.get("name") or it.get("name")
     it["iiko_unit"] = best.get("unit") or ""
+    # По какому справочнику подставлено. У сети свой iiko-сервер почти на каждый
+    # филиал: id товара с одного сервера на другом невалиден, поэтому при смене
+    # филиала такое сопоставление надо переиграть, а не слать в iiko вслепую.
+    it["iiko_source"] = source_key
     if best.get("containers"):
         it["iiko_containers"] = best["containers"]
     # Подобрано машиной, а не человеком: редактор пометит «проверьте»
@@ -4954,6 +4974,15 @@ async def _auto_match_items(client, org_id: str,
     Единицы: гр↔кг и мл↔л конвертируются автоматически (с пересчётом цены);
     несовместимые (уп vs кг и т.п.) не трогаем, но честно предупреждаем.
     """
+    key_now = _catalog_key(client, org_id)
+    # Позиция, подобранная по справочнику ДРУГОГО сервера (сопоставляли до выбора
+    # филиала), здесь считается несопоставленной — id оттуда в этот iiko не годится.
+    for it in (items or []):
+        src = it.get("iiko_source")
+        if src and src != key_now and it.get("auto_matched"):
+            it.pop("iiko_product_id", None)
+            it.pop("iiko_product_name", None)
+            it.pop("iiko_unit", None)
     todo = [it for it in (items or []) if not it.get("iiko_product_id")]
     if todo:
         catalog, key = await _nomenclature_catalog(client, org_id)
@@ -4964,7 +4993,7 @@ async def _auto_match_items(client, org_id: str,
             logger.warning(f"[invoice-match] память {key}: {e!r}")
             memory = {}
         if catalog:
-            todo = [it for it in todo if not _apply_match(it, catalog, memory, by_id)]
+            todo = [it for it in todo if not _apply_match(it, catalog, memory, by_id, key)]
         # Что-то не нашлось — возможно, товар завели в iiko только что, а у нас
         # снимок справочника суточной давности. Обновляем и пробуем ещё раз.
         synced = iiko_products_synced_at(key)
@@ -4974,7 +5003,7 @@ async def _auto_match_items(client, org_id: str,
             fresh, _key = await _nomenclature_catalog(client, org_id, force=True)
             if fresh:
                 by_id = {p["id"]: p for p in fresh if p.get("id")}
-                todo = [it for it in todo if not _apply_match(it, fresh, memory, by_id)]
+                todo = [it for it in todo if not _apply_match(it, fresh, memory, by_id, key)]
 
     sendable, unmatched, unit_warnings = [], [], []
     for it in (items or []):
@@ -5427,6 +5456,34 @@ async def _recognize_invoice_and_create_pending(
         [{"file_id": file_id, "bytes": image_bytes, "mime": mime}])
 
 
+async def _prematch_pending(pending: Dict[str, Any]) -> None:
+    """Сопоставляет распознанные позиции сразу после фото — до выбора поставщика
+    и филиала.
+
+    Оператор открывает редактор именно на этом шаге, и раньше видел там голые
+    строки: сопоставление запускалось только на отправке в iiko, то есть после
+    того, как он уже всё промапил руками. Берём справочник филиала по умолчанию
+    (того же, по которому редактор ищет товары). Если на шаге 4 выбран филиал с
+    другого iiko-сервера, _auto_match_items переиграет сопоставление сам —
+    позиции помечены ключом справочника (iiko_source).
+    """
+    result = pending.get("result") or {}
+    items = result.get("items") or []
+    if not items:
+        return
+    rests = _get_user_orgs(pending["telegram_id"])
+    rest = next((r for r in rests if r.get("api_login") != "demo"), None)
+    if not rest:
+        return
+    try:
+        client = _bot_iiko_client(rest)
+        _s, unmatched, _w = await _auto_match_items(client, rest["organization_id"], items)
+        logger.info(f"[prematch] {pending.get('pending_id')}: "
+                    f"{len(items) - len(unmatched)} из {len(items)} сопоставлено")
+    except Exception as e:
+        logger.warning(f"[prematch] {pending.get('pending_id')}: {e!r}")
+
+
 async def _recognize_images_and_create_pending(
     chat_id: int, telegram_id: int, username: str,
     images: List[Dict[str, Any]]
@@ -5466,6 +5523,11 @@ async def _recognize_images_and_create_pending(
     }
     _pending_invoices[chat_id] = pending
     _pending_by_id[pid] = chat_id
+
+    # Сопоставляем сразу: редактор открывают на этом шаге, а не после выбора филиала.
+    if status_msg_id:
+        await _tg_edit(chat_id, status_msg_id, "🔎 Сопоставляю позиции с номенклатурой iiko...")
+    await _prematch_pending(pending)
     _persist_pending(pending)
 
     if status_msg_id:
