@@ -6,7 +6,11 @@
 которое реально уходит на /resto/api/documents/import/incomingInvoice.
 """
 import asyncio
+import os
+import tempfile
 import xml.etree.ElementTree as ET
+
+os.environ.setdefault("DB_PATH", os.path.join(tempfile.mkdtemp(prefix="inv-xml-test-"), "t.db"))
 
 import iiko
 
@@ -114,11 +118,15 @@ def test_filter_never_emits_empty_productid():
         return
 
     class FakeClient:
-        async def search_nomenclature(self, org_id, name, limit=1):
-            # 'apple' находим, всё прочее — нет
-            if "apple" in (name or "").lower():
-                return [{"id": "FOUND-GUID-1", "name": "Apple"}]
-            return []
+        """Каталог отдаётся целиком на пустой запрос (так его берёт _auto_match_items)."""
+
+        def catalog_key(self, org_id):
+            return "test:invoice-xml"
+
+        async def search_nomenclature(self, org_id, query="", limit=30):
+            products = [{"id": "FOUND-GUID-1", "name": "Apple", "type": "GOODS"}]
+            q = (query or "").lower()
+            return [p for p in products if not q or q in p["name"].lower()]
 
     items = [
         {"name": "Apple", "quantity": 2, "price_per_unit": 50, "total": 100},

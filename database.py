@@ -1107,3 +1107,161 @@ def set_salary_override(employee_id: str, period_key: str, amount):
                      "VALUES(?,?,?)", (employee_id, period_key, amount))
     conn.commit()
     conn.close()
+
+
+# ── Локальная база номенклатуры iiko (для сопоставления накладных) ──
+# Зачем БД, а не кэш в памяти: (1) на Render процесс перезапускается и кэш
+# умирает — каждый рестарт снова тянул бы весь справочник; (2) в справочнике
+# тысячи позиций и большинство из них блюда/модификаторы, которые в накладной
+# не встречаются никогда — их фильтруем один раз при загрузке, а не на каждую
+# накладную. source_key = справочник (у самохостед iiko он общий на сервер,
+# у облака — на организацию), см. catalog_key() у клиентов в iiko.py.
+def _ensure_nomenclature(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS iiko_products (
+        source_key TEXT NOT NULL,
+        product_id TEXT NOT NULL,
+        name TEXT,
+        num TEXT,
+        code TEXT,
+        unit TEXT,
+        type TEXT,
+        containers TEXT,          -- JSON фасовок
+        PRIMARY KEY (source_key, product_id)
+    );
+    CREATE TABLE IF NOT EXISTS iiko_products_sync (
+        source_key TEXT PRIMARY KEY,
+        synced_at TEXT,
+        fetched INTEGER,          -- сколько отдал iiko
+        kept INTEGER              -- сколько осталось после фильтра типов
+    );
+    CREATE TABLE IF NOT EXISTS invoice_match_memory (
+        source_key TEXT NOT NULL,
+        name_norm TEXT NOT NULL,  -- нормализованное имя строки накладной
+        product_id TEXT NOT NULL,
+        product_name TEXT,
+        hits INTEGER DEFAULT 1,
+        updated_at TEXT,
+        PRIMARY KEY (source_key, name_norm)
+    );
+    """)
+
+
+def save_iiko_products(source_key: str, products: List[Dict[str, Any]], fetched: int = 0):
+    """Полностью заменяет справочник для source_key (снимок, не докладываем)."""
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    try:
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM iiko_products WHERE source_key = ?", (source_key,))
+        conn.executemany(
+            "INSERT OR REPLACE INTO iiko_products "
+            "(source_key, product_id, name, num, code, unit, type, containers) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [(source_key, p.get("id"), p.get("name") or "", p.get("num") or "",
+              p.get("code") or "", p.get("unit") or "", p.get("type") or "",
+              json.dumps(p.get("containers") or [], ensure_ascii=False))
+             for p in products if p.get("id")]
+        )
+        conn.execute(
+            "INSERT INTO iiko_products_sync (source_key, synced_at, fetched, kept) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(source_key) DO UPDATE SET "
+            "synced_at = excluded.synced_at, fetched = excluded.fetched, kept = excluded.kept",
+            (source_key, datetime.now().isoformat(), int(fetched or 0), len(products))
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def load_iiko_products(source_key: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    rows = conn.execute(
+        "SELECT product_id, name, num, code, unit, type, containers "
+        "FROM iiko_products WHERE source_key = ?", (source_key,)
+    ).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        try:
+            containers = json.loads(r["containers"] or "[]")
+        except Exception:
+            containers = []
+        out.append({"id": r["product_id"], "name": r["name"], "num": r["num"],
+                    "code": r["code"], "unit": r["unit"], "type": r["type"],
+                    "containers": containers})
+    return out
+
+
+def iiko_products_synced_at(source_key: str) -> Optional[datetime]:
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    row = conn.execute("SELECT synced_at FROM iiko_products_sync WHERE source_key = ?",
+                       (source_key,)).fetchone()
+    conn.close()
+    if not row or not row["synced_at"]:
+        return None
+    try:
+        return datetime.fromisoformat(row["synced_at"])
+    except Exception:
+        return None
+
+
+def iiko_products_stats(source_key: str) -> Dict[str, Any]:
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    row = conn.execute("SELECT synced_at, fetched, kept FROM iiko_products_sync "
+                       "WHERE source_key = ?", (source_key,)).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def touch_iiko_products_sync(source_key: str, stale: bool = False,
+                             age_minutes: float = 0):
+    """Состаривает отметку синхронизации (ручное обновление и тесты)."""
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    if stale:
+        when = datetime.now() - timedelta(days=365)
+    else:
+        when = datetime.now() - timedelta(minutes=age_minutes or 0)
+    conn.execute("UPDATE iiko_products_sync SET synced_at = ? WHERE source_key = ?",
+                 (when.isoformat(), source_key))
+    conn.commit()
+    conn.close()
+
+
+def remember_invoice_match(source_key: str, name_norm: str, product_id: str,
+                           product_name: str = ""):
+    """Запоминает выбор оператора: строка накладной → товар iiko."""
+    if not (source_key and name_norm and product_id):
+        return
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    conn.execute(
+        "INSERT INTO invoice_match_memory (source_key, name_norm, product_id, product_name, "
+        "hits, updated_at) VALUES (?, ?, ?, ?, 1, ?) "
+        "ON CONFLICT(source_key, name_norm) DO UPDATE SET "
+        "  product_id = excluded.product_id, product_name = excluded.product_name, "
+        "  hits = invoice_match_memory.hits + 1, updated_at = excluded.updated_at",
+        (source_key, name_norm, product_id, product_name or "", datetime.now().isoformat())
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_invoice_match_memory(source_key: str) -> Dict[str, Dict[str, Any]]:
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    rows = conn.execute(
+        "SELECT name_norm, product_id, product_name, hits FROM invoice_match_memory "
+        "WHERE source_key = ?", (source_key,)
+    ).fetchall()
+    conn.close()
+    return {r["name_norm"]: {"product_id": r["product_id"],
+                            "product_name": r["product_name"],
+                            "hits": r["hits"]} for r in rows}

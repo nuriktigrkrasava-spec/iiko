@@ -11,6 +11,7 @@ import io
 import re
 import time
 from datetime import datetime, timedelta, date, timezone
+from difflib import SequenceMatcher
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
@@ -28,6 +29,8 @@ import uvicorn
 
 from database import (
     init_db, get_user, create_user, set_demo_mode,
+    save_iiko_products, load_iiko_products, iiko_products_synced_at,
+    iiko_products_stats, remember_invoice_match, get_invoice_match_memory,
     get_demo_invoice_count, inc_demo_invoice_count,
     start_demo_trial, get_demo_trial,
     get_trials_due_for_sales, mark_trial_sales_sent,
@@ -3728,11 +3731,27 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
     client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    # Ищем по локальной базе закупаемых товаров: оператору в редакторе накладной
+    # блюда и модификаторы не нужны, а база отвечает мгновенно и без похода в iiko.
     try:
-        products = await client.search_nomenclature(real_org, q, limit=limit)
+        products, _key = await _nomenclature_catalog(client, real_org)
     except Exception as e:
         logger.warning(f"[nomenclature_search] {e}")
         products = []
+    ql = (q or "").strip().lower()
+    if ql:
+        found = [p for p in products
+                 if ql in (p.get("name") or "").lower()
+                 or ql in (p.get("num") or "").lower()
+                 or ql in (p.get("code") or "").lower()]
+        # Подстроки не хватило — добираем похожими по словам («м/сл» → «масло сливочное»)
+        if len(found) < limit:
+            seen = {p.get("id") for p in found}
+            ranked = sorted(((_match_score(q, p.get("name") or ""), p) for p in products
+                             if p.get("id") not in seen), key=lambda t: -t[0])
+            found += [p for s, p in ranked[:limit - len(found)] if s >= _MATCH_MIN_SCORE]
+        products = found
+    products = products[:limit]
     # mainUnit в iikoServer — UUID единицы; переводим в название (кг/шт/л),
     # иначе в редакторе в поле единицы вставлялась «каша символов».
     units_map: Dict[str, str] = {}
@@ -3904,6 +3923,11 @@ async def invoice_saved_send(invoice_id: int, payload: SavedInvoicePayload,
         if body_txt:
             err = f"{err}: {body_txt[:300]}"
         return {"ok": False, "error": err}
+
+    # Черновик в iiko создан — значит оператор подтвердил сопоставление позиций.
+    # Запоминаем пары «строка накладной → товар iiko»: следующая накладная от
+    # того же поставщика сопоставится точно и без пометки «проверьте».
+    remember_invoice_matches(client, real_org, payload.items)
 
     update_bot_invoice(invoice_id,
         iiko_doc_id=resp.get("id") or "",
@@ -4996,6 +5020,283 @@ def _reconcile_amount(it: Dict[str, Any]) -> Tuple[float, float, float, Optional
     return amount, price_out, total, warning
 
 
+# ── Сопоставление строк накладной с номенклатурой iiko ────────────────────
+# Слова, которые в названии ничего не различают: организационно-правовые формы,
+# тара, состояние товара. Без их выброса «Масло сливочное в упаковке» и
+# «Упаковка для салата» выглядят похожими.
+_MATCH_STOP = {
+    "ооо", "тоо", "ип", "зао", "оао", "гост", "ту", "шт", "уп", "упак", "упаковка",
+    "пак", "пачка", "бут", "бутылка", "банка", "кг", "гр", "г", "мл", "л", "литр",
+    "кор", "коробка", "лоток", "пэт", "ваккум", "вакуум", "св", "охл", "зам",
+    "замороженный", "охлажденный", "свежий", "новый", "продукт", "товар",
+}
+_MATCH_MIN_SCORE = float(os.getenv("INVOICE_MATCH_MIN", "0.55"))
+# Поставщик привозит ТОВАРЫ. Блюда, полуфабрикаты и модификаторы в справочнике
+# iiko — это то, что готовится у нас, в приходной накладной их не бывает, и в
+# сопоставлении они дают только ложные попадания («Молочный коктейль» вместо
+# «Молоко»). Список типов оставляем настраиваемым: у чужих установок бывает иначе.
+_PURCHASABLE_TYPES = {t.strip().upper() for t in
+                      os.getenv("INVOICE_MATCH_TYPES", "GOODS").split(",") if t.strip()}
+_TYPE_ALIASES = {"GOOD": "GOODS", "PRODUCT": "GOODS"}   # облако пишет тип иначе
+_NOMENCLATURE_TTL_H = float(os.getenv("NOMENCLATURE_TTL_HOURS", "24"))
+
+
+def _product_type(p: Dict[str, Any]) -> str:
+    t = (p.get("type") or p.get("productType") or "").strip().upper()
+    return _TYPE_ALIASES.get(t, t)
+
+
+def _filter_purchasable(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Оставляет только закупаемые позиции.
+    Позицию без типа НЕ выбрасываем: на части установок iiko поле не приходит
+    вовсе, и жёсткий фильтр обнулил бы весь справочник."""
+    out = []
+    for p in products or []:
+        if not p.get("id"):
+            continue
+        t = _product_type(p)
+        if t and t not in _PURCHASABLE_TYPES:
+            continue
+        out.append(p)
+    return out
+
+
+def _catalog_key(client, org_id: str) -> str:
+    """Ключ справочника в локальной базе (см. catalog_key() клиентов iiko)."""
+    getter = getattr(client, "catalog_key", None)
+    if callable(getter):
+        try:
+            return getter(org_id)
+        except Exception:
+            pass
+    return f"org:{org_id}"
+
+
+async def _resolve_units(client, products: List[Dict[str, Any]]):
+    """Переводит единицу товара из UUID в название (кг/шт/л).
+
+    У самохостед iiko mainUnit приходит идентификатором. Пока он оставался UUID,
+    сравнение единиц накладной и товара никогда не совпадало: автоконверсия
+    г→кг не срабатывала, а оператор видел предупреждение с «кашей символов».
+    """
+    if not products or not hasattr(client, "get_measure_units_map"):
+        return
+    if not any(re.fullmatch(r"[0-9a-f-]{36}", str(p.get("unit") or "")) for p in products):
+        return
+    try:
+        units = await client.get_measure_units_map()
+    except Exception as e:
+        logger.warning(f"[nomenclature] единицы измерения: {e!r}")
+        return
+    for p in products:
+        u = str(p.get("unit") or "")
+        if u in units:
+            p["unit"] = units[u]
+        elif re.fullmatch(r"[0-9a-f-]{36}", u):
+            p["unit"] = ""      # неизвестный UUID лучше пустого места не занимал
+
+
+# Когда iiko отказал (сессия занята, сеть, 401), повторная попытка через секунду
+# только злит сервер: он отвечает 401 ещё дольше. Держим паузу и работаем по
+# последнему снимку из базы.
+_CATALOG_LAST_FAIL: Dict[str, float] = {}
+_CATALOG_FAIL_COOLDOWN = float(os.getenv("NOMENCLATURE_FAIL_COOLDOWN", "60"))
+
+
+async def _nomenclature_catalog(client, org_id: str, force: bool = False
+                                ) -> Tuple[List[Dict[str, Any]], str]:
+    """Справочник закупаемых товаров из локальной базы; в iiko ходим не чаще TTL.
+
+    Раньше номенклатура тянулась целиком в память на каждый рестарт процесса и
+    жила 30 минут — на Render это значило полный справочник почти на каждую
+    накладную. Теперь снимок лежит в SQLite, отфильтрованный от блюд.
+    Если iiko недоступен — работаем по последнему снимку, а не по пустоте.
+    """
+    key = _catalog_key(client, org_id)
+    synced = iiko_products_synced_at(key)
+    fresh = bool(synced) and (datetime.now() - synced) < timedelta(hours=_NOMENCLATURE_TTL_H)
+    if fresh and not force:
+        cached = load_iiko_products(key)
+        if cached:
+            return cached, key
+
+    if time.time() - _CATALOG_LAST_FAIL.get(key, 0) < _CATALOG_FAIL_COOLDOWN:
+        return load_iiko_products(key), key
+
+    raw = None
+    try:
+        try:
+            # Просим у iiko сразу только закупаемые типы: на реальной базе это
+            # 544 позиции вместо 1730 и 1.2 МБ вместо 7.3 МБ. Локальный фильтр
+            # ниже всё равно оставляем — старые сборки iiko параметр игнорируют.
+            raw = await client.search_nomenclature(org_id, "", limit=100000,
+                                                   types=sorted(_PURCHASABLE_TYPES))
+        except TypeError:   # клиент без поддержки types
+            raw = await client.search_nomenclature(org_id, "", limit=100000)
+    except Exception as e:
+        _CATALOG_LAST_FAIL[key] = time.time()
+        logger.warning(f"[nomenclature] {key}: iiko не отдал номенклатуру: {e!r}")
+    if raw:
+        _CATALOG_LAST_FAIL.pop(key, None)
+        goods = _filter_purchasable(raw)
+        await _resolve_units(client, goods)
+        if goods:
+            try:
+                save_iiko_products(key, goods, fetched=len(raw))
+                logger.info(f"[nomenclature] {key}: {len(raw)} позиций из iiko → "
+                            f"{len(goods)} закупаемых в базе")
+            except Exception as e:
+                logger.warning(f"[nomenclature] {key}: не смог сохранить в базу: {e!r}")
+            return goods, key
+        logger.warning(f"[nomenclature] {key}: после фильтра типов не осталось позиций "
+                       f"(из {len(raw)}) — оставляем прежний снимок")
+    return load_iiko_products(key), key
+
+
+_QUOTED_RE = re.compile(r"[«\"\'`]([^«»\"\'`]{2,})[»\"\'`]")
+
+
+def _words(s: str) -> List[str]:
+    """Строка → значимые слова: без чисел, единиц и организационного мусора."""
+    s = re.sub(r"[^a-zа-я0-9]+", " ", (s or "").lower().replace("ё", "е"))
+    out = []
+    for w in s.split():
+        if w.isdigit() or len(w) < 2:
+            continue
+        if w in _MATCH_STOP:
+            continue
+        if re.fullmatch(r"\d+[a-zа-я]*", w):   # «900мл», «3»
+            continue
+        out.append(w)
+    return out
+
+
+def _split_brand(s: str) -> Tuple[List[str], List[str]]:
+    """Делит название на суть и бренд в кавычках.
+
+    «Молоко "Простоквашино" 3,2% 900мл» → (['молоко'], ['простоквашино']).
+    В iiko товар обычно заведён без бренда поставщика, поэтому бренд в оценку
+    названия не берём. Но если кроме бренда ничего не осталось («Кока-Кола» 1л),
+    бренд И ЕСТЬ название — тогда считаем по нему.
+    """
+    s = s or ""
+    brand: List[str] = []
+    for m in _QUOTED_RE.finditer(s):
+        brand += _words(m.group(1))
+    core = _words(_QUOTED_RE.sub(" ", s))
+    if not core:
+        return brand, []
+    return core, brand
+
+
+def _match_tokens(s: str) -> List[str]:
+    """Название → значимые слова (бренд в кавычках отброшен, если есть суть)."""
+    core, _brand = _split_brand(s)
+    return core
+
+
+def _word_hit(x: str, words: List[str]) -> bool:
+    """Слово x встречается в words с точностью до склонения/окончания."""
+    stem = x[:max(4, len(x) - 2)]
+    return any(y.startswith(stem) or x.startswith(y[:max(4, len(y) - 2)]) for y in words)
+
+
+def _match_score(inv_name: str, prod_name: str) -> float:
+    """0..1 — насколько товар из iiko похож на строку накладной.
+
+    Половина веса — доля слов накладной, нашедшихся в названии товара (с учётом
+    склонений: сравниваем по началу слова), половина — общая похожесть строк.
+    """
+    a, brand = _split_brand(inv_name)
+    b = _match_tokens(prod_name)
+    if not a or not b:
+        return 0.0
+    coverage = sum(1 for x in a if _word_hit(x, b)) / len(a)
+    ratio = SequenceMatcher(None, " ".join(a), " ".join(b)).ratio()
+    score = 0.6 * coverage + 0.4 * ratio
+    # Бренд не участвует в основной оценке, но решает спор равных кандидатов:
+    # «Соус "Терияки"» и «Соус "Унаги"» иначе неотличимы по слову «соус».
+    if brand and any(_word_hit(x, b) for x in brand):
+        score = min(1.0, score + 0.08)
+    return score
+
+
+def _best_product_match(products: List[Dict[str, Any]], name: str
+                        ) -> Tuple[Optional[Dict[str, Any]], float, bool]:
+    """Лучший товар, оценка и уверенность.
+
+    Возвращаем кандидата всегда, когда он дотянул до порога, даже если рядом есть
+    похожий: подставить вариант и дать поправить одним тапом полезнее, чем оставить
+    строку пустой. Спорные случаи помечаем неуверенными — редактор их подсветит.
+    """
+    best, best_s, second_s = None, 0.0, 0.0
+    for p in products:
+        s = _match_score(name, p.get("name") or "")
+        if s > best_s:
+            best, second_s, best_s = p, best_s, s
+        elif s > second_s:
+            second_s = s
+    if best_s < _MATCH_MIN_SCORE:
+        return None, best_s, False
+    confident = best_s >= 0.75 and (best_s - second_s) >= 0.06
+    return best, best_s, confident
+
+
+def _match_memory_key(name: str) -> str:
+    """Ключ памяти сопоставлений: значимые слова строки накладной.
+    Через токены, а не сырую строку — чтобы «М/сл 82,5» и «М/сл  82.5»
+    попадали в одну запись."""
+    return " ".join(_match_tokens(name))
+
+
+def remember_invoice_matches(client, org_id: str, items: List[Dict[str, Any]]):
+    """Запоминает сопоставления, за которые человек отвечает: выбранные руками
+    и уверенные авто-подборы, которые оператор оставил и отправил в iiko.
+    Неуверенные (needs_review) не запоминаем — иначе зацементируем ошибку."""
+    key = _catalog_key(client, org_id)
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        pid = it.get("iiko_product_id")
+        name_key = _match_memory_key(it.get("name") or "")
+        if not pid or not name_key or it.get("needs_review"):
+            continue
+        try:
+            remember_invoice_match(key, name_key, pid, it.get("iiko_product_name") or "")
+        except Exception as e:
+            logger.warning(f"[invoice-match] память {key}: {e!r}")
+
+
+_CATALOG_REFRESH_MIN = float(os.getenv("NOMENCLATURE_REFRESH_MIN", "10"))
+
+
+def _apply_match(it: Dict[str, Any], catalog: List[Dict[str, Any]],
+                 memory: Dict[str, Dict[str, Any]],
+                 by_id: Dict[str, Dict[str, Any]]) -> bool:
+    """Ставит позиции товар iiko. True — если получилось.
+    Порядок: память исправлений оператора → скоринг по словам."""
+    best, score, confident = None, 0.0, False
+    remembered = memory.get(_match_memory_key(it.get("name") or ""))
+    if remembered and remembered.get("product_id") in by_id:
+        best, score, confident = by_id[remembered["product_id"]], 1.0, True
+    if best is None:
+        best, score, confident = _best_product_match(catalog, it.get("name", ""))
+    if not best:
+        return False
+    # Аннотируем саму позицию, чтобы сохранённый черновик нёс сопоставление
+    # (редактор показывает «✓ сопоставлено», повторная отправка не теряет id).
+    it["iiko_product_id"] = best.get("id")
+    it["iiko_product_name"] = best.get("name") or it.get("name")
+    it["iiko_unit"] = best.get("unit") or ""
+    if best.get("containers"):
+        it["iiko_containers"] = best["containers"]
+    # Подобрано машиной, а не человеком: редактор пометит «проверьте»
+    it["auto_matched"] = True
+    it["match_score"] = round(score, 2)
+    it["needs_review"] = not confident
+    return True
+
+
 async def _auto_match_items(client, org_id: str,
                              items: List[Dict[str, Any]]
                              ) -> Tuple[List[Dict], List[str], List[str]]:
@@ -5005,25 +5306,32 @@ async def _auto_match_items(client, org_id: str,
     Единицы: гр↔кг и мл↔л конвертируются автоматически (с пересчётом цены);
     несовместимые (уп vs кг и т.п.) не трогаем, но честно предупреждаем.
     """
+    todo = [it for it in (items or []) if not it.get("iiko_product_id")]
+    if todo:
+        catalog, key = await _nomenclature_catalog(client, org_id)
+        by_id = {p["id"]: p for p in catalog if p.get("id")}
+        try:
+            memory = get_invoice_match_memory(key)
+        except Exception as e:
+            logger.warning(f"[invoice-match] память {key}: {e!r}")
+            memory = {}
+        if catalog:
+            todo = [it for it in todo if not _apply_match(it, catalog, memory, by_id)]
+        # Что-то не нашлось — возможно, товар завели в iiko только что, а у нас
+        # снимок справочника суточной давности. Обновляем и пробуем ещё раз.
+        synced = iiko_products_synced_at(key)
+        stale_enough = (not synced or
+                        (datetime.now() - synced) > timedelta(minutes=_CATALOG_REFRESH_MIN))
+        if todo and stale_enough:
+            fresh, _key = await _nomenclature_catalog(client, org_id, force=True)
+            if fresh:
+                by_id = {p["id"]: p for p in fresh if p.get("id")}
+                todo = [it for it in todo if not _apply_match(it, fresh, memory, by_id)]
+
     sendable, unmatched, unit_warnings = [], [], []
     for it in (items or []):
-        # Если уже сопоставлено в редакторе — используем
         prod_id = it.get("iiko_product_id")
         prod_unit = it.get("iiko_unit") or ""
-        if not prod_id:
-            try:
-                matches = await client.search_nomenclature(org_id, it.get("name", ""), limit=1)
-            except Exception as e:
-                logger.warning(f"[invoice-match] iiko search_nomenclature failed for org={org_id}, name='{it.get('name', '')}': {e}")
-                matches = []
-            if matches:
-                prod_id = matches[0].get("id")
-                prod_unit = matches[0].get("unit") or ""
-                # Аннотируем саму позицию, чтобы сохранённый черновик нёс сопоставление
-                # (редактор показывает «✓ сопоставлено», повторная отправка не теряет id).
-                it["iiko_product_id"] = prod_id
-                it["iiko_product_name"] = matches[0].get("name") or it.get("name")
-                it["iiko_unit"] = prod_unit
         if not prod_id:
             unmatched.append(it.get("name", "—"))
             continue
