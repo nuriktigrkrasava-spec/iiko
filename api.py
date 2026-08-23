@@ -3449,6 +3449,22 @@ async def invoice_saved_get(invoice_id: int, user: Dict = Depends(get_current_us
         items = json.loads(inv.get("items") or "[]")
     except Exception:
         items = []
+    # Черновик мог сохраниться несопоставленным: распознан до появления базы
+    # товаров или в момент, когда iiko не отдал справочник. Досопоставляем при
+    # открытии — иначе оператор навсегда получает пустой редактор из-за сбоя,
+    # который уже прошёл.
+    org_saved = inv.get("organization_id")
+    if org_saved and items and any(not it.get("iiko_product_id") for it in items) \
+            and not _use_demo_data(user, org_saved):
+        try:
+            real_org = _get_org_id(org_saved, user)
+            info = _get_restaurant_info(real_org, user)
+            client = get_client(info["api_login"], info.get("iiko_server"),
+                                info.get("api_password"))
+            await _auto_match_items(client, real_org, items)
+            update_bot_invoice(invoice_id, items=json.dumps(items, ensure_ascii=False))
+        except Exception as e:
+            logger.warning(f"[invoice-saved] досопоставление при открытии: {e!r}")
     return {
         "invoice_id": invoice_id,
         "supplier": inv.get("supplier"),
