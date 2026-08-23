@@ -214,6 +214,22 @@ def test_iiko_failure_does_not_hammer_the_server():
     print("  [OK] отказ iiko → одна попытка, дальше пауза")
 
 
+def test_saved_draft_is_rematched_on_open():
+    """Черновик, сохранённый несопоставленным, досопоставляется при открытии
+    в редакторе: сбой iiko в прошлом не должен оставлять оператора с пустотой."""
+    _reset_db()
+    client = FakeClient()
+    # накладная распозналась, когда iiko лежал → позиции без товара
+    items = [{"name": "Молоко 3,2%", "quantity": 1, "price_per_unit": 1, "total": 1}]
+    asyncio.run(api._auto_match_items(FakeClient(fail=True), "ORG-1", items))
+    assert not items[0].get("iiko_product_id"), items[0]
+    # оператор открывает черновик позже, iiko уже отвечает
+    _reset_db()
+    asyncio.run(api._auto_match_items(client, "ORG-1", items))
+    assert items[0].get("iiko_product_id") == "P-MILK", items[0]
+    print("  [OK] сохранённый черновик досопоставился при повторном открытии")
+
+
 def test_memory_beats_algorithm():
     """Исправление оператора запоминается и в следующий раз ставится уверенно."""
     _reset_db()
@@ -270,6 +286,7 @@ if __name__ == "__main__":
               test_new_product_is_picked_up_without_waiting_for_ttl,
               test_unit_uuid_is_resolved_and_converted,
               test_iiko_failure_does_not_hammer_the_server,
+              test_saved_draft_is_rematched_on_open,
               test_memory_beats_algorithm,
               test_unconfident_match_is_flagged,
               test_unmatched_never_leaks_empty_productid):
