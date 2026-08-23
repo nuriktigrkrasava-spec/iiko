@@ -230,6 +230,25 @@ def test_saved_draft_is_rematched_on_open():
     print("  [OK] сохранённый черновик досопоставился при повторном открытии")
 
 
+def test_match_from_another_server_is_redone():
+    """У сети свой iiko-сервер почти на каждый филиал: товар, подобранный по
+    справочнику одного сервера, на другом невалиден — сопоставляем заново."""
+    _reset_db()
+    a = FakeClient(); a.catalog_key = lambda org: "web:server-a"
+    items = [{"name": "Молоко 3,2%", "quantity": 1, "price_per_unit": 1, "total": 1}]
+    asyncio.run(api._auto_match_items(a, "ORG-A", items))
+    assert items[0]["iiko_source"] == "web:server-a", items[0]
+    old_id = items[0]["iiko_product_id"]
+
+    b = FakeClient([{"id": "B-MILK", "name": "Молоко 3,2%", "unit": "л", "type": "GOODS"}])
+    b.catalog_key = lambda org: "web:server-b"
+    sendable, unmatched, _w = asyncio.run(api._auto_match_items(b, "ORG-B", items))
+    assert not unmatched, unmatched
+    assert sendable[0]["productId"] == "B-MILK" != old_id, sendable
+    assert items[0]["iiko_source"] == "web:server-b", items[0]
+    print("  [OK] при смене филиала товар пересопоставлен по его справочнику")
+
+
 def test_memory_beats_algorithm():
     """Исправление оператора запоминается и в следующий раз ставится уверенно."""
     _reset_db()
@@ -287,6 +306,7 @@ if __name__ == "__main__":
               test_unit_uuid_is_resolved_and_converted,
               test_iiko_failure_does_not_hammer_the_server,
               test_saved_draft_is_rematched_on_open,
+              test_match_from_another_server_is_redone,
               test_memory_beats_algorithm,
               test_unconfident_match_is_flagged,
               test_unmatched_never_leaks_empty_productid):
