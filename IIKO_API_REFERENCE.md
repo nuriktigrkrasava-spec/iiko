@@ -153,13 +153,50 @@ Department(имя филиала) ──OLAP Conception.Code──▶ коды �
 | `/api/v2/entities/list?rootType=PaymentType` | GET | типы оплат | JSON |
 | `/api/v2/entities/list?rootType=Conception` | GET | концепции (code↔id) | JSON |
 | `/api/v2/entities/list?rootType=MeasureUnit` | GET | единицы измерения | JSON |
-| `/api/v2/entities/products/list` | GET | номенклатура | JSON |
+| `/api/v2/entities/products/list` | GET | номенклатура (см. ниже про `types`) | JSON |
 | `/api/products` | GET | номенклатура (fallback) | XML |
 | `/api/suppliers` | GET | поставщики | XML |
 | `/api/employees` | GET | сотрудники (id→ФИО) | XML |
 | `/api/employees/attendance?from=&to=` | GET | явки | XML |
 
 Все — с `?key={token}`. XML парсится `_xml_to_list_of_dicts()`.
+
+
+### Номенклатура: фильтр по типам (проверено на saya-co, 2026-08-23)
+
+```http
+GET /resto/api/v2/entities/products/list?key={token}&includeDeleted=false&types=GOODS
+```
+
+`types` **работает** и повторяется для нескольких типов (`&types=GOODS&types=SERVICE`).
+Без него приезжает весь справочник — на saya-co это 1730 позиций и 7.3 МБ:
+
+| type | что это | сколько на saya-co |
+|---|---|---|
+| `GOODS` | закупаемые товары — то, что бывает в накладной | 544 |
+| `DISH` | блюда меню | 670 |
+| `MODIFIER` | модификаторы («без лука») | 296 |
+| `PREPARED` | полуфабрикаты (готовятся у себя) | 175 |
+| `SERVICE` | услуги | 44 |
+| `RATE` | тариф | 1 |
+
+С `types=GOODS` ответ — 544 позиции и 1.2 МБ. Для сопоставления накладных берём
+только `GOODS`: блюда и полуфабрикаты поставщик привезти не может, но в поиске
+по названию исправно перебивают правильный товар.
+
+Поля позиции: `id`, `name`, `num`, `code`, `type`, `mainUnit`, контейнеры (фасовки).
+**`mainUnit` — это UUID**, а не «кг»: название берётся из
+`/api/v2/entities/list?rootType=MeasureUnit`. Пока единица оставалась UUID,
+сравнение единиц накладной и товара не совпадало никогда.
+
+### Про 401 на `/api/auth`
+
+Сервер отдаёт 401 не только на неверный пароль: частые повторные авторизации
+одним логином он какое-то время отклоняет (сессия занята/лимит). Поэтому после
+отказа iiko повторять запрос сразу же бессмысленно — в `_nomenclature_catalog`
+стоит пауза (`NOMENCLATURE_FAIL_COOLDOWN`, 60с) и работа по последнему снимку
+справочника из локальной таблицы `iiko_products`.
+
 
 ---
 

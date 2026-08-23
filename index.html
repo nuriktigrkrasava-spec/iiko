@@ -4840,7 +4840,7 @@ async function invoicePost(botInvoiceId) {
   }
 }
 
-async function invoiceUnpost(botInvoiceId) {
+async function invoдай ссылку на сай claude --continueiceUnpost(botInvoiceId) {
   haptic();
   if (!confirm('Распровести накладную?')) return;
   try {
@@ -5166,6 +5166,10 @@ function ieSaveItem() {
     it.iiko_unit = ieState._pickedProduct.unit || '';
     it.iiko_containers = ieState._pickedProduct.containers || [];
     it._container_keys = ieState._pickedProduct._container_keys || [];
+    // Товар выбран человеком: снимаем пометки автоподбора, чтобы бэкенд
+    // запомнил эту пару «строка накладной → товар iiko» как проверенную.
+    it.needs_review = false;
+    it.auto_matched = false;
     ieState._pickedProduct = null;
   }
   ieState.items[idx] = it;

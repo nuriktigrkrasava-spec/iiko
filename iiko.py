@@ -131,6 +131,10 @@ class IikoClient:
             resp.raise_for_status()
             return resp.json().get("organizations", [])
 
+    def catalog_key(self, org_id: str) -> str:
+        """Ключ справочника номенклатуры: в облаке он свой на организацию."""
+        return f"cloud:{org_id}"
+
     async def get_nomenclature(self, org_id: str) -> Dict[str, Any]:
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -303,9 +307,10 @@ class IikoClient:
             return data.get("suppliers") or data.get("employees") or []
 
     async def search_nomenclature(self, org_id: str, query: str,
-                                  limit: int = 30) -> List[Dict[str, Any]]:
+                                  limit: int = 30,
+                                  types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Поиск товаров по имени. Загружает полную номенклатуру (кешируется на 30 мин),
-        потом фильтрует локально."""
+        потом фильтрует локально. types — оставить только эти типы (GOODS и т.п.)."""
         cache = getattr(self, "_nomenclature_cache", None)
         if cache is None:
             self._nomenclature_cache: Dict[str, Tuple[datetime, List[Dict]]] = {}
@@ -322,6 +327,10 @@ class IikoClient:
             except Exception:
                 return []
 
+        if types:
+            want = {t.upper() for t in types}
+            products = [p for p in products
+                        if not p.get("type") or str(p["type"]).upper() in want]
         q = (query or "").strip().lower()
         if not q:
             return products[:limit]
@@ -458,6 +467,12 @@ class IikoWebClient:
         self.token: Optional[str] = None
         self.token_expires: Optional[datetime] = None
         self._lock = asyncio.Lock()
+
+    def catalog_key(self, org_id: str) -> str:
+        """Ключ справочника: у самохостед iiko номенклатура общая на сервер,
+        а не на филиал — иначе тянули бы один и тот же справочник 13 раз."""
+        host = urlparse(self.base_url).hostname or self.base_url
+        return f"web:{host}"
 
     @staticmethod
     def _sha1(s: str) -> str:
@@ -1390,21 +1405,30 @@ class IikoWebClient:
             return None
 
     async def search_nomenclature(self, org_id: str, query: str,
-                                  limit: int = 30) -> List[Dict[str, Any]]:
+                                  limit: int = 30,
+                                  types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Поиск товаров. iikoServer: GET /resto/api/v2/entities/products/list — JSON,
-        либо /resto/api/products — XML. Кеш на 30 минут, фильтрация локальная."""
+        либо /resto/api/products — XML. Кеш на 30 минут, фильтрация локальная.
+
+        types — фильтр по типам НА СТОРОНЕ iiko (проверено на saya-co: параметр
+        поддерживается). Для сопоставления накладных берём только GOODS: это 544
+        позиции и 1.2 МБ вместо 1730 позиций и 7.3 МБ со всеми блюдами."""
         self._ensure_caches()
-        cached = self._nomenclature_cache.get(org_id)
+        cache_key = f"{org_id}|{','.join(sorted(types)) if types else 'ALL'}"
+        cached = self._nomenclature_cache.get(cache_key)
         if cached and (datetime.now() - cached[0]) < timedelta(minutes=30):
             products = cached[1]
         else:
             token = await self._ensure_token()
             products = []
+            params = {"key": token, "includeDeleted": "false"}
+            if types:
+                params["types"] = sorted(types)
             try:
                 async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
                     resp = await client.get(
                         f"{self.base_url}/api/v2/entities/products/list",
-                        params={"key": token, "includeDeleted": "false"}
+                        params=params
                     )
                     if resp.status_code == 200:
                         try:
@@ -1421,6 +1445,9 @@ class IikoWebClient:
                                         "num": p.get("num"),
                                         "code": p.get("code"),
                                         "unit": mu.get("name") if isinstance(mu, dict) else mu,
+                                        # type: GOODS / DISH / PREPARED / MODIFIER / SERVICE…
+                                        # Нужен, чтобы в сопоставление накладных не лезли блюда.
+                                        "type": p.get("type") or p.get("productType") or "",
                                         "containers": parse_containers(p),
                                         # диагностика структуры фасовок (видно на деплое)
                                         "_container_keys": p.get("_container_keys") or [],
@@ -1440,13 +1467,14 @@ class IikoWebClient:
                             products = [
                                 {"id": it.get("id"), "name": it.get("name"),
                                  "num": it.get("num"), "code": it.get("code"),
-                                 "unit": it.get("mainUnit")}
+                                 "unit": it.get("mainUnit"),
+                                 "type": it.get("type") or it.get("productType") or ""}
                                 for it in items
                                 if it.get("id") and it.get("name")
                             ]
             except Exception:
                 products = []
-            self._nomenclature_cache[org_id] = (datetime.now(), products)
+            self._nomenclature_cache[cache_key] = (datetime.now(), products)
 
         q = (query or "").strip().lower()
         if not q:
