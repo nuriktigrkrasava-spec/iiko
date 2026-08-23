@@ -2235,6 +2235,7 @@ async function loadDashboard() {
   if (!state.restaurant) return;
   const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
   startStoplistRefresh();
+  startLiveRevenue();
 
   // Сначала пробуем OLAP (один запрос)
   const rows = await fetchOlap(state.period);
@@ -4020,6 +4021,40 @@ function startStoplistRefresh() {
 
 function stopStoplistRefresh() {
   if (_stoplistTimer) { clearInterval(_stoplistTimer); _stoplistTimer = null; }
+  stopLiveRevenue();
+}
+
+// ── Выручка «вживую» ──────────────────────────────────────────────────────
+// Полный дашборд перезагружается раз в 60с, но карточка выручки — то, на что
+// смотрят весь день. Дёргаем только её (/api/revenue = кассовые смены) раз в
+// 30с и подписываем время: видно, что цифра живая, а не залипла.
+// Заказ попадает в выручку, когда его закрыли, поэтому она растёт ступенями.
+let _liveRevTimer = null;
+
+function _periodIsLive() {
+  return ['today', 'week', 'month'].indexOf(state.period) >= 0;
+}
+
+async function refreshRevenueLive() {
+  if (document.hidden || !state.restaurant || state.demoMode) return;
+  if (state.currentTab !== 'main' || !_periodIsLive()) return;
+  const orgId = getActiveOrgIds()[0] || state.restaurant.organization_id;
+  try {
+    const r = await apiGet(`/api/revenue/${orgId}?${buildPeriodQuery(state.period, state.customRange)}${getOrgIdsParam()}`);
+    if (!r || r.revenue == null) return;
+    animateValue('m-revenue', r.revenue, ' ₸');
+    const stamp = document.getElementById('m-revenue-change');
+    if (stamp) stamp.textContent = 'обновлено ' + (r.as_of || '');
+  } catch (e) {}
+}
+
+function startLiveRevenue() {
+  if (_liveRevTimer) clearInterval(_liveRevTimer);
+  _liveRevTimer = setInterval(refreshRevenueLive, 30000);
+}
+
+function stopLiveRevenue() {
+  if (_liveRevTimer) { clearInterval(_liveRevTimer); _liveRevTimer = null; }
 }
 
 // Автообновление данных каждые 60 секунд

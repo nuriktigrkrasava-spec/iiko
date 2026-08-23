@@ -160,6 +160,17 @@ _cache: Dict[str, Any] = {}
 _cache_time: Dict[str, datetime] = {}
 # TTL кэша ответов iiko. 3 мин — баланс свежести и нагрузки на iiko-серверы.
 _CACHE_TTL = timedelta(minutes=3)
+# Выручка текущего дня растёт весь день, и трёхминутный кэш делал её заметно
+# «отстающей». Для периодов, включающих сегодня, держим ответ секунды, а не
+# минуты; на iiko это по-прежнему не больше одного запроса в _CACHE_TTL_LIVE,
+# сколько бы раз фронт ни спросил.
+_CACHE_TTL_LIVE = timedelta(seconds=int(os.getenv("CACHE_TTL_LIVE_SEC", "45")))
+_cache_ttl: Dict[str, timedelta] = {}
+
+
+def _is_live_period(date_from: str, date_to: str) -> bool:
+    """Период захватывает сегодняшний день — значит цифра ещё меняется."""
+    return str(date_to)[:10] >= local_now().date().isoformat()
 
 
 # Насколько оплаченное может превысить проданное, прежде чем считать выборку
@@ -173,25 +184,32 @@ def _cache_key(user_id: int, endpoint: str, org_id: str, period: str) -> str:
 
 def _get_cached(key: str) -> Optional[Any]:
     if key in _cache and key in _cache_time:
-        if datetime.now() - _cache_time[key] < _CACHE_TTL:
+        if datetime.now() - _cache_time[key] < _cache_ttl.get(key, _CACHE_TTL):
             return _cache[key]
     return None
 
 
-def _set_cached(key: str, value: Any):
+def _set_cached(key: str, value: Any, ttl: Optional[timedelta] = None):
     # Перед записью чистим протухшее и держим потолок размера — иначе _cache рос
     # бесконечно (ключи: user×org×период×эндпоинт) и тёк по памяти до рестарта.
     now = datetime.now()
     if len(_cache) > 500:
-        for k in [k for k, t in list(_cache_time.items()) if now - t >= _CACHE_TTL]:
+        for k in [k for k, t in list(_cache_time.items())
+                  if now - t >= _cache_ttl.get(k, _CACHE_TTL)]:
             _cache.pop(k, None)
             _cache_time.pop(k, None)
+            _cache_ttl.pop(k, None)
         if len(_cache) > 500:  # всё ещё много — сносим самые старые
             for k in sorted(_cache_time, key=_cache_time.get)[:len(_cache) - 500]:
                 _cache.pop(k, None)
                 _cache_time.pop(k, None)
+                _cache_ttl.pop(k, None)
     _cache[key] = value
     _cache_time[key] = now
+    if ttl:
+        _cache_ttl[key] = ttl
+    else:
+        _cache_ttl.pop(key, None)
 
 
 def _invalidate_cache(endpoint: str, org_id: str):
@@ -1367,7 +1385,8 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             "chart_7days": chart,
             "branches_count": len(orgs),
         }
-        _set_cached(key, resp)
+        _set_cached(key, resp,
+                    ttl=_CACHE_TTL_LIVE if _is_live_period(date_from, date_to) else None)
         return resp
     except Exception as e:
         print(f"[dashboard] {e}")
@@ -1414,8 +1433,9 @@ async def revenue(org_id: str, response: Response, period: str = "today",
     if not revs:
         # не смогли получить смены (облако/ошибка) — пусть фронт остаётся на OLAP
         return {"revenue": None, "ok": False, "source": "none"}
-    resp = {"revenue": round(sum(revs), 2), "ok": True, "source": "cashshifts"}
-    _set_cached(key, resp)
+    resp = {"revenue": round(sum(revs), 2), "ok": True, "source": "cashshifts",
+            "as_of": local_now().strftime("%H:%M")}
+    _set_cached(key, resp, ttl=_CACHE_TTL_LIVE if _is_live_period(date_from, date_to) else None)
     return resp
 
 
