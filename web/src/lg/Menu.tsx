@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { useApi } from '../lib/useApi'
 import { Glass, Chart, Bullet, Insight } from './ui'
 import { donut, hbar, legend, color, bar } from './charts'
-import { tengeShort, num } from '../lib/format'
+import { tenge, num } from '../lib/format'
 
 /* ── Формы данных ── */
 type Channel = { name: string; revenue: number; guests: number; avg_check: number; top: boolean }
@@ -71,7 +71,7 @@ export default function Menu() {
 
   /* Каналы — донат + легенда */
   const chData = s.channels.map((x, i) => ({ l: x.name, v: x.revenue, c: color(i) }))
-  const chLegend = s.channels.map((x, i) => ({ l: x.name, v: tengeShort(x.revenue), c: color(i) }))
+  const chLegend = s.channels.map((x, i) => ({ l: x.name, v: tenge(x.revenue), c: color(i) }))
 
   /* Категории — донат со своими цветами */
   const catData = s.categories.map((x) => ({ l: x.name, v: x.value, c: x.color }))
@@ -91,14 +91,14 @@ export default function Menu() {
   const upside = strongest ? Math.round(strongest.count * 0.5) * DRINK : 0
 
   /* Способы оплаты */
-  const payData = s.pay_types.map((p) => ({ l: p.name, v: p.revenue, disp: tengeShort(p.revenue), c: bar(0) }))
+  const payData = s.pay_types.map((p) => ({ l: p.name, v: p.revenue, disp: tenge(p.revenue), c: bar(0) }))
 
   return (
     <>
       {/* 1 · Герой */}
       <Glass span={5} spot warp>
         <div className="eyebrow"><span>Продажи · меню</span><span className="hint">за месяц</span></div>
-        <div className="tnum" style={{ fontSize: 46, fontWeight: 680, letterSpacing: '-.035em', lineHeight: 1, marginTop: 16 }}>{tengeShort(totalRev)}</div>
+        <div className="tnum" style={{ fontSize: 46, fontWeight: 680, letterSpacing: '-.035em', lineHeight: 1, marginTop: 16 }}>{tenge(totalRev)}</div>
         <div style={{ marginTop: 8, fontSize: 12.5, color: 'var(--mute)', fontWeight: 500 }}>выручка по всем каналам</div>
         <div style={{ display: 'flex', gap: 30, marginTop: 26 }}>
           <div>
@@ -107,7 +107,7 @@ export default function Menu() {
           </div>
           <div>
             <div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Средний чек</div>
-            <div className="tnum" style={{ fontSize: 24, fontWeight: 660, letterSpacing: '-.02em', marginTop: 6 }}>{tengeShort(blended)}</div>
+            <div className="tnum" style={{ fontSize: 24, fontWeight: 660, letterSpacing: '-.02em', marginTop: 6 }}>{tenge(blended)}</div>
           </div>
         </div>
         <div style={{ height: 8, borderRadius: 6, marginTop: 24, background: 'linear-gradient(90deg, var(--acc), var(--acc-2))', opacity: 0.92 }} />
@@ -148,13 +148,13 @@ export default function Menu() {
                 <td style={td}><Badge k={k} /></td>
                 <td style={tdR}>{num(d.count)}</td>
                 <td style={td}><Bullet value={d.revenue} max={maxRev} tone={k.tone} /></td>
-                <td style={tdR}>{tengeShort(d.revenue)}</td>
+                <td style={tdR}>{tenge(d.revenue)}</td>
               </tr>
             )
           })}</tbody>
         </table>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginTop: 14, fontSize: 11, color: 'var(--mute)' }}>
-          <span>медиана продаж {num(medCount)}</span><span>·</span><span>медиана выручки {tengeShort(medRev)}</span>
+          <span>медиана продаж {num(medCount)}</span><span>·</span><span>медиана выручки {tenge(medRev)}</span>
         </div>
       </Glass>
 
@@ -166,9 +166,9 @@ export default function Menu() {
             <Insight
               tag="Бандл"
               title={`«${strongest.a}» + «${strongest.b}» · ${strongest.count} раз`}
-              money={`≈ +${tengeShort(upside)} / мес`}
+              money={`≈ +${tenge(upside)} / мес`}
               tone="pos"
-              detail={`Самая сильная пара месяца. Соберите комбо и предлагайте на кассе. +50% привязки напитка ≈ ${tengeShort(upside)} в месяц почти без затрат.`}
+              detail={`Самая сильная пара месяца. Соберите комбо и предлагайте на кассе. +50% привязки напитка ≈ ${tenge(upside)} в месяц почти без затрат.`}
             />
           </div>
         )}

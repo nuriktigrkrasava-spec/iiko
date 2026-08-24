@@ -3,9 +3,13 @@
 let UID = 0
 const acc = 'var(--acc)'
 
-/* Красочная категориальная палитра (работает на navy-фоне) */
+/* Красочная категориальная палитра — только для донатов/легенд, где цвет несёт смысл */
 export const PALETTE = ['#4f6ef7', '#7b5cff', '#22c1a4', '#3ecf8e', '#e0b341', '#ff9d4d', '#e5484d', '#38bdf8', '#f472b6', '#818cf8']
 export const color = (i: number) => PALETTE[i % PALETTE.length]
+
+/* Единый цвет СТОЛБЦОВ — наш акцент-индиго (адаптируется к теме). Единая гамма
+   во всех вкладках; сигналы (красный=потеря, зелёный=рост) задаются явно точечно. */
+export const bar = (_i?: number) => 'var(--acc)'
 
 /* Цветной донат с числом в центре. data: [{l,v,c?}] */
 export function donut(data: { l: string; v: number; c?: string }[], center?: { label?: string; sub?: string }): string {
@@ -30,16 +34,21 @@ export function donut(data: { l: string; v: number; c?: string }[], center?: { l
 }
 
 /* Горизонтальные цветные бары со значением. data: [{l,v,c?,sub?}] */
-export function hbar(data: { l: string; v: number; c?: string; sub?: string }[], unit = ''): string {
+export function hbar(data: { l: string; v: number; c?: string; sub?: string; disp?: string }[], unit = ''): string {
   const max = Math.max(...data.map((d) => d.v)) || 1
   const rows = data.map((d, i) => {
     const w = Math.max(2, (d.v / max) * 100)
-    const col = d.c || color(i)
+    const col = d.c || bar(i)
     const val = Number.isInteger(d.v) ? new Intl.NumberFormat('ru-RU').format(d.v) : d.v.toFixed(1).replace('.', ',')
-    return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+    // светящийся стеклянный бар (как в Директоре): градиент + свечение + фаска
+    const fill = `background:linear-gradient(180deg, color-mix(in srgb, ${col} 76%, #fff), ${col});`
+      + `box-shadow:0 0 12px color-mix(in srgb, ${col} 42%, transparent), inset 0 1px 0 rgba(255,255,255,.5), inset 0 -2px 4px rgba(0,0,0,.16);`
+    return `<div style="display:flex;align-items:center;gap:12px;padding:8px 0">
       <div style="width:36%;min-width:96px;font-size:12.5px;color:var(--lo)">${d.l}${d.sub ? `<span style="color:var(--mute);font-size:11px"> · ${d.sub}</span>` : ''}</div>
-      <div style="flex:1;height:11px;border-radius:6px;background:var(--glass-2);overflow:hidden"><div style="height:100%;width:${w.toFixed(1)}%;border-radius:6px;background:linear-gradient(90deg,${col},${col}aa)"></div></div>
-      <div class="tnum" style="width:88px;text-align:right;font-size:12.5px;font-weight:650">${val}${unit}</div>
+      <div style="flex:1;height:16px;border-radius:8px;background:var(--glass-2);border:1px solid var(--hair);position:relative">
+        <div style="position:absolute;top:2px;bottom:2px;left:2px;width:calc(${w.toFixed(1)}% - 4px);border-radius:6px;${fill}"></div>
+      </div>
+      <div class="tnum" style="width:88px;text-align:right;font-size:12.5px;font-weight:650">${d.disp ?? `${val}${unit}`}</div>
     </div>`
   }).join('')
   return `<div style="margin-top:10px">${rows}</div>`
@@ -86,21 +95,23 @@ export function areaChart(data: { l: string; v: number }[], color = acc): string
 }
 
 export function barChart(data: { l: string; v: number }[], hiIdx = -1, color = acc, unit = ''): string {
-  const id = 'b' + UID++, W = 580, H = 200, pX = 10, pT = 24, pB = 28
-  const max = Math.max(...data.map((x) => x.v)), n = data.length, gap = (W - pX * 2) / n, bw = gap * 0.56
+  const max = Math.max(...data.map((x) => x.v)) || 1
   const fnum = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1).replace('.', ','))
-  let g = ''
-  ;[0, 0.5, 1].forEach((t) => { const yy = pT + t * (H - pT - 12 - pB); g += `<line x1="${pX}" y1="${yy.toFixed(1)}" x2="${W - pX}" y2="${yy.toFixed(1)}" stroke="var(--hair)" stroke-width="1"/>` })
-  data.forEach((r, i) => {
-    const h = (r.v / max) * (H - pT - 12 - pB), xx = pX + i * gap + (gap - bw) / 2, yy = H - pB - h
+  // стеклянная вертикальная колонка: градиент + свечение + фаска (как горизонтальные бары)
+  const glass = `background:linear-gradient(180deg, color-mix(in srgb, ${color} 76%, #fff), ${color});`
+    + `box-shadow:0 0 14px color-mix(in srgb, ${color} 45%, transparent), inset 0 1px 0 rgba(255,255,255,.55), inset 0 -3px 6px rgba(0,0,0,.16);`
+  const cols = data.map((r, i) => {
+    const h = Math.max(6, (r.v / max) * 100)
     const hot = i === hiIdx
-    // каждый бар в фирменном цвете (не серый), выделенный — ярче
-    g += `<rect x="${xx.toFixed(1)}" y="${yy.toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(2, h).toFixed(1)}" rx="7" fill="url(#${id})" opacity="${hot ? '1' : '.5'}"/>`
-    // число над баром
-    g += `<text x="${(xx + bw / 2).toFixed(1)}" y="${(yy - 8).toFixed(1)}" text-anchor="middle" fill="${hot ? 'var(--hi)' : 'var(--lo)'}" font-size="12.5" font-weight="700" style="font-variant-numeric:tabular-nums">${fnum(r.v)}${unit}</text>`
-    g += `<text x="${(xx + bw / 2).toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="var(--mute)" font-size="11">${r.l}</text>`
-  })
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="${color}" stop-opacity=".5"/></linearGradient></defs>${g}</svg>`
+    return `<div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:8px">
+      <div class="tnum" style="font-size:12.5px;font-weight:700;color:${hot ? 'var(--hi)' : 'var(--lo)'}">${fnum(r.v)}${unit}</div>
+      <div style="width:100%;height:150px;display:flex;align-items:flex-end;justify-content:center">
+        <div style="width:58%;height:${h.toFixed(1)}%;border-radius:8px 8px 4px 4px;${glass};opacity:${hot ? '1' : '.5'}"></div>
+      </div>
+      <div style="font-size:11px;color:var(--mute)">${r.l}</div>
+    </div>`
+  }).join('')
+  return `<div style="display:flex;gap:8px;align-items:flex-end;margin-top:8px">${cols}</div>`
 }
 
 export function yoyChart(data: { l: string; a: number; b: number }[], unit = ''): string {
@@ -117,13 +128,13 @@ export function yoyChart(data: { l: string; a: number; b: number }[], unit = '')
   })
   data.forEach((r, i) => {
     const base = pX + i * gap + gap / 2, ha = (r.a / max) * plotH, hb = (r.b / max) * plotH
-    g += `<rect x="${(base - bw - 3).toFixed(1)}" y="${(H - pB - ha).toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}" rx="4" fill="var(--lo)" opacity=".32"/>`
-    g += `<rect x="${(base + 3).toFixed(1)}" y="${(H - pB - hb).toFixed(1)}" width="${bw.toFixed(1)}" height="${hb.toFixed(1)}" rx="4" fill="url(#${id})"/>`
+    g += `<rect x="${(base - bw - 3).toFixed(1)}" y="${(H - pB - ha).toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}" rx="4" fill="var(--lo)" opacity=".3"/>`
+    g += `<rect x="${(base + 3).toFixed(1)}" y="${(H - pB - hb).toFixed(1)}" width="${bw.toFixed(1)}" height="${hb.toFixed(1)}" rx="4" fill="url(#${id})" style="filter:drop-shadow(0 0 5px color-mix(in srgb, var(--acc) 50%, transparent))"/>`
     // число над баром 2025
     g += `<text x="${(base + 3 + bw / 2).toFixed(1)}" y="${(H - pB - hb - 6).toFixed(1)}" text-anchor="middle" fill="var(--hi)" font-size="11" font-weight="700" style="font-variant-numeric:tabular-nums">${fnum(r.b)}${unit}</text>`
     g += `<text x="${base.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="var(--mute)" font-size="11">${r.l}</text>`
   })
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--acc)"/><stop offset="1" stop-color="var(--acc-2)" stop-opacity=".7"/></linearGradient></defs>${g}</svg>`
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="color-mix(in srgb, var(--acc) 72%, #fff)"/><stop offset="1" stop-color="var(--acc)"/></linearGradient></defs>${g}</svg>`
 }
 
 export function slope(series: { c: string; v: number[] }[]): string {
@@ -187,7 +198,7 @@ export function heatStrip(hours: { h: number; v: number }[]): string {
     const pct = Math.round(r * 100)
     return `<div style="flex:1;text-align:center">
       <div style="font-size:9.5px;font-weight:700;color:${c};margin-bottom:5px" class="tnum">${pct}</div>
-      <div style="border-radius:7px;height:${(28 + 62 * r).toFixed(0)}px;background:${c};opacity:${o};box-shadow:inset 0 0 0 1px var(--hair)" title="${h.h}:00 · ${pct}%"></div>
+      <div style="border-radius:7px;height:${(28 + 62 * r).toFixed(0)}px;background:linear-gradient(180deg, color-mix(in srgb, ${c} 78%, #fff), ${c});opacity:${o};box-shadow:0 0 9px color-mix(in srgb, ${c} 42%, transparent), inset 0 1px 0 rgba(255,255,255,.5)" title="${h.h}:00 · ${pct}%"></div>
       <div style="font-size:9.5px;color:var(--mute);margin-top:6px" class="tnum">${h.h}</div></div>`
   }).join('')}</div>`
 }

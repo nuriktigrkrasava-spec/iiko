@@ -12,7 +12,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), ...(single ? [viteSingleFile()] : [])],
   build: single
     ? { assetsInlineLimit: 100_000_000, cssCodeSplit: false, chunkSizeWarningLimit: 100_000 }
-    : { rollupOptions: { input: { main: 'index.html', stories: 'stories.html', miniapp: 'miniapp.html' } } },
+    : {},
   server: {
     port: 5180,
     proxy: {

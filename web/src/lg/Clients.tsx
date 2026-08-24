@@ -1,7 +1,7 @@
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Bullet, Insight } from './ui'
+import { Glass, Chart, Bullet, Insight, GBar } from './ui'
 import { barChart, color } from './charts'
-import { tenge, tengeShort, num } from '../lib/format'
+import { tenge, num } from '../lib/format'
 
 /* ── Формы данных ── */
 type Seg = { count: number; pct: number }
@@ -113,11 +113,11 @@ export default function Clients() {
           </div>
           <div>
             <div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка с базы</div>
-            <div className="tnum" style={{ fontSize: 22, fontWeight: 660, letterSpacing: '-.02em', marginTop: 6 }}>{tengeShort(s.revenue)}</div>
+            <div className="tnum" style={{ fontSize: 22, fontWeight: 660, letterSpacing: '-.02em', marginTop: 6 }}>{tenge(s.revenue)}</div>
           </div>
         </div>
         <p style={{ marginTop: 18, fontSize: 12.5, lineHeight: 1.5, color: 'var(--lo)', maxWidth: '46ch' }}>
-          Лояльные ({s.loyal.count}) — ядро: {tengeShort(s.loyal_revenue)}. Апселл-потенциал ещё {tengeShort(s.loyal_potential)}.
+          Лояльные ({s.loyal.count}) — ядро: {tenge(s.loyal_revenue)}. Апселл-потенциал ещё {tenge(s.loyal_potential)}.
         </p>
       </Glass>
 
@@ -135,10 +135,10 @@ export default function Clients() {
                   <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--hi)' }}>{x.label}</div>
                   <div style={{ fontSize: 11.5, color: 'var(--mute)' }} className="tnum">{x.count} чел · {x.pct}%</div>
                 </div>
-                <div style={{ flex: 1, height: 10, borderRadius: 6, background: 'var(--glass-2)', overflow: 'hidden' }}>
-                  <div style={{ height: '100%', width: `${w.toFixed(0)}%`, borderRadius: 6, background: `linear-gradient(90deg, ${c}, ${c}aa)` }} />
+                <div style={{ flex: 1 }}>
+                  <GBar pct={w} color={c} h={10} />
                 </div>
-                <div className="tnum" style={{ width: 84, textAlign: 'right', fontSize: 12.5, fontWeight: 650 }}>{tengeShort(x.revenue)}</div>
+                <div className="tnum" style={{ width: 84, textAlign: 'right', fontSize: 12.5, fontWeight: 650 }}>{tenge(x.revenue)}</div>
               </div>
             )
           })}
@@ -179,28 +179,28 @@ export default function Clients() {
           <Insight
             tag="Champions"
             title={`Реферал для ${champ?.count ?? 0} чемпионов`}
-            money={tengeShort(champ?.revenue ?? 0)}
+            money={tenge(champ?.revenue ?? 0)}
             tone="pos"
             detail={`Ваши адвокаты. Бонус «приведи друга»: 1 гость ≈ +${tenge(s.ltv)} LTV.`}
           />
           <Insight
             tag="Лояльные"
             title={`VIP-апселл ${loyalSeg?.count ?? 0} лояльным`}
-            money={tengeShort(s.loyal_potential)}
+            money={tenge(s.loyal_potential)}
             tone="pos"
-            detail={`Уже дали ${tengeShort(s.loyal_revenue)}. Клубная карта и сет-апселл поднимут чек: +${tengeShort(s.loyal_potential)}.`}
+            detail={`Уже дали ${tenge(s.loyal_revenue)}. Клубная карта и сет-апселл поднимут чек: +${tenge(s.loyal_potential)}.`}
           />
           <Insight
             tag="В зоне риска"
             title={`Win-back ${atRiskCnt} уходящих`}
-            money={tengeShort(atRiskRev)}
+            money={tenge(atRiskRev)}
             tone="warn"
-            detail={`Уходящие тратили ${tengeShort(atRiskRev)}. Оффер −15% на 7 дней; цель вернуть треть = ${tengeShort(atRiskRev / 3)}.`}
+            detail={`Уходящие тратили ${tenge(atRiskRev)}. Оффер −15% на 7 дней; цель вернуть треть = ${tenge(atRiskRev / 3)}.`}
           />
           <Insight
             tag="Перспективные"
             title={`2-й визит за 14 дней · ${promising?.count ?? 0} новых`}
-            money={tengeShort(promising?.revenue ?? 0)}
+            money={tenge(promising?.revenue ?? 0)}
             tone="warn"
             detail={`Пришли недавно. Автопуш «−10% на 2-й заказ» за 14 дней растит их в лояльных — чек ×${(s.loyal_revenue / Math.max(promising?.revenue ?? 1, 1)).toFixed(1)}.`}
           />

@@ -1,7 +1,14 @@
 // Живой бэкенд: FastAPI api.py. Демо-организация "demo-org-1" всегда отдаёт
 // демо-данные (см. _use_demo_data в api.py) — без Telegram-авторизации.
 // Выбор филиала: ORG динамический (getOrg/setOrg), useApi перезапрашивает при смене.
-import { BAKED } from './bakedData'
+// Офлайн-демо (56 kB вшитых ответов) нужно только сборке с VITE_BAKED=1, а
+// импортировалось всегда — и ехало в бандл каждому реальному пользователю.
+// Грузим по требованию и запоминаем промис, чтобы модуль тянулся один раз.
+let bakedPromise: Promise<Record<string, unknown>> | null = null
+function loadBaked(): Promise<Record<string, unknown>> {
+  if (!bakedPromise) bakedPromise = import('./bakedData').then((m) => m.BAKED)
+  return bakedPromise
+}
 
 export type Period = 'today' | 'yesterday' | 'week' | 'month'
 export type Branch = { organization_id: string; organization_name?: string; name?: string }
@@ -9,23 +16,46 @@ export type Branch = { organization_id: string; organization_name?: string; name
 const BAKED_MODE = import.meta.env.VITE_BAKED === '1'
 const DEMO_ORG = 'demo-org-1'
 
+// ── сохранение выбора между перезагрузками ──
+// Без этого F5 сбрасывал владельца на первый филиал по алфавиту — при 13 филиалах
+// это значит «каждое обновление уводит не туда». Храним на устройстве, как расписание.
+const LS_PREFIX = 'lg:'
+export function loadPref(key: string): string | null {
+  try { return localStorage.getItem(LS_PREFIX + key) } catch { return null }
+}
+export function savePref(key: string, val: string) {
+  try { localStorage.setItem(LS_PREFIX + key, val) } catch { /* приватный режим — просто не сохраняем */ }
+}
+
 // ── текущий выбранный филиал (org) + подписка на смену ──
-// В baked — сразу демо. В реальном режиме стартуем «не выбран» (''), чтобы НЕ мигать
-// демо-данными: useApi ждёт, пока BranchSwitcher поставит первый реальный филиал.
-let currentOrg = BAKED_MODE ? DEMO_ORG : ''
+// В baked — сразу демо. В реальном режиме берём филиал из прошлой сессии; если его
+// нет — стартуем «не выбран» (''), чтобы НЕ мигать демо-данными: useApi ждёт, пока
+// BranchSwitcher поставит филиал. Сохранённый org валидирует BranchSwitcher по
+// /api/restaurants: чужой/удалённый филиал не должен пережить смену аккаунта.
+let currentOrg = BAKED_MODE ? DEMO_ORG : (loadPref('org') || '')
 const listeners = new Set<() => void>()
 export function getOrg() { return currentOrg }
-export function setOrg(id: string) { if (id && id !== currentOrg) { currentOrg = id; listeners.forEach((l) => l()) } }
+export function setOrg(id: string) {
+  if (id && id !== currentOrg) {
+    currentOrg = id
+    if (!BAKED_MODE) savePref('org', id)
+    listeners.forEach((l) => l())
+  }
+}
 export function onOrgChange(fn: () => void) { listeners.add(fn); return () => { listeners.delete(fn) } }
 export const ORG = DEMO_ORG // обратная совместимость
 
 // ── глобальный период (тот же паттерн, что и org) ──
 // периодичные экраны НЕ шлют period в useApi → берут отсюда и перезапрашивают при смене.
 // экраны с фиксированным периодом (Home «сегодня») передают period явно и игнорируют это.
-let currentPeriod: Period = 'month'
+const PERIOD_VALUES: Period[] = ['today', 'yesterday', 'week', 'month']
+const savedPeriod = loadPref('period') as Period | null
+let currentPeriod: Period = savedPeriod && PERIOD_VALUES.includes(savedPeriod) ? savedPeriod : 'month'
 const periodListeners = new Set<() => void>()
 export function getPeriod(): Period { return currentPeriod }
-export function setPeriod(p: Period) { if (p && p !== currentPeriod) { currentPeriod = p; periodListeners.forEach((l) => l()) } }
+export function setPeriod(p: Period) {
+  if (p && p !== currentPeriod) { currentPeriod = p; savePref('period', p); periodListeners.forEach((l) => l()) }
+}
 export function onPeriodChange(fn: () => void) { periodListeners.add(fn); return () => { periodListeners.delete(fn) } }
 // человекочитаемый ярлык текущего периода (для подписей/eyebrow)
 const PERIOD_LABELS: Record<Period, string> = { today: 'сегодня', yesterday: 'вчера', week: 'за неделю', month: 'за месяц' }
@@ -56,6 +86,7 @@ export async function apiGet<T>(path: string, params: Record<string, string> = {
   const url = `/api/${path}/${org}${qs ? `?${qs}` : ''}`
   if (BAKED_MODE) {
     // в baked данные вшиты только под demo-org-1 — любой филиал показывает демо (для демонстрации выбора)
+    const BAKED = await loadBaked()
     const demoUrl = `/api/${path}/${DEMO_ORG}${qs ? `?${qs}` : ''}`
     const hit = BAKED[url] ?? BAKED[`/api/${path}/${org}`] ?? BAKED[demoUrl] ?? BAKED[`/api/${path}/${DEMO_ORG}`]
     if (hit !== undefined) return Promise.resolve(hit as T)

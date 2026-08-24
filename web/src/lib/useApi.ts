@@ -1,17 +1,28 @@
 import { useEffect, useState } from 'react'
-import { apiGet } from './api'
+import { apiGet, getOrg, onOrgChange, getPeriod, onPeriodChange } from './api'
 
 export function useApi<T>(path: string, params: Record<string, string> = {}) {
   const [data, setData] = useState<T | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const key = path + JSON.stringify(params)
+  const [org, setOrgState] = useState(getOrg())
+  const [period, setPeriodState] = useState(getPeriod())
+
+  // перезапрос при смене филиала и глобального периода
+  useEffect(() => onOrgChange(() => setOrgState(getOrg())), [])
+  useEffect(() => onPeriodChange(() => setPeriodState(getPeriod())), [])
+
+  // period не передан вызовом → следуем глобальному фильтру; передан явно (напр. 'today') → фиксирован
+  const followsGlobal = params.period === undefined
+  const effParams = followsGlobal ? { ...params, period } : params
+  const key = org + '|' + path + JSON.stringify(effParams)
 
   useEffect(() => {
+    if (!org) return // филиал ещё не выбран — ждём, не показываем демо (loading остаётся true)
     let alive = true
     setLoading(true)
     setError(null)
-    apiGet<T>(path, params)
+    apiGet<T>(path, effParams)
       .then((d) => alive && setData(d))
       .catch((e) => alive && setError(String(e.message || e)))
       .finally(() => alive && setLoading(false))

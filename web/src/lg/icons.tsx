@@ -19,6 +19,7 @@ export const IC: Record<string, string> = {
   ask: '<path d="M4 5.5h16v10H9l-4 3.5v-3.5H4z"/><path d="M8.5 10.5h7M8.5 7.5h4"/>',
   more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
   sched: '<rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9.5h18M8 3v3M16 3v3"/>',
+  link: '<path d="M9.5 14.5l5-5"/><path d="M12 6.5l1-1a4 4 0 0 1 5.7 5.7l-1 1"/><path d="M12 17.5l-1 1a4 4 0 0 1-5.7-5.7l1-1"/>',
 }
 
 export function Icon({ k, size = 17 }: { k: string; size?: number }) {

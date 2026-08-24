@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react'
 import { useApi } from '../lib/useApi'
 import { Glass, Chart, Delta } from './ui'
-import { barChart } from './charts'
-import { tengeShort } from '../lib/format'
+import { barChart, bar } from './charts'
+import { tenge } from '../lib/format'
 
 /* ─────────────────────────────────────────────────────────────
    Отчёт недели — БРИФИНГ, читается сверху вниз (как «Аналитика»).
@@ -32,7 +32,6 @@ type Ins = {
   plan: { action: string; effect: string; priority: number }[]
 }
 
-const GRAD = 'linear-gradient(90deg,#4f6ef7 0%,#7b5cff 42%,#ff9d4d 78%,#ffd24d 100%)'
 const ru1 = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')}%`
 
 /* строка приоритета — ранг, заголовок, тег, деньги справа, деталь */
@@ -110,7 +109,7 @@ export default function Report() {
   prios.push({
     rank: 0, c: 'var(--red)', tag: 'риск', grew: false,
     title: 'Утечка недели',
-    money: `~${tengeShort(leakWeek)}`,
+    money: `~${tenge(leakWeek)}`,
     detail: `Основной источник — ${topLeak.toLowerCase()}. Оценка потерь по чекам за 7 дней.`,
   })
 
@@ -123,7 +122,7 @@ export default function Report() {
       c: over ? (big ? 'var(--red)' : 'var(--amb)') : 'var(--grn)',
       tag: over ? (big ? 'риск' : 'внимание') : 'растёт', grew: !over,
       title: 'Фудкост',
-      money: over ? `~${tengeShort(fcGap)}/нед` : 'в норме',
+      money: over ? `~${tenge(fcGap)}/нед` : 'в норме',
       detail: `Факт ${ru1(f!.fact_pct!).replace('+', '')} при норме ${f!.norm_pct}%. ${over ? `Переплата съедает маржу — ${ru1(f!.diff_pct!)} к обороту.` : 'Себестоимость держится в пределах нормы.'}`,
     })
   }
@@ -133,7 +132,7 @@ export default function Report() {
     prios.push({
       rank: 2, c: 'var(--grn)', tag: 'растёт', grew: true,
       title: `Что выиграло — ${topCh.name}`,
-      money: tengeShort(topCh.revenue),
+      money: tenge(topCh.revenue),
       detail: `Лучший канал недели · ${topShare.toFixed(0)}% выручки.${topDish ? ` Топ-блюдо — ${topDish.name} (${topDish.count} шт).` : ''}`,
     })
   }
@@ -143,7 +142,7 @@ export default function Report() {
     rank: chkUp ? 2 : 1, c: chkUp ? 'var(--grn)' : 'var(--red)',
     tag: chkUp ? 'растёт' : 'внимание', grew: chkUp,
     title: 'Средний чек и гости',
-    money: tengeShort(d.avg_check),
+    money: tenge(d.avg_check),
     detail: `Чек ${ru1(d.avg_check_change)}, гостей ${d.guests} (${ru1(d.guests_change)}) — ${drive}.`,
   })
 
@@ -163,6 +162,15 @@ export default function Report() {
 
   const ranked = [...prios].sort((a, b) => a.rank - b.rank)
 
+  // изменения за неделю — что улучшилось / просело
+  const wm: { name: string; v: number | null; good: boolean; disp: string }[] = [
+    { name: 'Выручка', v: d.revenue_change, good: d.revenue_change >= 0, disp: `${Math.abs(d.revenue_change).toFixed(1)}%` },
+    { name: 'Средний чек', v: d.avg_check_change, good: d.avg_check_change >= 0, disp: `${Math.abs(d.avg_check_change).toFixed(1)}%` },
+    { name: 'Гости', v: d.guests_change, good: d.guests_change >= 0, disp: `${Math.abs(d.guests_change).toFixed(1)}%` },
+  ]
+  if (f && f.diff_pct != null) wm.push({ name: 'Фудкост', v: -f.diff_pct, good: f.diff_pct <= 0, disp: `${Math.abs(f.diff_pct).toFixed(1)} п.п.` })
+  if (signal && signal.delta != null && signal.delta !== 0) wm.push({ name: signal.label, v: signal.delta, good: signal.delta >= 0, disp: `${Math.abs(signal.delta).toFixed(1)}` })
+
   return (
     <>
       {/* ── 1 · Итог недели — вердикт + выручка + график (одна поверхность) ── */}
@@ -174,15 +182,13 @@ export default function Report() {
           </span>
           <span className="hint">iiko · сверено по чекам</span>
         </div>
-        <p className="display tnum" style={{ margin: '16px 0 0', fontSize: 24, lineHeight: 1.45, letterSpacing: '-.014em', color: 'var(--hi)', maxWidth: '60ch' }}>
-          Неделя <b style={{ color: lightC }}>{up ? '🟢' : '🔴'} {ru1(wow)}</b> к прошлой (<b style={{ color: 'var(--hi)' }}>{tengeShort(weekRev)}</b>).{' '}
-          Утекло <b style={{ color: '#ff8f6b' }}>~{tengeShort(leakWeek)}</b>.{' '}
-          {topCh && <>Тянет <b style={{ color: 'var(--grn)' }}>{topCh.name}</b>.</>}
-        </p>
+        <div style={{ margin: '14px 0 0', fontSize: 15, color: 'var(--lo)', lineHeight: 1.5 }}>
+          К прошлой неделе <b className="tnum" style={{ color: up ? 'var(--grn)' : 'var(--red)' }}>{ru1(wow)}</b>. Утекло <b className="tnum" style={{ color: 'var(--red)' }}>~{tenge(leakWeek)}</b> — разбор в приоритетах ниже.
+        </div>
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 32, marginTop: 26, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 200 }}>
             <div style={{ fontSize: 11, letterSpacing: '.09em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 650 }}>Выручка недели</div>
-            <div className="tnum" style={{ fontSize: 48, fontWeight: 720, letterSpacing: '-.035em', lineHeight: 1, marginTop: 8, color: 'var(--hi)' }}>{tengeShort(weekRev)}</div>
+            <div className="tnum" style={{ fontSize: 48, fontWeight: 720, letterSpacing: '-.035em', lineHeight: 1, marginTop: 8, color: 'var(--hi)' }}>{tenge(weekRev)}</div>
             <div style={{ display: 'flex', alignItems: 'baseline', gap: 16, marginTop: 12 }}>
               <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 6 }}>
                 <Delta v={wow} /><span style={{ fontSize: 11.5, color: 'var(--mute)' }}>к прошлой</span>
@@ -194,10 +200,9 @@ export default function Report() {
           </div>
           <div style={{ flex: 1, minWidth: 280 }}>
             <div style={{ fontSize: 11, letterSpacing: '.09em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 650, textAlign: 'right' }}>млн ₸ · пик выделен</div>
-            <Chart html={barChart(bars, peakIdx, up ? 'var(--grn)' : 'var(--red)', ' млн')} style={{ marginTop: 6 }} />
+            <Chart html={barChart(bars, peakIdx, bar(0), ' млн')} style={{ marginTop: 6 }} />
           </div>
         </div>
-        <div style={{ height: 8, borderRadius: 6, marginTop: 22, background: GRAD, opacity: 0.92 }} />
       </Glass>
 
       {/* ── 2 · Что важнее — приоритеты (ранжированный список, не карточки) ── */}
@@ -220,9 +225,39 @@ export default function Report() {
         </div>
       </Glass>
 
-      {/* ── 3 · План на неделю ── */}
+      {/* ── Что улучшилось за неделю ── */}
       <Glass span={12}>
-        <div className="eyebrow"><span>План на неделю</span><span className="hint">по приоритету · с эффектом в ₸</span></div>
+        <div className="eyebrow"><span>Что улучшилось за неделю</span><span className="hint">неделя к неделе</span></div>
+        {wm.every((m) => m.v == null || m.v === 0) ? (
+          <div style={{ marginTop: 14, fontSize: 13.5, color: 'var(--mute)', lineHeight: 1.5 }}>
+            Пока не с чем сравнить — динамика неделя-к-неделе появится, когда накопятся данные за две недели работы.
+          </div>
+        ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(148px,1fr))', gap: 12, marginTop: 14 }}>
+          {wm.filter((m) => m.v != null && m.v !== 0).map((m) => {
+            const col = m.v == null || m.v === 0 ? 'var(--mute)' : m.good ? 'var(--grn)' : 'var(--red)'
+            return (
+              <div key={m.name} style={{ padding: 14, borderRadius: 14, background: 'var(--glass-2)', border: `1px solid ${m.v != null && !m.good ? 'var(--red)' : 'var(--hair)'}` }}>
+                <div style={{ fontSize: 12, color: 'var(--mute)' }}>{m.name}</div>
+                <div className="tnum" style={{ fontSize: 22, fontWeight: 680, color: col, marginTop: 6 }}>
+                  {m.v == null ? 'нет данных' : `${m.v > 0 ? '▲ ' : m.v < 0 ? '▼ ' : ''}${m.disp}`}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+        )}
+      </Glass>
+
+      {/* ── План: как идём ── */}
+      <Glass span={12}>
+        <div className="eyebrow"><span>Как идём по плану</span><span className="hint">по приоритету · эффект в ₸</span></div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 12 }}>
+          <div style={{ flex: 1, height: 8, borderRadius: 5, background: 'var(--glass-2)', border: '1px solid var(--hair)', overflow: 'hidden' }}>
+            <div style={{ width: '0%', height: '100%', background: 'var(--grn)' }} />
+          </div>
+          <span style={{ fontSize: 12, color: 'var(--mute)', whiteSpace: 'nowrap' }}>возвращено 0% · {plan.length} задач в работе</span>
+        </div>
         {plan.length ? (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 4 }}>
             {plan.map((p, i) => (

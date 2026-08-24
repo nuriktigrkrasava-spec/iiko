@@ -17,6 +17,22 @@ export function Delta({ v, invert = false, size = 13 }: { v?: number | null; inv
   )
 }
 
+/* Trend — когда процент САМ является значением карточки, а не припиской к нему.
+   Delta рядом с тем же числом даёт «+49,3% ▲ 49,3%» — число дважды. Здесь оно одно:
+   направление несут цвет и стрелка, размер шрифта наследуется от карточки. */
+export function Trend({ v, invert = false }: { v?: number | null; invert?: boolean }) {
+  if (v == null) return null
+  const good = invert ? v < 0 : v > 0
+  const color = v === 0 ? 'var(--mute)' : good ? 'var(--grn)' : 'var(--red)'
+  const a = v === 0 ? '' : v > 0 ? '▲' : '▼'
+  return (
+    <span className="tnum" style={{ color }}>
+      {a && <span style={{ fontSize: '.62em', verticalAlign: 'middle', marginRight: '.18em' }}>{a}</span>}
+      {Math.abs(v).toFixed(1).replace('.', ',')}%
+    </span>
+  )
+}
+
 /* ── Пружины iOS ── */
 export const spring = { type: 'spring', stiffness: 260, damping: 26 } as const
 export const container = { hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.04 } } }
@@ -79,18 +95,33 @@ export function Light({ tone, k, v }: { tone: 'green' | 'amber' | 'red'; k: stri
   )
 }
 
-/* ── Буллет «факт vs цель» ── */
+/* ── Стеклянная заливка бара (градиент + свечение + фаска) — единый вид ── */
+export const gfill = (color: string): React.CSSProperties => ({
+  background: `linear-gradient(180deg, color-mix(in srgb, ${color} 76%, #fff), ${color})`,
+  boxShadow: `0 0 10px color-mix(in srgb, ${color} 42%, transparent), inset 0 1px 0 rgba(255,255,255,.5), inset 0 -2px 4px rgba(0,0,0,.16)`,
+})
+
+/* ── Переиспользуемый глас-бар (трек + анимированная стеклянная заливка) ── */
+export function GBar({ pct, color = 'var(--acc)', h = 10, delay = 0 }: { pct: number; color?: string; h?: number; delay?: number }) {
+  const w = Math.min(100, Math.max(0, pct))
+  return (
+    <div style={{ position: 'relative', height: h, borderRadius: h / 2 + 2, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
+      <motion.div initial={{ width: 0 }} animate={{ width: `calc(${w}% - 4px)` }} transition={{ duration: 0.7, delay }}
+        style={{ position: 'absolute', top: 2, bottom: 2, left: 2, borderRadius: Math.max(3, (h - 4) / 2), ...gfill(color) }} />
+    </div>
+  )
+}
+
+/* ── Буллет «факт vs цель» (стеклянный) ── */
 export function Bullet({ value, target, max, tone = 'acc' }: { value: number; target?: number; max: number; tone?: 'acc' | 'warn' | 'bad' }) {
   const pct = Math.min(100, (value / max) * 100)
-  const bg = tone === 'bad' ? 'linear-gradient(90deg,var(--red),#ff8a7d)'
-    : tone === 'warn' ? 'linear-gradient(90deg,var(--amb),#ffbf5a)'
-    : 'linear-gradient(90deg,var(--acc),var(--acc-2))'
+  const col = tone === 'bad' ? 'var(--red)' : tone === 'warn' ? 'var(--amb)' : 'var(--acc)'
   return (
-    <div style={{ position: 'relative', height: 9, borderRadius: 6, background: 'var(--glass-2)', border: '1px solid var(--hair)', overflow: 'visible' }}>
-      <motion.div initial={{ width: 0 }} animate={{ width: `${pct}%` }} transition={{ ...spring, delay: 0.15 }}
-        style={{ height: '100%', borderRadius: 6, background: bg }} />
+    <div style={{ position: 'relative', height: 10, borderRadius: 7, background: 'var(--glass-2)', border: '1px solid var(--hair)', overflow: 'visible' }}>
+      <motion.div initial={{ width: 0 }} animate={{ width: `calc(${pct}% - 4px)` }} transition={{ ...spring, delay: 0.15 }}
+        style={{ position: 'absolute', top: 2, bottom: 2, left: 2, borderRadius: 5, ...gfill(col) }} />
       {target != null && (
-        <div style={{ position: 'absolute', top: -3, bottom: -3, left: `${(target / max) * 100}%`, width: 2, background: 'var(--hi)', borderRadius: 2 }} />
+        <div style={{ position: 'absolute', top: -3, bottom: -3, left: `${(target / max) * 100}%`, width: 2, background: 'var(--hi)', borderRadius: 2, zIndex: 2 }} />
       )}
     </div>
   )
@@ -116,4 +147,30 @@ export function Insight({ tag, title, money, tone, detail }: { tag: string; titl
 /* ── Табличные строки ── */
 export function Row({ children }: { children: ReactNode }) {
   return <tr style={{ borderBottom: '1px solid var(--hair-2)' }}>{children}</tr>
+}
+
+/* ── План-фоллбэк ──
+   Показываем ТОЛЬКО когда владелец реально не заполнил источник в iiko
+   (has_recipes/has_socials/… = false). Не «значение = 0», не демо:
+   пусто при has_*=true — это баг, его чиним, а не маскируем планом.
+   reason — почему данных нет; action — что владельцу сделать (шаг плана). */
+export function PlanFallback({ title, reason, action }: { title?: string; reason: string; action: string }) {
+  return (
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 8,
+      padding: '16px 18px', borderRadius: 14,
+      border: '1px solid color-mix(in srgb, var(--amb) 30%, transparent)',
+      background: 'color-mix(in srgb, var(--amb) 7%, transparent)',
+    }}>
+      <span style={{
+        alignSelf: 'flex-start', fontSize: 10, fontWeight: 700, letterSpacing: '.11em',
+        textTransform: 'uppercase', color: 'var(--amb)',
+        padding: '3px 8px', borderRadius: 999,
+        background: 'color-mix(in srgb, var(--amb) 15%, transparent)',
+      }}>План</span>
+      {title && <div style={{ fontSize: 14, fontWeight: 650, color: 'var(--hi)' }}>{title}</div>}
+      <div style={{ fontSize: 12.5, color: 'var(--lo)', lineHeight: 1.45 }}>{reason}</div>
+      <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--hi)', lineHeight: 1.45 }}>→ {action}</div>
+    </div>
+  )
 }

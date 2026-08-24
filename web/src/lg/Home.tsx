@@ -3,7 +3,7 @@ import { motion } from 'framer-motion'
 import { Glass, Delta } from './ui'
 import { useApi } from '../lib/useApi'
 import { isDemoData } from '../lib/api'
-import { tengeShort } from '../lib/format'
+import { tenge } from '../lib/format'
 
 /* ───────────────────────────────────────────────────────────────
    Главная — «двойник ресторана».
@@ -160,24 +160,33 @@ export default function Home() {
   // единый масштаб выбранной секции (у её столов sw/sh одинаковы)
   const scaled = secTables.find((t) => t.x != null && t.y != null)
   const secW = scaled?.sw || 810, secH = scaled?.sh || 550
-  let gridN = 0 // индекс грид-фоллбэка — только для столов БЕЗ координат внутри секции
-  const realTables: Table[] = secTables.map((t, i) => {
-    const has = t.x != null && t.y != null
-    const gi = has ? 0 : gridN++
-    return {
-      id: String(t.number ?? i + 1), zone: 'hall' as Zone,
-      x: has ? (t.x! / secW) * 100 : 6 + (gi % 6) * 15,
-      y: has ? (t.y! / secH) * 100 : 86,
-      w: has && t.w ? Math.max(6, (t.w / secW) * 100) : 10,
-      h: has && t.h ? Math.max(6, (t.h / secH) * 100) : 11,
-      seats: t.seats || 2,
-      st: (t.busy ? 'occ' : (hasRes && t.reserved ? 'res' : 'free')) as St,
-      guests: t.guests,
-    }
-  })
+  // Столы делятся на два разных случая, и мешать их на одном полу нельзя:
+  // с координатами — настоящая расстановка из iiko; без координат — стол заведён,
+  // но на схему не поставлен. Раньше вторые сваливались в один ряд поверх плана
+  // и наезжали друг на друга — отсюда ощущение, что зал «плывёт».
+  const placed = secTables.filter((t) => t.x != null && t.y != null)
+  const unplaced = secTables.filter((t) => t.x == null || t.y == null)
+  const stOf = (t: HallTable): St => (t.busy ? 'occ' : (hasRes && t.reserved ? 'res' : 'free'))
+  const realTables: Table[] = placed.map((t, i) => ({
+    id: String(t.number ?? i + 1), zone: 'hall' as Zone,
+    x: (t.x! / secW) * 100,
+    y: (t.y! / secH) * 100,
+    w: t.w ? (t.w / secW) * 100 : 9,
+    h: t.h ? (t.h / secH) * 100 : 9,
+    seats: t.seats || 2,
+    st: stOf(t),
+    guests: t.guests,
+  }))
+  // список «не на схеме» — отдельным аккуратным рядом под планом
+  const offPlan = unplaced.map((t, i) => ({
+    id: String(t.number ?? i + 1), seats: t.seats || 0, st: stOf(t), guests: t.guests,
+  }))
 
   const shown = demoMode ? TABLES.filter((t) => t.zone === zone) : realTables
   const occ = shown.filter((t) => t.st === 'occ')
+  // итоги по всей секции (схема + столы вне схемы)
+  const tablesTotal = demoMode ? shown.length : secTables.length
+  const occTotal = demoMode ? occ.length : secTables.filter((t) => t.busy).length
   const secGuests = occ.reduce((s, t) => s + (t.guests || 0), 0)
   const guestsNow = demoMode ? secGuests : (real ? (H!.guests || 0) : 0)
   // hall-KPI: демо → демо-числа; LIVE → реальные; загрузка → «—» (не демо!)
@@ -191,7 +200,9 @@ export default function Home() {
     { k: 'Гости сейчас', v: nn(guestsV), d: demoMode ? 12 : undefined },
     { k: 'Открытые заказы', v: nn(ordersV), d: demoMode ? 5 : undefined },
     { k: 'Загрузка зала', v: loadV == null ? '—' : `${loadV}%`, d: demoMode ? 8 : undefined },
-    { k: 'Выручка сегодня', v: dash.data ? tengeShort(dash.data.revenue_today) : '—', d: dash.data?.avg_check_change },
+    // без дельты: рядом с выручкой стоял avg_check_change, который бэк отдаёт
+    // захардкоженным нулём — вечное «0,0%» ни о чём не говорило
+    { k: 'Выручка сегодня', v: dash.data ? tenge(dash.data.revenue_today) : '—' },
     { k: 'Оборот стола', v: demoMode ? '1 ч 18 м' : '—' },
     // «Лист ожидания» убран. «Бронь на вечер» — только если у филиала подключён модуль броней.
     ...(demoMode ? [{ k: 'Бронь на вечер', v: String(resNow) }] : hasRes ? [{ k: 'Бронь на вечер', v: String(H!.reserved ?? 0) }] : []),
@@ -220,16 +231,33 @@ export default function Home() {
 
   return (
     <>
-      {/* KPI-бейджи (Truck&Co) */}
-      {kpi.map((m) => (
-        <Glass key={m.k} span={3} tap>
-          <div style={{ fontSize: 10, letterSpacing: '.11em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 650 }}>{m.k}</div>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 9 }}>
-            <span className="tnum" style={{ fontSize: 30, fontWeight: 700, letterSpacing: '-.03em', color: 'var(--hi)' }}>{m.v}</span>
-            <Delta v={m.d} invert={m.invert} size={12} />
-          </div>
-        </Glass>
-      ))}
+      {/* Заказы по типам — наверху: это цифры дня, ради которых открывают экран.
+          Плитки «Гости сейчас / Открытые заказы / Загрузка зала» ушли вниз —
+          они живут только в час-пик, а в остальное время это ряд нулей и прочерков. */}
+      <Glass span={12}>
+        <div className="eyebrow"><span>Заказы по типам · сегодня</span><span className="hint">Зал · Доставка · агрегаторы</span></div>
+        <div style={{ display: 'flex', gap: 12, marginTop: 14, overflowX: 'auto', paddingBottom: 4 }}>
+          {chList.map((ch) => (
+            <div key={ch.name} style={{
+              flex: '1 0 160px', minWidth: 160, borderRadius: 16, padding: '14px 16px',
+              border: '1px solid var(--hair)', background: 'var(--glass-2)',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 9, height: 9, borderRadius: 3, background: ch.c, flex: 'none' }} />
+                <span style={{ fontSize: 12.5, color: 'var(--lo)', fontWeight: 600 }}>{ch.name}</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, marginTop: 10 }}>
+                <span className="tnum" style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--hi)' }}>{ch.n}</span>
+                <span style={{ fontSize: 11.5, color: 'var(--mute)' }}>заказов</span>
+                {ch.d != null && <Delta v={ch.d} size={11} />}
+              </div>
+              {ch.rev != null && (
+                <div className="tnum" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--hi)', marginTop: 6 }}>{tenge(ch.rev)}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      </Glass>
 
       {/* ГЕРОЙ — наклонный 3D-план зала */}
       <Glass span={8} style={{ overflow: 'hidden' }}>
@@ -266,17 +294,49 @@ export default function Home() {
           </div>
         ) : (
           <>
-            <div style={{ perspective: 1500, marginTop: 18 }}>
-              <div style={{
-                position: 'relative', width: '100%', aspectRatio: real ? `${secW} / ${secH}` : '16 / 10',
-                transform: 'rotateX(34deg)', transformStyle: 'preserve-3d', transformOrigin: 'center 62%',
-              }}>
-                {/* пол — адаптивный по теме (класс .iso-floor: свет/графит) */}
-                <div className="iso-floor" style={{ position: 'absolute', inset: 0 }} />
-                {shown.map((t) => <TableTop key={t.id} t={t} />)}
-                {shown.map((t) => <Pin key={`p-${t.id}`} t={t} />)}
+            {/* Пол рисуем, только если в секции есть расставленные столы. Схемы нет —
+                рисовать пустой зал нечестно: показываем столы списком-сеткой. */}
+            {shown.length > 0 && (
+              <div style={{ perspective: 1500, marginTop: 18 }}>
+                <div style={{
+                  position: 'relative', width: '100%', aspectRatio: real ? `${secW} / ${secH}` : '16 / 10',
+                  transform: 'rotateX(34deg)', transformStyle: 'preserve-3d', transformOrigin: 'center 62%',
+                }}>
+                  {/* пол — адаптивный по теме (класс .iso-floor: свет/графит) */}
+                  <div className="iso-floor" style={{ position: 'absolute', inset: 0 }} />
+                  {shown.map((t) => <TableTop key={t.id} t={t} />)}
+                  {shown.map((t) => <Pin key={`p-${t.id}`} t={t} />)}
+                </div>
               </div>
-            </div>
+            )}
+
+            {real && offPlan.length > 0 && (
+              <div style={{ marginTop: shown.length ? 22 : 16 }}>
+                <div style={{ fontSize: 11, color: 'var(--mute)', marginBottom: 9 }}>
+                  {shown.length
+                    ? `Ещё ${offPlan.length} ${offPlan.length === 1 ? 'стол' : 'столов'} не расставлены на схеме зала в iiko`
+                    : 'Схема зала в iiko не нарисована — столы показаны списком'}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {offPlan.map((t) => {
+                    const c = t.st === 'occ' ? 'var(--grn)' : t.st === 'res' ? 'var(--amb)' : 'var(--mute)'
+                    return (
+                      <div key={t.id} style={{
+                        display: 'flex', alignItems: 'center', gap: 7, padding: '7px 11px', borderRadius: 12,
+                        border: '1px solid var(--hair)',
+                        background: t.st === 'occ' ? 'color-mix(in srgb,var(--grn) 12%,transparent)' : 'var(--glass-2)',
+                      }}>
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: c, flex: 'none' }} />
+                        <span className="tnum" style={{ fontSize: 12.5, fontWeight: 650, color: 'var(--hi)' }}>№{t.id}</span>
+                        <span style={{ fontSize: 11, color: 'var(--mute)' }}>
+                          {t.st === 'occ' ? `${t.guests || 0} гост.` : t.st === 'res' ? 'бронь' : `${t.seats || 0} мест`}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 16, fontSize: 11.5, color: 'var(--lo)' }}>
               {(real ? (['occ', ...(hasRes ? ['res'] : []), 'free'] as St[]) : (['occ', 'res', 'free', 'clean'] as St[])).map((s) => (
@@ -285,7 +345,9 @@ export default function Home() {
                   {STATE[s].label}
                 </span>
               ))}
-              <span style={{ marginLeft: 'auto', color: 'var(--mute)' }}>{occ.length}/{shown.length} занято · {guestsNow} гостей</span>
+              {/* считаем ВСЕ столы секции, а не только расставленные на схеме:
+                  иначе у филиала без схемы выходило «0/0 занято» при семи столах */}
+              <span style={{ marginLeft: 'auto', color: 'var(--mute)' }}>{occTotal}/{tablesTotal} занято · {guestsNow} гостей</span>
             </div>
           </>
         )}
@@ -311,31 +373,16 @@ export default function Home() {
         </div>
       </Glass>
 
-      {/* КАРУСЕЛЬ КАНАЛОВ (Truck&Co Freight Units) */}
-      <Glass span={12}>
-        <div className="eyebrow"><span>Заказы по типам · сегодня</span><span className="hint">Зал · Доставка · агрегаторы</span></div>
-        <div style={{ display: 'flex', gap: 12, marginTop: 14, overflowX: 'auto', paddingBottom: 4 }}>
-          {chList.map((ch) => (
-            <div key={ch.name} style={{
-              flex: '1 0 160px', minWidth: 160, borderRadius: 16, padding: '14px 16px',
-              border: '1px solid var(--hair)', background: 'var(--glass-2)',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ width: 9, height: 9, borderRadius: 3, background: ch.c, flex: 'none' }} />
-                <span style={{ fontSize: 12.5, color: 'var(--lo)', fontWeight: 600 }}>{ch.name}</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, marginTop: 10 }}>
-                <span className="tnum" style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--hi)' }}>{ch.n}</span>
-                <span style={{ fontSize: 11.5, color: 'var(--mute)' }}>заказов</span>
-                {ch.d != null && <Delta v={ch.d} size={11} />}
-              </div>
-              {ch.rev != null && (
-                <div className="tnum" style={{ fontSize: 12.5, color: 'var(--mute)', marginTop: 6 }}>{tengeShort(ch.rev)}</div>
-              )}
-            </div>
-          ))}
-        </div>
-      </Glass>
+      {/* Оперативные плитки зала — под основными цифрами дня */}
+      {kpi.map((m) => (
+        <Glass key={m.k} span={3} tap>
+          <div style={{ fontSize: 10, letterSpacing: '.11em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 650 }}>{m.k}</div>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginTop: 9 }}>
+            <span className="tnum" style={{ fontSize: 30, fontWeight: 700, letterSpacing: '-.03em', color: 'var(--hi)' }}>{m.v}</span>
+            <Delta v={m.d} invert={m.invert} size={12} />
+          </div>
+        </Glass>
+      ))}
     </>
   )
 }
