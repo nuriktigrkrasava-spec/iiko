@@ -688,6 +688,178 @@ def get_weekly_plans(org_id: str, ym: str) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+# ── Трекер задач из бота: кто отметил выполнение, кто нет ──
+# Таблицу заводит бот (deploy-cashshifts), сайт её только читает. CREATE тут
+# нужен, чтобы сайт не падал на чистой базе, где бот ещё ничего не создал.
+def _ensure_bot_tasks(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS bot_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        telegram_id INTEGER NOT NULL,
+        organization_id TEXT,
+        branch TEXT,
+        title TEXT NOT NULL,
+        detail TEXT,
+        money REAL,
+        created_at TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        answered_at TEXT,
+        answered_by TEXT
+    )""")
+
+
+def get_bot_tasks(days: int = 14) -> List[Dict[str, Any]]:
+    """Все задачи трекера за период — свежие сверху."""
+    conn = get_db()
+    _ensure_bot_tasks(conn)
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        "SELECT * FROM bot_tasks WHERE created_at >= ? ORDER BY created_at DESC",
+        (since,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── План ИИ-директора: задачи, которые он нашёл сам ──
+# Задачи считаются из живых данных при каждом открытии, поэтому «прогресс» без
+# хранилища не посчитать: неизвестно, каким показатель был, когда задачу завели.
+# Здесь держим момент появления задачи и её базовое значение — от него и меряем.
+def _ensure_director_tasks(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS director_tasks (
+        organization_id TEXT NOT NULL,
+        task_key TEXT NOT NULL,      -- fc | chk | rev | stock | wo | cn
+        metric TEXT,                 -- человекочитаемое имя показателя
+        baseline REAL,               -- значение в момент появления задачи
+        target REAL,                 -- к чему идём
+        money REAL,                  -- сколько на кону, ₸/мес
+        created_at TEXT,
+        status TEXT DEFAULT 'open',  -- open | done
+        done_at TEXT,
+        last_value REAL,             -- последнее увиденное значение
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, task_key)
+    )""")
+
+
+def upsert_director_task(org_id: str, key: str, metric: str, value: float,
+                         target: float, money: float) -> Dict[str, Any]:
+    """Заводит задачу или обновляет текущее значение. Возвращает строку задачи.
+
+    baseline пишется ОДИН раз — при первом появлении. Иначе прогресс всегда был бы
+    нулевым: показатель уехал бы вместе с точкой отсчёта.
+    """
+    conn = get_db()
+    _ensure_director_tasks(conn)
+    now = datetime.now().isoformat()
+    row = conn.execute(
+        "SELECT * FROM director_tasks WHERE organization_id = ? AND task_key = ?",
+        (org_id, key)).fetchone()
+    if row is None:
+        conn.execute(
+            """INSERT INTO director_tasks (organization_id, task_key, metric, baseline,
+                   target, money, created_at, status, last_value, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)""",
+            (org_id, key, metric, value, target, money, now, value, now))
+    else:
+        conn.execute(
+            """UPDATE director_tasks SET metric = ?, target = ?, money = ?,
+                   last_value = ?, updated_at = ?
+               WHERE organization_id = ? AND task_key = ?""",
+            (metric, target, money, value, now, org_id, key))
+    conn.commit()
+    out = conn.execute(
+        "SELECT * FROM director_tasks WHERE organization_id = ? AND task_key = ?",
+        (org_id, key)).fetchone()
+    conn.close()
+    return dict(out) if out else {}
+
+
+def close_director_task(org_id: str, key: str, value: float):
+    """Задача закрыта: показатель дошёл до цели."""
+    conn = get_db()
+    _ensure_director_tasks(conn)
+    now = datetime.now().isoformat()
+    conn.execute(
+        """UPDATE director_tasks SET status = 'done', done_at = ?, last_value = ?,
+               updated_at = ? WHERE organization_id = ? AND task_key = ? AND status != 'done'""",
+        (now, value, now, org_id, key))
+    conn.commit()
+    conn.close()
+
+
+def get_director_tasks(org_id: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_director_tasks(conn)
+    rows = conn.execute(
+        "SELECT * FROM director_tasks WHERE organization_id = ? ORDER BY money DESC",
+        (org_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Снимки показателей филиала (для похвалы ИИ-директора) ──
+# Чтобы сказать «фудкост упал с 36% до 32%», нужно чем-то помнить вчерашние 36%.
+# Держим последний снимок на (владелец, филиал): сравниваем текущие сигналы с ним.
+# Снимок пишется не чаще раза в SNAPSHOT_MIN_HOURS — иначе за день накопится
+# десяток одинаковых, и «улучшение с прошлого раза» схлопнется в шум.
+SNAPSHOT_MIN_HOURS = 20
+
+
+def _ensure_signal_snapshots(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS signal_snapshots (
+        telegram_id INTEGER NOT NULL,
+        branch TEXT NOT NULL,        -- имя филиала (ключ сигналов ассистента)
+        taken_at TEXT NOT NULL,      -- ISO-время снимка
+        payload TEXT NOT NULL,       -- JSON показателей филиала
+        PRIMARY KEY (telegram_id, branch)
+    )""")
+
+
+def get_signal_snapshot(telegram_id: int, branch: str) -> Optional[Dict[str, Any]]:
+    """Последний снимок филиала: {taken_at, payload} или None."""
+    conn = get_db()
+    _ensure_signal_snapshots(conn)
+    row = conn.execute(
+        "SELECT taken_at, payload FROM signal_snapshots WHERE telegram_id = ? AND branch = ?",
+        (int(telegram_id), branch)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        return {"taken_at": row["taken_at"], "payload": json.loads(row["payload"])}
+    except (ValueError, TypeError):
+        return None  # битый JSON — как будто снимка нет, похвалы просто не будет
+
+
+def save_signal_snapshot(telegram_id: int, branch: str, payload: Dict[str, Any]) -> bool:
+    """Пишет снимок, если прошлый старше SNAPSHOT_MIN_HOURS. True — записали."""
+    conn = get_db()
+    _ensure_signal_snapshots(conn)
+    row = conn.execute(
+        "SELECT taken_at FROM signal_snapshots WHERE telegram_id = ? AND branch = ?",
+        (int(telegram_id), branch)
+    ).fetchone()
+    if row:
+        try:
+            age = datetime.now() - datetime.fromisoformat(row["taken_at"])
+            if age.total_seconds() < SNAPSHOT_MIN_HOURS * 3600:
+                conn.close()
+                return False
+        except (ValueError, TypeError):
+            pass  # непарсимая дата — перезапишем свежей
+    conn.execute(
+        """INSERT INTO signal_snapshots (telegram_id, branch, taken_at, payload)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(telegram_id, branch)
+           DO UPDATE SET taken_at = excluded.taken_at, payload = excluded.payload""",
+        (int(telegram_id), branch, datetime.now().isoformat(),
+         json.dumps(payload, ensure_ascii=False))
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def save_bot_invoice(telegram_id: int, telegram_user: str, raw_text: str,
                      supplier: str, branch: str, items_json: str,
                      total_amount: float, date: str,
@@ -1265,3 +1437,367 @@ def get_invoice_match_memory(source_key: str) -> Dict[str, Dict[str, Any]]:
     return {r["name_norm"]: {"product_id": r["product_id"],
                             "product_name": r["product_name"],
                             "hits": r["hits"]} for r in rows}
+
+
+# ── Задачи филиалам и баллы («Гора») ──
+# Задачу ставит ТОЛЬКО владелец из своего кабинета: ИИ предлагает, владелец
+# подтверждает. Управляющий задачу себе не создаёт — только закрывает.
+# Баллы: быстро 10, средне 25, долго 50 за задачу; чек-лист +1 за сданный слот,
+# −1 за пропущенный (штрафные тянут филиал вниз по горе).
+TASK_POINTS = {"быстро": 10, "средне": 25, "долго": 50}
+
+
+def _ensure_mountain(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS branch_managers (
+        organization_id TEXT PRIMARY KEY,
+        telegram_id INTEGER,
+        name TEXT,
+        added_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS branch_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT NOT NULL,
+        branch TEXT,
+        task_key TEXT,              -- fc | cn | wo | stock | rev | chk
+        title TEXT NOT NULL,
+        detail TEXT,
+        money REAL,                 -- ₸ на кону
+        effort TEXT,                -- быстро | средне | долго
+        points INTEGER,
+        status TEXT DEFAULT 'open', -- open | done
+        created_at TEXT,
+        created_by INTEGER,         -- владелец, который поставил
+        done_at TEXT,
+        done_by INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_branch_tasks_org ON branch_tasks(organization_id, status);
+    """)
+
+
+def _manager_cols(conn) -> set:
+    """Таблицу заводил бот раньше нас: у неё составной ключ и колонка active.
+    Работаем по факту, а не по своему CREATE — иначе ON CONFLICT падает."""
+    return {r[1] for r in conn.execute("PRAGMA table_info(branch_managers)").fetchall()}
+
+
+def set_branch_manager(org_id: str, telegram_id: int, name: str = ""):
+    conn = get_db()
+    _ensure_mountain(conn)
+    cols = _manager_cols(conn)
+    if "active" in cols:
+        conn.execute("INSERT OR REPLACE INTO branch_managers "
+                     "(organization_id, telegram_id, name, added_at, active) VALUES (?,?,?,?,1)",
+                     (org_id, int(telegram_id), name or "", datetime.now().isoformat()))
+    else:
+        conn.execute("INSERT OR REPLACE INTO branch_managers "
+                     "(organization_id, telegram_id, name, added_at) VALUES (?,?,?,?)",
+                     (org_id, int(telegram_id), name or "", datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def get_branch_managers() -> List[Dict[str, Any]]:
+    """Только действующие: отключённых управляющих в горе быть не должно."""
+    conn = get_db()
+    _ensure_mountain(conn)
+    cols = _manager_cols(conn)
+    q = "SELECT organization_id, telegram_id, name FROM branch_managers"
+    if "active" in cols:
+        q += " WHERE COALESCE(active, 1) = 1"
+    rows = conn.execute(q).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_branch_task(org_id: str, branch: str, title: str, *, detail: str = "",
+                    money: float = 0, effort: str = "средне", task_key: str = "",
+                    created_by: int = 0) -> int:
+    conn = get_db()
+    _ensure_mountain(conn)
+    cur = conn.execute(
+        "INSERT INTO branch_tasks (organization_id, branch, task_key, title, detail, money, "
+        "effort, points, status, created_at, created_by) VALUES (?,?,?,?,?,?,?,?,'open',?,?)",
+        (org_id, branch or "", task_key or "", title, detail or "", float(money or 0),
+         effort, TASK_POINTS.get(effort, 25), datetime.now().isoformat(), int(created_by or 0)))
+    conn.commit()
+    tid = cur.lastrowid
+    conn.close()
+    return tid
+
+
+def close_branch_task(task_id: int, done_by: int = 0) -> bool:
+    conn = get_db()
+    _ensure_mountain(conn)
+    cur = conn.execute("UPDATE branch_tasks SET status='done', done_at=?, done_by=? "
+                       "WHERE id=? AND status='open'",
+                       (datetime.now().isoformat(), int(done_by or 0), int(task_id)))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def get_branch_tasks(org_ids: Optional[List[str]] = None,
+                     since: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_mountain(conn)
+    q = "SELECT * FROM branch_tasks WHERE 1=1"
+    args: List[Any] = []
+    if org_ids:
+        q += f" AND organization_id IN ({','.join('?' * len(org_ids))})"
+        args += list(org_ids)
+    if since:
+        q += " AND created_at >= ?"
+        args.append(since)
+    rows = conn.execute(q + " ORDER BY id DESC", args).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Сообщения владельца управляющим (уведомления на сайте) ──
+def _ensure_notices(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS branch_notices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT,        -- NULL/'' = всем филиалам
+        text TEXT NOT NULL,
+        created_at TEXT,
+        created_by INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS branch_notice_reads (
+        notice_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        read_at TEXT,
+        PRIMARY KEY (notice_id, telegram_id)
+    );
+    """)
+
+
+def add_branch_notice(text: str, created_by: int, org_id: str = "") -> int:
+    conn = get_db()
+    _ensure_notices(conn)
+    cur = conn.execute("INSERT INTO branch_notices (organization_id, text, created_at, created_by) "
+                       "VALUES (?,?,?,?)",
+                       (org_id or "", text, datetime.now().isoformat(), int(created_by or 0)))
+    conn.commit()
+    nid = cur.lastrowid
+    conn.close()
+    return nid
+
+
+def get_branch_notices(org_ids: Optional[List[str]] = None, reader: int = 0,
+                       limit: int = 20) -> List[Dict[str, Any]]:
+    """Сообщения филиалам + отметка, прочитал ли их этот человек."""
+    conn = get_db()
+    _ensure_notices(conn)
+    q = ("SELECT n.*, (SELECT 1 FROM branch_notice_reads r "
+         "            WHERE r.notice_id = n.id AND r.telegram_id = ?) AS is_read "
+         "FROM branch_notices n WHERE 1=1")
+    args: List[Any] = [int(reader or 0)]
+    if org_ids is not None:
+        # всем (пустой organization_id) плюс адресные для этих филиалов
+        q += f" AND (COALESCE(n.organization_id,'') = '' OR n.organization_id IN ({','.join('?' * len(org_ids))}))"
+        args += list(org_ids)
+    rows = conn.execute(q + " ORDER BY n.id DESC LIMIT ?", args + [int(limit)]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_notice_read(notice_id: int, telegram_id: int):
+    conn = get_db()
+    _ensure_notices(conn)
+    conn.execute("INSERT OR REPLACE INTO branch_notice_reads (notice_id, telegram_id, read_at) "
+                 "VALUES (?,?,?)", (int(notice_id), int(telegram_id), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def notice_read_stats(notice_id: int) -> int:
+    conn = get_db()
+    _ensure_notices(conn)
+    n = conn.execute("SELECT COUNT(*) FROM branch_notice_reads WHERE notice_id = ?",
+                     (int(notice_id),)).fetchone()[0]
+    conn.close()
+    return int(n)
+
+
+# ── Чек-листы, сданные с сайта ──
+# Фото кладём файлами, в базе только пути: блобы раздувают SQLite и ломают
+# бэкапы. Каталог — рядом с базой (на Render это /data, переживает редеплой).
+def _ensure_checklist(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS checklist_uploads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        slot TEXT NOT NULL,          -- 10:45 / 15:00 / 20:45 / 23:45
+        zone TEXT NOT NULL,          -- hall | kitchen | wc
+        photos TEXT,                 -- JSON со списком путей
+        note TEXT,
+        created_at TEXT,
+        created_by INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS ix_checklist_day ON checklist_uploads(organization_id, day);
+    """)
+
+
+def checklist_dir() -> str:
+    d = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)) or ".", "checklists")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def save_checklist_upload(org_id: str, day: str, slot: str, zone: str,
+                          photos: List[str], note: str = "", by: int = 0) -> int:
+    conn = get_db()
+    _ensure_checklist(conn)
+    cur = conn.execute(
+        "INSERT INTO checklist_uploads (organization_id, day, slot, zone, photos, note, "
+        "created_at, created_by) VALUES (?,?,?,?,?,?,?,?)",
+        (org_id, day, slot, zone, json.dumps(photos, ensure_ascii=False), note or "",
+         datetime.now().isoformat(), int(by or 0)))
+    conn.commit()
+    rid = cur.lastrowid
+    conn.close()
+    return rid
+
+
+def get_checklist_uploads(org_ids: List[str], day: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_checklist(conn)
+    if not org_ids:
+        conn.close()
+        return []
+    rows = conn.execute(
+        f"SELECT * FROM checklist_uploads WHERE day = ? AND organization_id IN "
+        f"({','.join('?' * len(org_ids))}) ORDER BY id DESC", [day] + list(org_ids)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["photos"] = json.loads(d.get("photos") or "[]")
+        except Exception:
+            d["photos"] = []
+        out.append(d)
+    return out
+
+
+# ── Вердикты по фото чек-листов (когда включён CHECKLIST_AI) ──
+def _ensure_checklist_ai(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS checklist_reviews (
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        slot TEXT NOT NULL,
+        ok INTEGER,
+        issues TEXT,
+        reason TEXT,             -- почему проверяли: выборка / опоздание / повтор
+        created_at TEXT,
+        PRIMARY KEY (organization_id, day, slot)
+    );
+    CREATE TABLE IF NOT EXISTS checklist_photo_cache (
+        photo_hash TEXT PRIMARY KEY,
+        verdict TEXT,
+        created_at TEXT
+    );
+    """)
+
+
+def save_checklist_review(org_id: str, day: str, slot: str, ok: bool,
+                          issues: List[Dict[str, Any]], reason: str = ""):
+    conn = get_db()
+    _ensure_checklist_ai(conn)
+    conn.execute("INSERT OR REPLACE INTO checklist_reviews "
+                 "(organization_id, day, slot, ok, issues, reason, created_at) VALUES (?,?,?,?,?,?,?)",
+                 (org_id, day, slot, 1 if ok else 0,
+                  json.dumps(issues or [], ensure_ascii=False), reason,
+                  datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def get_checklist_reviews(org_ids: List[str], day: str) -> List[Dict[str, Any]]:
+    if not org_ids:
+        return []
+    conn = get_db()
+    _ensure_checklist_ai(conn)
+    rows = conn.execute(
+        f"SELECT * FROM checklist_reviews WHERE day = ? AND organization_id IN "
+        f"({','.join('?' * len(org_ids))})", [day] + list(org_ids)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["issues"] = json.loads(d.get("issues") or "[]")
+        except Exception:
+            d["issues"] = []
+        out.append(d)
+    return out
+
+
+def photo_verdict_cache(hashes: List[str]) -> Dict[str, Any]:
+    """Кэш по хешу кадра: тот же снимок второй раз не оплачиваем."""
+    if not hashes:
+        return {}
+    conn = get_db()
+    _ensure_checklist_ai(conn)
+    rows = conn.execute(
+        f"SELECT photo_hash, verdict FROM checklist_photo_cache WHERE photo_hash IN "
+        f"({','.join('?' * len(hashes))})", list(hashes)).fetchall()
+    conn.close()
+    out = {}
+    for r in rows:
+        try:
+            out[r["photo_hash"]] = json.loads(r["verdict"] or "{}")
+        except Exception:
+            pass
+    return out
+
+
+def save_photo_verdict(photo_hash: str, verdict: Dict[str, Any]):
+    conn = get_db()
+    _ensure_checklist_ai(conn)
+    conn.execute("INSERT OR REPLACE INTO checklist_photo_cache (photo_hash, verdict, created_at) "
+                 "VALUES (?,?,?)", (photo_hash, json.dumps(verdict, ensure_ascii=False),
+                                    datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def checklist_progress(org_ids: List[str], day_from: str, day_to: str,
+                       slots_passed_today: int = 4, zones: int = 3,
+                       slots_per_day: int = 4) -> Dict[str, Dict[str, int]]:
+    """Сдачи чек-листов по нашим загрузкам (без бота и мини-аппа).
+
+    Ожидание считаем ЧЕСТНО, иначе филиал сразу минусовой:
+      • отсчёт идёт с ПЕРВОЙ сдачи филиала, а не с начала месяца — до этого
+        сайта у него не было и спрашивать не за что;
+      • у сегодняшнего дня учитываем только слоты, которые уже прошли;
+      • филиал, который ещё ни разу не сдавал, получает пустой результат:
+        критерий выпадает из оценки, а не обнуляет её.
+    """
+    if not org_ids:
+        return {}
+    conn = get_db()
+    _ensure_checklist(conn)
+    rows = conn.execute(
+        f"SELECT organization_id, MIN(day) AS first_day, "
+        f"       COUNT(DISTINCT day || '|' || slot || '|' || zone) AS done "
+        f"FROM checklist_uploads WHERE day BETWEEN ? AND ? AND organization_id IN "
+        f"({','.join('?' * len(org_ids))}) GROUP BY organization_id",
+        [day_from, day_to] + list(org_ids)).fetchall()
+    conn.close()
+
+    out: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        first = r["first_day"] or day_to
+        full_days = max(0, (datetime.fromisoformat(day_to) - datetime.fromisoformat(first)).days)
+        expect = full_days * slots_per_day * zones + max(0, slots_passed_today) * zones
+        done = int(r["done"] or 0)
+        expect = max(expect, done)          # сдал больше ожидаемого — не штрафуем
+        out[r["organization_id"]] = {"done": done, "expect": expect,
+                                     "missed": -max(0, expect - done)}
+    return out

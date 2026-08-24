@@ -1,9 +1,11 @@
 import type { ReactNode } from 'react'
-import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback } from './ui'
+import { Glass, Chart, Light, Bullet, Insight, Delta, Trend, fmt, PlanFallback } from './ui'
 import { areaChart, barChart, yoyChart, slope, donut, hbar, legend, color, bar } from './charts'
 import { useApi } from '../lib/useApi'
 import { periodLabel } from '../lib/api'
-import { tenge, tengeShort } from '../lib/format'
+import { tenge } from '../lib/format'
+import Kds from './Kds'
+import LateDeliveries from './LateDeliveries'
 
 /* Заглушка на всю сетку, пока грузятся живые данные */
 function Note({ children }: { children: ReactNode }) {
@@ -67,22 +69,25 @@ export function Dash() {
     <>
       <Glass span={8} spot warp>
         <div style={{ fontSize: 11, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка · {periodLabel()}</div>
-        <div className="tnum" style={{ fontSize: 40, fontWeight: 680, letterSpacing: '-.03em', marginTop: 8, display: 'flex', alignItems: 'baseline', gap: 14 }}>{tenge(data.revenue_today)} <Delta v={data.revenue_change} /></div>
+        <div className="tnum" style={{ fontSize: 40, fontWeight: 680, letterSpacing: '-.03em', marginTop: 8, display: 'flex', alignItems: 'baseline', gap: 14 }}>{tenge(data.revenue_today)}</div>
         <Chart html={barChart(bars, hiIdx, 'var(--acc)', ' млн')} />
         <div style={{ fontSize: 12, color: 'var(--mute)', marginTop: 4 }}>Средняя за 7 дней — {tenge(avg7)}</div>
       </Glass>
       <Glass span={4}>
         <Eyebrow t="Прогноз месяца" hint="при текущем темпе" />
-        <div className="tnum" style={{ fontSize: 28, fontWeight: 680, letterSpacing: '-.02em', margin: '14px 0 16px' }}>≈ {tengeShort(data.forecast)}</div>
+        <div className="tnum" style={{ fontSize: 28, fontWeight: 680, letterSpacing: '-.02em', margin: '14px 0 16px' }}>≈ {tenge(data.forecast)}</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Light tone={data.avg_check_change >= 0 ? 'green' : 'red'} k="Средний чек г/г" v={`${data.avg_check_change >= 0 ? '▲' : '▼'} ${Math.abs(data.avg_check_change).toFixed(1).replace('.', ',')}%`} />
-          <Light tone={data.guests_change >= 0 ? 'green' : 'amber'} k="Гостей г/г" v={`${data.guests_change >= 0 ? '▲' : '▼'} ${Math.abs(data.guests_change).toFixed(1).replace('.', ',')}%`} />
+          {/* «г/г» убрано: это были *_change из /api/dashboard, всегда 0, а подпись
+              обещала сравнение год к году. Настоящее г/г — в «Отчёте» (/api/comparison). */}
+          <Light tone="green" k="Средний чек" v={tenge(data.avg_check)} />
+          <Light tone="green" k="Гостей" v={String(data.guests)} />
           <Light tone="amber" k="Открытые заказы" v={String(data.open_orders)} />
         </div>
       </Glass>
-      <Tile label={`Выручка · ${periodLabel()}`} value={tengeShort(data.revenue_today)} delta={data.revenue_change} />
-      <Tile label="Средний чек" value={tenge(data.avg_check)} delta={data.avg_check_change} />
-      <Tile label="Гостей" value={String(data.guests)} delta={data.guests_change} />
+      {/* дельт нет: бэкенд отдаёт *_change нулями, показывать «0,0%» — врать */}
+      <Tile label={`Выручка · ${periodLabel()}`} value={tenge(data.revenue_today)} />
+      <Tile label="Средний чек" value={tenge(data.avg_check)} />
+      <Tile label="Гостей" value={String(data.guests)} />
       <Tile label="Открытые заказы" value={String(data.open_orders)} />
     </>
   )
@@ -169,9 +174,9 @@ export function Exp() {
   return (
     <>
       <Glass span={5} spot warp>
-        <Hero eyebrow={`Расходы · ${periodLabel()}`} value={<>{tengeShort(data.total)}</>} sub="сумма операций за период" />
+        <Hero eyebrow={`Расходы · ${periodLabel()}`} value={<>{tenge(data.total)}</>} sub="сумма операций за период" />
         <div style={{ marginTop: 20 }}>
-          <Stat k="Крупнейшая статья" v={<>{top?.name ?? '—'} · {tengeShort(top?.amount ?? 0)}</>} />
+          <Stat k="Крупнейшая статья" v={<>{top?.name ?? '—'} · {tenge(top?.amount ?? 0)}</>} />
           <Stat k="Статей расходов" v={cats.length} />
           <Stat k="Операций" v={data.operations.length} />
         </div>
@@ -179,8 +184,8 @@ export function Exp() {
       <Glass span={7}>
         <Eyebrow t="Структура расходов" hint="доля по статьям" />
         <div style={{ display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
-          <div style={{ flex: '0 0 200px' }}><Chart html={donut(dseg, { label: tengeShort(data.total), sub: 'всего' })} style={{ marginTop: 0 }} /></div>
-          <div style={{ flex: 1, minWidth: 180 }}><Chart html={legend(cats.map((c, i) => ({ l: c.name, v: tengeShort(c.amount), c: color(i) })))} style={{ marginTop: 0 }} /></div>
+          <div style={{ flex: '0 0 200px' }}><Chart html={donut(dseg, { label: tenge(data.total), sub: 'всего' })} style={{ marginTop: 0 }} /></div>
+          <div style={{ flex: 1, minWidth: 180 }}><Chart html={legend(cats.map((c, i) => ({ l: c.name, v: tenge(c.amount), c: color(i) })))} style={{ marginTop: 0 }} /></div>
         </div>
       </Glass>
       <Glass span={5}>
@@ -264,16 +269,16 @@ export function YoY() {
   return (
     <>
       <Glass span={5} spot warp>
-        <Hero eyebrow="Год к году" hint={`${data.cur_year} против ${data.prev_year}`} value={<>{growth >= 0 ? '+' : ''}{growth.toFixed(1).replace('.', ',')}% <Delta v={growth} /></>}
-          note={`${tengeShort(curSum)} против ${tengeShort(prevSum)} год назад · ${plus} из ${m.length} месяцев в плюсе.`} />
+        <Hero eyebrow="Год к году" hint={`${data.cur_year} против ${data.prev_year}`} value={<Trend v={growth} />}
+          note={`${tenge(curSum)} против ${tenge(prevSum)} год назад · ${plus} из ${m.length} месяцев в плюсе.`} />
       </Glass>
       <Glass span={7}>
         <Eyebrow t="Выручка по месяцам, млн ₸" hint={`бледное — ${data.prev_year} · акцент — ${data.cur_year}`} />
         <Chart html={yoyChart(m)} />
       </Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Рост выручки г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7, display: 'flex', gap: 8 }}>{growth.toFixed(1).replace('.', ',')}%<Delta v={growth} size={12} /></div></Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Заказов г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7, display: 'flex', gap: 8 }}>{ordGrowth.toFixed(1).replace('.', ',')}%<Delta v={ordGrowth} size={12} /></div></Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка {data.cur_year}</div><div className="tnum" style={{ fontSize: 22, fontWeight: 660, marginTop: 7 }}>{tengeShort(curSum)}</div></Glass>
+      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Рост выручки г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}><Trend v={growth} /></div></Glass>
+      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Заказов г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}><Trend v={ordGrowth} /></div></Glass>
+      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка {data.cur_year}</div><div className="tnum" style={{ fontSize: 22, fontWeight: 660, marginTop: 7 }}>{tenge(curSum)}</div></Glass>
       <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Месяцев в плюсе</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}>{plus} / {m.length}</div></Glass>
       <Glass span={12}>
         <Eyebrow t={`Помесячно · ${data.prev_year} → ${data.cur_year}`} hint="разрыв год к году" />
@@ -300,7 +305,10 @@ type HeatT = { cells: { d: number; h: number; orders: number }[]; max: number; p
 export function Staff() {
   const sh = useApi<ShiftsT>('shifts')
   const co = useApi<CourT>('couriers')
-  const hm = useApi<HeatT>('load-heatmap')
+  // Период задан явно: «час-пик по дням недели» имеет смысл только на длинном
+  // отрезке. Раньше карточка молча слушалась глобального фильтра, которого на
+  // этом экране нет — и при фильтре «Вчера» шесть дней из семи показывали «—».
+  const hm = useApi<HeatT>('load-heatmap', { period: 'month' })
   if (sh.loading || co.loading || hm.loading) return <Note>Собираю смены и загрузку…</Note>
   if (sh.error || !sh.data) return <Note>Не удалось загрузить: {sh.error}</Note>
   const staff = [...sh.data.staff].sort((a, b) => b.revenue - a.revenue)
@@ -317,11 +325,17 @@ export function Staff() {
   return (
     <>
       <Glass span={5} spot>
+        {/* у филиала может не быть ни одного официанта с выручкой (staff пустой) —
+            обращение к staff[length-1] роняло ВЕСЬ экран, а вместе с ним и
+            ИИ-ассистента: React снимает всё дерево при выбросе в рендере */}
         <Hero eyebrow="Смены и персонал" hint={periodLabel()} value={<span style={{ fontSize: 34 }}>{staff.length} официанта · {sum?.couriers ?? 0} курьера</span>}
-          note={hm.data ? `Пик — ${hm.data.peak.h}:00, ${hm.data.peak.orders} заказов. Разброс по официантам — ${Math.round((1 - staff[staff.length - 1].revenue / maxRev) * 100)}%.` : 'Смены за период.'} />
+          note={hm.data
+            ? `Пик — ${hm.data.peak.h}:00, ${hm.data.peak.orders} заказов.`
+              + (staff.length ? ` Разброс по официантам — ${Math.round((1 - staff[staff.length - 1].revenue / maxRev) * 100)}%.` : '')
+            : 'Смены за период.'} />
       </Glass>
       <Glass span={7}>
-        <Eyebrow t="Час-пик по дням недели" hint="пиковый час каждого дня · когда ставить больше людей" />
+        <Eyebrow t="Час-пик по дням недели" hint="за месяц · пиковый час каждого дня · когда ставить больше людей" />
         {hm.data?.cells?.length ? (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginTop: 12 }}>
             {perDay.map((x) => {
@@ -341,8 +355,15 @@ export function Staff() {
         <Eyebrow t="Официанты" hint="выручка · заказы · с начала смены" />
         <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
           <thead><tr><th style={th}>Имя</th><th style={{ ...th, width: '34%' }}>Выручка</th><th style={{ ...th, textAlign: 'right' }}>Заказов</th><th style={{ ...th, textAlign: 'right' }}>С</th></tr></thead>
+          {/* сумма цифрой: одна полоса без числа не даёт ответа «сколько», а
+              угадывать выручку по длине бара владелец не должен */}
           <tbody>{staff.map((x, i) => (
-            <tr key={i}><td style={td}>{x.name}</td><td style={td}><Bullet value={x.revenue} max={maxRev} /></td><td style={tdR}>{x.orders}</td><td style={tdR}>{x.since}</td></tr>
+            <tr key={i}><td style={td}>{x.name}</td>
+              <td style={td}>
+                <div className="tnum" style={{ fontSize: 13, fontWeight: 600, color: 'var(--hi)' }}>{tenge(x.revenue)}</div>
+                <div style={{ marginTop: 5 }}><Bullet value={x.revenue} max={maxRev} /></div>
+              </td>
+              <td style={tdR}>{x.orders}</td><td style={tdR}>{x.since}</td></tr>
           ))}</tbody>
         </table>
       </Glass>
@@ -362,6 +383,10 @@ export function Staff() {
           ))}</tbody>
         </table>
       </Glass>
+      {/* опоздания по доставкам выбранного филиала — из OLAP «Заказы-доставка» */}
+      <LateDeliveries />
+      {/* наш КДС: зоны кухни по часам + зоны доставки (один филиал — CHASPIK_ORG_ID) */}
+      <Kds />
     </>
   )
 }

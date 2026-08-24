@@ -34,7 +34,7 @@
   --r:26px; --blur:16px;
   /* Inter — как у Linear: одна семья, плотная разрядка, без заглавных */
   --font:"Inter",-apple-system,"SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;
-  --font-display:var(--font);
+  --font-display:"Unbounded",var(--font);
   --font-body:var(--font);
   --font-ui:var(--font);
   --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
@@ -43,11 +43,11 @@
 }
 /* ── ТЁМНАЯ = фото кухни под матовым стеклом (Linear-глубина + сочное стекло) ── */
 :root[data-theme="dark"]{
-  /* тёмно-синий navy фон + сине-фиолетовое свечение сверху (референс image 1) */
+  /* графитовый кинематографичный фон — глубокий, дорогой, не плоский #000 */
   --wp-scrim:
-    radial-gradient(80% 60% at 72% -14%, rgba(79,110,247,.26) 0%, transparent 58%),
-    radial-gradient(70% 50% at 40% -8%, rgba(123,92,255,.14) 0%, transparent 55%),
-    linear-gradient(180deg, #0d1424 0%, #0a0e1a 100%);
+    radial-gradient(90% 60% at 50% -10%, rgba(180,190,210,.06) 0%, transparent 60%),
+    radial-gradient(60% 50% at 84% 0%, rgba(120,132,156,.05) 0%, transparent 55%),
+    linear-gradient(180deg, #16181d 0%, #0d0e11 55%, #0a0b0d 100%);
   /* стекло сочнее: нейтральная фрост-плёнка + яркая кромка, кухня проступает сквозь блюр */
   --glass: linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.04));
   --glass-2: rgba(255,255,255,.055);
@@ -66,25 +66,37 @@
   --hi:#f2f4fa; --lo:#c6cee1; --mute:#98a3c0;
   /* акцент — яркий индиго-синий, белый текст на нём (референс image 1) */
   --acc:#4f6ef7; --acc-2:#6b86ff; --acc-glow:rgba(79,110,247,.42); --on-acc:#ffffff;
-  --deep:#101728;
+  --deep:#101216;
   --grn:#3ecf8e; --amb:#e0b341; --red:#e5484d;
-  /* поверхности бенто-карточек — тёмно-синий navy */
-  --card:#111726; --card-2:#141b2e;
+  /* поверхности бенто-карточек — графит */
+  --card:#15171c; --card-2:#1a1d23;
 }
 
 *{box-sizing:border-box}
 html,body,#root{height:100%; margin:0}
 body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hidden;
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility}
-:root[data-theme="dark"] body{background:#0a0e1a}
+:root[data-theme="dark"] body{background:#0a0b0d}
 
 /* витринная типографика — Inter, чуть плотнее и строже (без «изящности») */
-.display{font-family:var(--font-display); font-weight:650; letter-spacing:-.014em}
+.display{font-family:var(--font-display); font-weight:600; letter-spacing:-.03em}
+.lg-dock-label,.lg-tab span{font-family:var(--font-display); letter-spacing:.005em}
 .lg-root p{font-family:var(--font-body)}
 
 /* обои: чистый матовый фон (без фото — как Linear/Stripe) */
 .lg-wallpaper{position:fixed; inset:0; z-index:-2;
   background-image:var(--wp-scrim); background-size:cover; background-position:center; background-repeat:no-repeat}
+/* тёмная тема — графитовый кинематографичный фон с глубиной (свет сверху → тьма внизу) */
+:root[data-theme="dark"] .lg-wallpaper{background:
+  radial-gradient(80% 55% at 50% -8%, rgba(130,142,166,.10), transparent 60%),
+  radial-gradient(60% 50% at 85% 0%, rgba(96,108,132,.06), transparent 55%),
+  linear-gradient(180deg,#15171c 0%,#0d0e11 55%,#0a0b0d 100%); background-image:none}
+/* светлая тема — мягкий градиент, чтобы frosted-стекло реально читалось */
+:root[data-theme="light"] .lg-wallpaper{background:
+  radial-gradient(42% 46% at 16% 8%, rgba(120,150,255,.16), transparent 70%),
+  radial-gradient(40% 44% at 86% 18%, rgba(255,175,120,.13), transparent 70%),
+  radial-gradient(46% 50% at 60% 100%, rgba(150,200,255,.12), transparent 72%),
+  #eef1f8; background-image:none}
 
 /* тонкое зерно поверх фона — глубина «как у Linear», убирает плоскость */
 .lg-grain{position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.05;
@@ -93,12 +105,24 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 :root[data-theme="dark"] .lg-grain{opacity:.08; mix-blend-mode:overlay}
 
 /* Бенто-карточки (референс image 1): полупрозрачное стекло navy + блюр + тонкая светлая рамка */
-.glass{position:relative; border-radius:22px; background:rgba(28,37,62,.55);
-  -webkit-backdrop-filter:blur(22px) saturate(150%); backdrop-filter:blur(22px) saturate(150%);
-  border:1px solid rgba(255,255,255,.08);
-  box-shadow:0 1px 0 rgba(255,255,255,.06) inset, 0 24px 48px -30px rgba(0,0,0,.75); padding:22px 24px}
-:root[data-theme="light"] .glass{background:#fff; -webkit-backdrop-filter:none; backdrop-filter:none;
-  box-shadow:0 1px 2px rgba(20,30,60,.05), 0 10px 26px -18px rgba(20,30,60,.14)}
+/* Блюра на карточках НЕТ намеренно. За ними лежит статичный градиент-обои —
+   размывать его нечего, а backdrop-filter на каждой из 10–16 карточек заставлял
+   браузер перерисовывать фон под каждой при любом скролле. Плотность подняли,
+   чтобы вид остался тем же. Блюр оставлен только там, где под ним реально
+   проезжает контент: док, таб-бар, панель ассистента. */
+.glass{position:relative; border-radius:22px;
+  background:linear-gradient(158deg, rgba(52,55,64,.72), rgba(18,20,25,.62));
+  border:1px solid rgba(255,255,255,.12);
+  box-shadow:0 1px 0 rgba(255,255,255,.18) inset, 0 0 46px rgba(255,255,255,.02) inset, 0 26px 60px -30px rgba(0,0,0,.9); padding:22px 24px}
+/* верхняя кромка-блик — статичный «глянец» настоящего стекла */
+.glass::before{content:''; position:absolute; left:0; right:0; top:0; height:44%; border-radius:22px 22px 0 0;
+  background:linear-gradient(180deg, rgba(255,255,255,.11), transparent); pointer-events:none; z-index:0}
+.glass>*{position:relative; z-index:1}
+:root[data-theme="light"] .glass{
+  background:linear-gradient(158deg, rgba(255,255,255,.86), rgba(255,255,255,.74));
+  border:1px solid rgba(255,255,255,.80);
+  box-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 18px 44px -26px rgba(20,30,60,.24)}
+:root[data-theme="light"] .glass::before{background:linear-gradient(180deg, rgba(255,255,255,.5), transparent)}
 
 /* тонкий матовый скролл-бар вместо системного (та самая «полоса», что бесила) */
 *{scrollbar-width:thin; scrollbar-color:var(--hair) transparent}
@@ -216,10 +240,41 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 .lg-seg-pill{position:absolute; inset:0; border-radius:10px; background:var(--glass);
   box-shadow:0 1px 0 var(--glass-hi), 0 4px 12px -6px rgba(20,40,90,.3)}
 
+/* ── Бейдж источника данных (ДЕМО / LIVE) ── */
+.lg-data-badge{display:inline-flex; align-items:center; gap:6px; font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:6px 11px; border-radius:20px; white-space:nowrap}
+.lg-data-badge .dot{width:7px; height:7px; border-radius:50%; flex:none}
+.lg-data-badge.demo{color:var(--amb); background:color-mix(in srgb,var(--amb) 14%,transparent); border:1px solid color-mix(in srgb,var(--amb) 40%,transparent)}
+.lg-data-badge.demo .dot{background:var(--amb)}
+.lg-data-badge.live{color:var(--grn); background:color-mix(in srgb,var(--grn) 14%,transparent); border:1px solid color-mix(in srgb,var(--grn) 40%,transparent)}
+.lg-data-badge.live .dot{background:var(--grn); box-shadow:0 0 6px var(--grn)}
+/* маленькая метка «демо» на захардкоженных блоках */
+.lg-demo-chip{display:inline-block; font-size:9px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--amb);
+  background:color-mix(in srgb,var(--amb) 15%,transparent); border:1px solid color-mix(in srgb,var(--amb) 38%,transparent); border-radius:6px; padding:2px 6px; margin-left:8px; vertical-align:middle}
+
+/* ── Переключатель филиалов ── */
+.lg-branch{position:relative}
+.lg-branch-btn{display:inline-flex; align-items:center; gap:8px; font:inherit; font-size:13px; font-weight:600; color:var(--hi); cursor:pointer;
+  background:var(--glass-2); border:1px solid var(--hair); border-radius:12px; padding:8px 13px; transition:border-color .15s}
+.lg-branch-btn:hover{border-color:var(--acc)}
+.lg-branch-ic{color:var(--acc); font-size:12px}
+.lg-branch-caret{color:var(--mute); font-size:10px; margin-left:2px}
+.lg-branch-menu{position:absolute; top:calc(100% + 6px); right:0; z-index:35; min-width:210px; padding:6px;
+  background:var(--card); border:1px solid var(--hair); border-radius:14px; box-shadow:0 18px 40px -16px rgba(20,40,80,.5); display:flex; flex-direction:column; gap:2px}
+.lg-branch-head{font-size:10px; letter-spacing:.11em; text-transform:uppercase; color:var(--mute); font-weight:650; padding:6px 10px 4px}
+.lg-branch-item{display:flex; align-items:center; gap:9px; text-align:left; font:inherit; font-size:13px; color:var(--lo); background:none; border:0; border-radius:9px; padding:9px 11px; cursor:pointer; transition:.15s}
+.lg-branch-item:hover{background:var(--glass-2); color:var(--hi)}
+.lg-branch-item.on{color:var(--hi); font-weight:600; background:color-mix(in srgb, var(--acc) 12%, transparent)}
+.lg-branch-dot{width:7px; height:7px; border-radius:50%; background:var(--acc); flex:none; box-shadow:0 0 6px var(--acc)}
+.lg-branch-add{margin-top:4px; padding-top:11px; border-top:1px solid var(--hair-2); color:var(--acc); font-weight:600}
+
 /* ── Нижний плавающий док (десктоп) ── */
+/* мини-бар должен быть ЯВНО виден — свой фон по теме (перебивает прозрачный .glass по специфичности) */
 .lg-dock{position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:40;
-  display:flex; align-items:center; gap:3px; padding:7px 9px; border-radius:22px; max-width:calc(100vw - 32px);
-  background:var(--card); border:1px solid var(--hair); box-shadow:0 14px 40px -16px rgba(0,0,0,.5)}
+  display:flex; align-items:center; gap:3px; padding:7px 9px; border-radius:22px; max-width:calc(100vw - 32px)}
+:root[data-theme="light"] .lg-dock{background:rgba(255,255,255,.92);
+  border:1px solid rgba(20,26,44,.08); box-shadow:0 18px 48px -22px rgba(20,30,60,.34), 0 1px 0 rgba(255,255,255,.95) inset}
+:root[data-theme="dark"] .lg-dock{background:rgba(22,24,29,.86);
+  border:1px solid rgba(255,255,255,.10); box-shadow:0 20px 54px -20px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.14) inset}
 .lg-dock-brand{flex:none; font-weight:700; font-size:12px; color:var(--on-acc); border-radius:11px; padding:8px 9px;
   line-height:1; background:linear-gradient(135deg,var(--acc),var(--acc-2)); box-shadow:0 5px 16px -5px var(--acc-glow)}
 .lg-dock-sep{flex:none; width:1px; height:24px; background:var(--hair); margin:0 3px}
@@ -289,9 +344,81 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 .iso-close:hover{background:var(--hair)}
 .iso-sheet-body{flex:1; overflow-y:auto; padding:24px 26px 44px}
 
+/* ── Лоток фуры (Склад) — фон меняется по теме, кузову даёт контраст ── */
+.truck-tray{border:1px solid var(--hair); border-radius:20px;
+  background:radial-gradient(72% 92% at 50% 32%, #ffffff 0%, #e9edf5 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.9), inset 0 0 40px rgba(30,45,90,.04)}
+:root[data-theme="dark"] .truck-tray{
+  background:radial-gradient(72% 92% at 50% 32%, #262b35 0%, #12141a 100%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.06), inset 0 0 40px rgba(0,0,0,.3)}
+
+/* ── Пол зала (герой главной) — адаптивный по теме ── */
+.iso-floor{border:1px solid var(--hair); border-radius:24px;
+  background:
+    linear-gradient(rgba(60,80,140,.03) 1px, transparent 1px) 0 0 / 9% 9%,
+    linear-gradient(90deg, rgba(60,80,140,.03) 1px, transparent 1px) 0 0 / 9% 9%,
+    radial-gradient(62% 56% at 50% 38%, #ffffff 0%, #edf0f7 92%);
+  box-shadow:inset 0 2px 26px rgba(30,45,90,.05), 0 46px 66px -32px rgba(30,45,90,.5)}
+:root[data-theme="dark"] .iso-floor{
+  background:
+    linear-gradient(rgba(255,255,255,.045) 1px, transparent 1px) 0 0 / 9% 9%,
+    linear-gradient(90deg, rgba(255,255,255,.045) 1px, transparent 1px) 0 0 / 9% 9%,
+    radial-gradient(62% 56% at 50% 40%, #232733 0%, #12141a 92%);
+  box-shadow:inset 0 2px 26px rgba(0,0,0,.35), 0 46px 66px -32px rgba(0,0,0,.7)}
+
+/* ── Макеты iOS-виджетов в рамке iPhone ── */
+.phone{margin:18px auto 0; width:344px; max-width:100%; border-radius:46px; padding:12px;
+  background:linear-gradient(160deg,#2c2f37,#15171c); box-shadow:0 34px 74px -30px rgba(20,40,80,.55), inset 0 0 0 2px rgba(255,255,255,.06)}
+.phone-screen{border-radius:34px; padding:16px 12px 24px; overflow:hidden; position:relative;
+  background:radial-gradient(70% 46% at 28% 6%, rgba(120,150,255,.32), transparent 70%), radial-gradient(60% 40% at 92% 94%, rgba(255,170,120,.24), transparent 70%), linear-gradient(180deg,#eef1f8,#dde3ef)}
+.phone-time{text-align:center; font-size:15px; font-weight:700; color:#1a2030; margin:2px 0 14px; font-variant-numeric:tabular-nums}
+.phone-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px}
+.pw{background:#fff; border-radius:20px; padding:13px; display:flex; flex-direction:column; box-shadow:0 8px 20px -10px rgba(20,40,80,.35)}
+.pw.s{grid-column:span 1; aspect-ratio:1/1}
+.pw.m{grid-column:span 2}
+.pw.l{grid-column:span 2}
+.pw-top{display:flex; align-items:center; gap:6px; font-size:10.5px; color:#8a90a2; font-weight:600}
+.pw-ic{font-size:9px; font-weight:800; color:#fff; background:linear-gradient(135deg,var(--acc),var(--acc-2)); border-radius:6px; padding:2px 5px; line-height:1}
+.pw-big{font-size:22px; font-weight:780; letter-spacing:-.03em; color:#141a2c; font-variant-numeric:tabular-nums}
+.pw-sub{font-size:10.5px; color:#8a90a2; margin-top:2px}
+
+/* ── Агент-ассистент у мини-бара + мини-чат ── */
+/* плавающий персонаж-ассистент снизу справа */
+.lg-agent-fab{position:fixed; right:22px; bottom:18px; z-index:45; border:0; background:none; padding:0; cursor:pointer; transition:transform .18s var(--spring)}
+.lg-agent-fab:hover{transform:translateY(-4px)}
+.lg-agent-fab img{height:70px; width:auto; display:block; filter:drop-shadow(0 10px 12px rgba(20,40,80,.32))}
+.lg-agent-dot{position:absolute; top:6px; right:8px; width:12px; height:12px; border-radius:50%; background:var(--grn); border:2px solid var(--card); box-shadow:0 0 8px var(--grn)}
+/* тост-уведомление рядом с агентом */
+.lg-agent-toast{position:fixed; right:22px; bottom:98px; z-index:47; display:flex; align-items:center; gap:11px; max-width:300px; text-align:left; cursor:pointer; font:inherit;
+  background:var(--card); border:1px solid var(--hair); border-radius:16px; padding:10px 14px 10px 10px; box-shadow:0 18px 42px -16px rgba(20,40,80,.55)}
+.lg-agent-toast img{width:36px; height:36px; border-radius:50%; object-fit:cover; object-position:center top; flex:none; background:var(--glass-2)}
+.lg-agent-toast span{font-size:12px; line-height:1.42; color:var(--hi)}
+
+.lg-chat{position:fixed; right:24px; bottom:98px; z-index:46; width:342px; max-width:calc(100vw - 32px); max-height:70vh;
+  display:flex; flex-direction:column; padding:0; overflow:hidden}
+.lg-chat-head{display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--hair)}
+.lg-chat-head img{width:40px; height:40px; border-radius:50%; object-fit:cover; object-position:center top; background:var(--glass-2); flex:none}
+.lg-chat-x{margin-left:auto; flex:none; width:28px; height:28px; border-radius:50%; border:1px solid var(--hair); background:var(--glass-2); color:var(--lo); cursor:pointer; font-size:15px; line-height:1}
+.lg-chat-body{flex:1; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:9px}
+.lg-msg{max-width:85%; font-size:12.5px; line-height:1.5; padding:9px 12px; border-radius:14px}
+.lg-msg.a{align-self:flex-start; background:var(--glass-2); color:var(--hi); border:1px solid var(--hair); border-bottom-left-radius:5px}
+.lg-msg.u{align-self:flex-end; background:linear-gradient(135deg,var(--acc),var(--acc-2)); color:#fff; border-bottom-right-radius:5px}
+.lg-chat-chips{display:flex; gap:7px; flex-wrap:wrap; padding:0 14px 10px}
+.lg-chat-chips button{font:inherit; font-size:11.5px; color:var(--lo); background:var(--glass-2); border:1px solid var(--hair); border-radius:20px; padding:6px 12px; cursor:pointer; transition:.15s}
+.lg-chat-chips button:hover{color:var(--hi); border-color:var(--acc)}
+.lg-chat-input{display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--hair)}
+.lg-chat-input input{flex:1; min-width:0; font:inherit; font-size:13px; color:var(--hi); background:var(--glass-2); border:1px solid var(--hair); border-radius:12px; padding:9px 12px}
+.lg-chat-input button{flex:none; width:38px; border:0; border-radius:12px; background:linear-gradient(135deg,var(--acc),var(--acc-2)); color:#fff; font-size:16px; cursor:pointer}
+@media (max-width:900px){ .lg-chat{bottom:140px; right:12px} .lg-agent-toast{bottom:150px} }
+
 /* ── Таб-бар ── */
 .lg-tabbar{display:none}
 .lg-bento{width:100%}
+/* Элемент грида по умолчанию min-width:auto — широкая таблица внутри карточки
+   растягивала колонку, а с ней и всю страницу (670px в окне 390px, содержимое
+   уезжало за край на телефоне). Ноль заставляет карточку ужиматься, а таблица
+   продолжает скроллиться внутри своего контейнера. */
+.lg-bento>*{min-width:0}
 
 @media (max-width:900px){
   .lg-dock{display:none}
@@ -310,6 +437,31 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   .lg-tab{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; font:inherit; font-size:9.5px;
     color:var(--lo); background:none; border:0; cursor:pointer; padding:7px 4px; border-radius:16px; transition:.18s}
   .lg-tab.on{color:var(--hi); background:color-mix(in srgb,var(--acc) 16%,transparent)}
+  /* агент стоит над таб-баром, а не поверх него: иначе он перехватывает тапы
+     по правому табу («Ещё») и половина разделов снова недостижима */
+  .lg-agent-fab{right:14px; bottom:82px}
+  .lg-agent-fab img{height:54px}
 }
+/* ── Лист «Ещё»: полный список разделов там, где док скрыт ── */
+.lg-sheet-scrim{position:fixed; inset:0; z-index:45; background:rgba(10,14,24,.44); backdrop-filter:blur(2px)}
+.lg-sheet{position:fixed; left:0; right:0; bottom:0; z-index:46; max-height:76vh; overflow-y:auto;
+  padding:10px 14px calc(84px + env(safe-area-inset-bottom,0px)); border-radius:26px 26px 0 0;
+  background:var(--card); border-top:1px solid var(--hair); box-shadow:0 -18px 50px -20px rgba(0,0,0,.5)}
+.lg-sheet-grip{width:38px; height:4px; border-radius:2px; background:var(--hair); margin:2px auto 12px}
+.lg-sheet-group{margin-bottom:14px}
+.lg-sheet-head{font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--mute); font-weight:600; padding:0 6px 6px}
+.lg-sheet-item{position:relative; display:flex; align-items:center; gap:11px; width:100%; padding:11px 12px; margin-bottom:2px;
+  font:inherit; font-size:14px; color:var(--hi); text-align:left; background:none; border:0; border-radius:14px; cursor:pointer}
+.lg-sheet-item.on{background:color-mix(in srgb,var(--acc) 15%,transparent); font-weight:600}
+.lg-sheet-badge{position:absolute; right:14px; width:6px; height:6px; border-radius:50%}
+
 @media (max-width:560px){ .lg-bento{grid-template-columns:1fr !important} .lg-bento>*{grid-column:span 1 !important} }
 @media (prefers-reduced-motion:reduce){ .lg-wallpaper{animation:none} }
+
+
+/* «Гора»: склон + рейтинг рядом. На узком экране колонки складываются —
+   фотография в пол-экрана и подписи под ней читаются лучше, чем две тесные. */
+.lg-peak { grid-template-columns: minmax(230px, 300px) 1fr; align-items: center; }
+@media (max-width: 720px) {
+  .lg-peak { grid-template-columns: 1fr; }
+}

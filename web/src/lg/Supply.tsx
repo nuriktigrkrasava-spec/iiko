@@ -3,7 +3,9 @@ import { motion } from 'framer-motion'
 import { useApi } from '../lib/useApi'
 import { Glass, Chart, Delta, Orb, Insight, PlanFallback } from './ui'
 import { hbar, bar } from './charts'
-import { tenge, tengeShort, num } from '../lib/format'
+import { tenge, num } from '../lib/format'
+import InvoicePunch from './InvoicePunch'
+import PriceSearch from './PriceSearch'
 
 /* ── Формы данных (подтверждены curl) ── */
 type StockItem = { name: string; sku: string; balance: number; category: string; status: string }
@@ -40,6 +42,9 @@ const invTone = (s: string) => (/провед|posted|accept/i.test(s) ? '#37c489
 function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: number; outN: number; lowN: number; invoices: Inv[] }) {
   const [hover, setHover] = useState<number | null>(null)
   const [sel, setSel] = useState<number | null>(null)
+  // водитель на кабине — вход в «Поиск цены»: смотрят перед заказом, у кого дешевле
+  const [driver, setDriver] = useState(false)
+  const [driverHover, setDriverHover] = useState(false)
   const okN = Math.max(0, total - outN - lowN)
   const badges = [
     { k: 'Позиции', v: String(total), c: 'var(--acc)' },
@@ -62,7 +67,7 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
         ))}
         <div style={{ display: 'inline-flex', alignItems: 'baseline', gap: 8, padding: '9px 14px', borderRadius: 13, border: '1px solid var(--hair)', background: 'var(--glass-2)', marginLeft: 'auto' }}>
           <span style={{ fontSize: 11.5, color: 'var(--mute)', fontWeight: 600 }}>Списано</span>
-          <span className="tnum" style={{ fontSize: 16, fontWeight: 700, color: 'var(--red)' }}>{tengeShort(wo.total_written)}</span>
+          <span className="tnum" style={{ fontSize: 16, fontWeight: 700, color: 'var(--red)' }}>{tenge(wo.total_written)}</span>
           <Delta v={wo.loss_pct} invert size={11} />
         </div>
       </div>
@@ -71,6 +76,24 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
       <div style={{ marginTop: 14, maxWidth: 560, margin: '14px auto 0' }}>
         <div style={{ position: 'relative' }}>
           <img src="/truck.png" alt="Фура — поставки по накладным" style={{ width: '100%', display: 'block' }} />
+          {/* Водитель в кабине: нажатие открывает поиск лучшего поставщика по товару.
+              Координаты — под тот же кадр 1536×700, что и отсеки кузова. */}
+          <button
+            onClick={() => setDriver((v) => !v)}
+            onMouseEnter={() => setDriverHover(true)} onMouseLeave={() => setDriverHover(false)}
+            aria-label="Поиск цены: у кого товар дешевле"
+            style={{
+              position: 'absolute', left: '12%', top: '18%', width: '15%', height: '30%',
+              border: driverHover || driver ? '2px solid var(--acc)' : '2px solid transparent',
+              borderRadius: 10, background: driverHover ? 'rgba(255,255,255,.10)' : 'transparent',
+              cursor: 'pointer', padding: 0, transition: 'background .15s, border-color .15s',
+            }}>
+            {(driverHover || driver) && (
+              <span style={{ position: 'absolute', bottom: 'calc(100% + 8px)', left: '50%', transform: 'translateX(-50%)', whiteSpace: 'nowrap', background: 'var(--card)', border: '1px solid var(--hair)', borderRadius: 11, padding: '8px 12px', fontSize: 12, fontWeight: 650, color: 'var(--hi)', boxShadow: '0 14px 30px -12px rgba(20,40,80,.55)' }}>
+                Поиск цены · у кого дешевле
+              </span>
+            )}
+          </button>
           {/* сетка отсеков поверх кузова (координаты под кадр 1536×700) */}
           <div style={{ position: 'absolute', left: '33.5%', top: '14%', width: '59%', height: '35%', display: 'grid', gridTemplateColumns: 'repeat(6,1fr)', gridTemplateRows: 'repeat(2,1fr)', gap: '5%' }}>
             {cells.map((inv, i) => {
@@ -88,7 +111,7 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
                   {hover === i && inv && (
                     <div style={{ position: 'absolute', bottom: 'calc(100% + 9px)', left: '50%', transform: 'translateX(-50%)', whiteSpace: 'nowrap', zIndex: 6, background: 'var(--card)', border: '1px solid var(--hair)', borderRadius: 11, padding: '9px 12px', boxShadow: '0 14px 30px -12px rgba(20,40,80,.55)', textAlign: 'left' }}>
                       <div style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--hi)' }}>{inv.supplier}</div>
-                      <div className="tnum" style={{ fontSize: 11.5, color: 'var(--mute)', marginTop: 3 }}>{inv.items} поз. · {tengeShort(inv.amount)} · {inv.date}</div>
+                      <div className="tnum" style={{ fontSize: 11.5, color: 'var(--mute)', marginTop: 3 }}>{inv.items} поз. · {tenge(inv.amount)} · {inv.date}</div>
                       <div style={{ fontSize: 10.5, color: invTone(inv.status), fontWeight: 700, marginTop: 3 }}>{inv.status}</div>
                     </div>
                   )}
@@ -98,6 +121,11 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
           </div>
         </div>
       </div>
+
+      {driver && <PriceSearch onClose={() => setDriver(false)} />}
+
+      {/* «Пробить накладную»: фото → распознавание → наше автосопоставление */}
+      <InvoicePunch />
 
       {/* раскрытие: деталь накладной по клику */}
       {active && (
@@ -112,7 +140,7 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
               style={{ width: 30, height: 30, borderRadius: '50%', border: '1px solid var(--hair)', background: 'var(--glass-2)', color: 'var(--lo)', cursor: 'pointer', fontSize: 15, lineHeight: 1 }}>×</button>
           </div>
           <div style={{ display: 'flex', gap: 26, marginTop: 14, flexWrap: 'wrap' }}>
-            <div><div className="tnum" style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--hi)' }}>{tengeShort(active.amount)}</div><Sub>сумма поставки</Sub></div>
+            <div><div className="tnum" style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--hi)' }}>{tenge(active.amount)}</div><Sub>сумма поставки</Sub></div>
             <div><div className="tnum" style={{ fontSize: 24, fontWeight: 700, letterSpacing: '-.02em', color: 'var(--hi)' }}>{active.items}</div><Sub>позиций в накладной</Sub></div>
           </div>
           {active.positions && active.positions.length > 0 ? (
@@ -166,7 +194,7 @@ function Warehouse() {
     <Glass span={12}>
       <Eyebrow t="Склад · строгий баланс" hint={data.branch} />
       <div style={{ marginTop: 16, display: 'flex', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
-        <span className="tnum" style={{ fontSize: 52, fontWeight: 680, letterSpacing: '-.04em', lineHeight: 0.95, color: 'var(--red)' }}>−{tengeShort(data.total_discrepancy)}</span>
+        <span className="tnum" style={{ fontSize: 52, fontWeight: 680, letterSpacing: '-.04em', lineHeight: 0.95, color: 'var(--red)' }}>−{tenge(data.total_discrepancy)}</span>
         <span style={{ fontSize: 13, color: 'var(--lo)', maxWidth: '36ch', lineHeight: 1.5 }}>утекло сверх продаж за месяц — со склада ушло больше, чем пробито в чеках. Недостача или списание.</span>
       </div>
       <div style={{ marginTop: 14, fontSize: 11.5, color: 'var(--mute)' }}>было + приход − остаток = <b style={{ color: 'var(--lo)' }}>ушло по факту</b>, сверяем с продажами — <b style={{ color: 'var(--red)' }}>красное = утечка</b></div>
@@ -242,7 +270,7 @@ export default function Supply() {
 
   /* списания по категориям → % от закупа, alert красным, худшая по сумме */
   const cats = [...wo.data.categories].sort((a, b) => b.pct - a.pct)
-  const woBars = cats.map((c) => ({ l: c.name, v: c.pct, c: c.alert ? 'var(--red)' : bar(0), sub: tengeShort(c.written) }))
+  const woBars = cats.map((c) => ({ l: c.name, v: c.pct, c: c.alert ? 'var(--red)' : bar(0), sub: tenge(c.written) }))
   const worst = [...wo.data.categories].sort((a, b) => b.written - a.written)[0]
 
   /* отмены */
@@ -264,9 +292,9 @@ export default function Supply() {
       <Glass span={5} spot>
         <Eyebrow t="Склад · закупки" hint={`обновлено ${stock.data.updated_at}`} />
         <div className="tnum" style={{ fontSize: 44, fontWeight: 680, letterSpacing: '-.035em', lineHeight: 1, marginTop: 16, display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
-          {tengeShort(wo.data.total_written)} <Delta v={wo.data.loss_pct} invert />
+          {tenge(wo.data.total_written)} <Delta v={wo.data.loss_pct} invert />
         </div>
-        <div style={{ marginTop: 9, fontSize: 12.5, color: 'var(--mute)' }}>списано за месяц · {wo.data.loss_pct.toFixed(1).replace('.', ',')}% от закупа {tengeShort(wo.data.purchases)}</div>
+        <div style={{ marginTop: 9, fontSize: 12.5, color: 'var(--mute)' }}>списано за месяц · {wo.data.loss_pct.toFixed(1).replace('.', ',')}% от закупа {tenge(wo.data.purchases)}</div>
         <p style={{ marginTop: 14, fontSize: 13, lineHeight: 1.5, color: 'var(--lo)', maxWidth: '46ch' }}>
           Каждый шестой тенге закупа уходит в списание. {outN} позиции в стоп-листе — упущенная выручка.
         </p>
@@ -336,7 +364,7 @@ export default function Supply() {
         <Chart html={hbar(woBars, '%')} />
         {worst && <div style={{ marginTop: 8 }}>
           <Insight tag="списания" title={`${worst.name} — крупнейшая утечка`} money={tenge(worst.written)} tone="neg"
-            detail={`${worst.pct.toFixed(1).replace('.', ',')}% от закупа (${tengeShort(worst.purchases)}). Проверить сроки, порции, заготовку — цель ниже 10%.`} />
+            detail={`${worst.pct.toFixed(1).replace('.', ',')}% от закупа (${tenge(worst.purchases)}). Проверить сроки, порции, заготовку — цель ниже 10%.`} />
         </div>}
       </Glass>
 

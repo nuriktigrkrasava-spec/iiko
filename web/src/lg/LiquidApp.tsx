@@ -1,59 +1,74 @@
-import { useEffect, useState } from 'react'
-import type { ReactElement } from 'react'
+import { useEffect, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './lg.css'
 import { container } from './ui'
 import { Icon } from './icons'
-import { Dash, FC, Exp, YoY, Staff } from './screens'
-import Plan from './Plan'
-import Home from './Home'
-import Agent from './Agent'
 import BranchSwitcher from './Branch'
 import DataBadge from './DataBadge'
-import Onboarding from './Onboarding'
-import Director from './Director'
-import Clients from './Clients'
-import Reputation from './Reputation'
-import Menu from './Menu'
-import Supply from './Supply'
-import Report from './Report'
-import Widgets from './Widgets'
-import Schedule from './Schedule'
-import { getPeriod, setPeriod as setGlobalPeriod, type Period } from '../lib/api'
 
-type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: () => ReactElement }
+/* Экраны грузятся по требованию: раньше все 16 ехали одним куском в 514 kB,
+   хотя при заходе виден ровно один. Главная остаётся статичной — она открывается
+   первой, и ленивая загрузка дала бы ей лишнее мигание. */
+const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key: keyof M) =>
+  lazy(() => load().then((m) => ({ default: m[key] as React.ComponentType })))
+
+const Dash = lazyFrom(() => import('./screens'), 'Dash')
+const YoY = lazyFrom(() => import('./screens'), 'YoY')
+const Staff = lazyFrom(() => import('./screens'), 'Staff')
+const Plan = lazy(() => import('./Plan'))
+const Onboarding = lazy(() => import('./Onboarding'))
+const Reputation = lazy(() => import('./Reputation'))
+const Menu = lazy(() => import('./Menu'))
+const Supply = lazy(() => import('./Supply'))
+const Schedule = lazy(() => import('./Schedule'))
+const Mountain = lazy(() => import('./Mountain'))
+import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref, type Period } from '../lib/api'
+
+// render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
+type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
 
 const SECTIONS: Sec[] = [
-  { id: 'home', group: 'Сводка', label: 'Ресторан', icon: 'seat', periodic: false, render: Home },
-  { id: 'director', group: 'Сводка', label: 'Директор', icon: 'ai', periodic: false, render: Director },
-  { id: 'mocks', group: 'Витрина', label: 'Отчёт недели', icon: 'mocks', periodic: false, render: Report },
-  { id: 'widgets', group: 'Витрина', label: 'Виджеты iOS', icon: 'dash', periodic: false, render: Widgets },
   { id: 'dash', group: 'Сводка', label: 'Главная', icon: 'dash', periodic: true, render: Dash },
-  { id: 'fc', group: 'Деньги', label: 'Фудкост', icon: 'fc', badge: 'var(--amb)', periodic: true, render: FC },
   { id: 'menu', group: 'Деньги', label: 'Меню · продажи', icon: 'menu', periodic: false, render: Menu },
-  { id: 'exp', group: 'Деньги', label: 'Расходы', icon: 'exp', periodic: true, render: Exp },
   { id: 'supply', group: 'Деньги', label: 'Склад · заявки', icon: 'supply', badge: 'var(--red)', periodic: false, render: Supply },
   { id: 'yoy', group: 'Деньги', label: 'Год к году', icon: 'yoy', periodic: false, render: YoY },
   { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: false, render: Staff },
   { id: 'sched', group: 'Операции', label: 'Расписание', icon: 'sched', periodic: false, render: Schedule },
-  { id: 'plan', group: 'Операции', label: 'План', icon: 'anom', periodic: false, render: Plan },
-  { id: 'clients', group: 'Гости', label: 'Клиенты · RFM', icon: 'clients', badge: 'var(--grn)', periodic: false, render: Clients },
+  { id: 'plan', group: 'Операции', label: 'План', icon: 'feed', periodic: false, render: Plan },
+  { id: 'mountain', group: 'Сводка', label: 'Гора · задачи', icon: 'anom', periodic: false, render: Mountain },
   { id: 'rep', group: 'Гости', label: 'Соцсети', icon: 'rep', periodic: false, render: Reputation },
   { id: 'connect', group: 'Настройки', label: 'Подключить', icon: 'link', periodic: false, render: Onboarding },
 ]
-const TABS = ['home', 'director', 'mocks']
+const TABS = ['mountain', 'dash', 'supply']
+// разделы, сгруппированные как в доке — для листа «Ещё» на узких экранах
+const GROUPS: [string, Sec[]][] = SECTIONS.reduce((acc, s) => {
+  const g = acc.find((x) => x[0] === s.group)
+  if (g) g[1].push(s); else acc.push([s.group, [s]])
+  return acc
+}, [] as [string, Sec[]][])
 const PERIODS = [['today', 'Сегодня'], ['yesterday', 'Вчера'], ['week', 'Неделя'], ['month', 'Месяц']] as const
 
 export default function LiquidApp() {
-  const [active, setActive] = useState('home')
+  // раздел, период и тема переживают F5 — обновление страницы не должно
+  // выкидывать из «Расписания» обратно на «Ресторан» (см. loadPref в lib/api).
+  const [active, setActive] = useState(() => {
+    const saved = loadPref('section')
+    return saved && SECTIONS.some((s) => s.id === saved) ? saved : 'mountain'
+  })
   const [period, setPeriodLocal] = useState<Period>(getPeriod())
   // единый источник периода: пилл подсвечивает локально и пишет в глобальный стор (useApi перезапрашивает)
   const setPeriod = (p: Period) => { setPeriodLocal(p); setGlobalPeriod(p) }
-  const [dark, setDark] = useState(false) // светлый — главная тема (референс Truck&Co)
+  const [dark, setDark] = useState(() => loadPref('theme') === 'dark') // светлый — главная тема (референс Truck&Co)
+  const [moreOpen, setMoreOpen] = useState(false) // лист «Ещё» на узких экранах
+  const byLink = typeof window !== 'undefined'
+    && new URLSearchParams(window.location.search).has('m')
+
+  useEffect(() => { savePref('section', active) }, [active])
 
   // тема применяется к <html> сразу и при переключении
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+    savePref('theme', dark ? 'dark' : 'light')
   }, [dark])
 
   // другие экраны просят переключить вкладку событием
@@ -82,15 +97,6 @@ export default function LiquidApp() {
     <div className="lg-root" style={{ minHeight: '100vh' }}>
       <div className="lg-wallpaper" aria-hidden />
       <div className="lg-grain" aria-hidden />
-      {/* SVG-фильтр преломления стекла (21st-техника) */}
-      <svg style={{ position: 'absolute', width: 0, height: 0 }} aria-hidden>
-        <filter id="lg-glass" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
-          <feTurbulence type="fractalNoise" baseFrequency="0.006 0.010" numOctaves="2" seed="12" result="n" />
-          <feGaussianBlur in="n" stdDeviation="1" result="nb" />
-          <feDisplacementMap in="SourceGraphic" in2="nb" scale="58" xChannelSelector="R" yChannelSelector="G" result="d" />
-          <feGaussianBlur in="d" stdDeviation="7" />
-        </filter>
-      </svg>
 
       {/* Основная (на всю ширину — меню ушло в нижний док) */}
       <main style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
@@ -102,7 +108,9 @@ export default function LiquidApp() {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
               <DataBadge />
-              <BranchSwitcher />
+              {/* По личной ссылке (?m=…) филиал уже задан токеном — переключатель
+                  сети управляющему только мешает и обещает доступ, которого нет. */}
+              {!byLink && <BranchSwitcher />}
               {sec.periodic && (
                 <div className="lg-seg">
                   {PERIODS.map((p) => (
@@ -121,7 +129,9 @@ export default function LiquidApp() {
           <AnimatePresence mode="wait">
             <motion.div key={active} variants={container} initial="hidden" animate="show" exit={{ opacity: 0, y: -8, transition: { duration: 0.18 } }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', gap: 16, alignItems: 'stretch' }} className="lg-bento">
-              <Body />
+              <Suspense fallback={<div style={{ gridColumn: 'span 12', padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Открываю раздел…</div>}>
+                <Body />
+              </Suspense>
             </motion.div>
           </AnimatePresence>
         </div>
@@ -139,20 +149,53 @@ export default function LiquidApp() {
         </button>
       </nav>
 
-      {/* Таб-бар (телефон) */}
+      {/* Таб-бар (телефон). Док на узких экранах скрыт, поэтому «Ещё» — единственный
+          путь к остальным 13 разделам: без него Расписание/Склад/План недостижимы. */}
       <nav className="lg-tabbar glass">
         {TABS.map((id) => {
           const s = SECTIONS.find((x) => x.id === id)!
           return (
-            <button key={id} onClick={() => setActive(id)} className={`lg-tab ${active === id ? 'on' : ''}`}>
+            <button key={id} onClick={() => { setActive(id); setMoreOpen(false) }} className={`lg-tab ${active === id && !moreOpen ? 'on' : ''}`}>
               <Icon k={s.icon} /><span>{s.label}</span>
             </button>
           )
         })}
+        <button onClick={() => setMoreOpen((o) => !o)} className={`lg-tab ${moreOpen || !TABS.includes(active) ? 'on' : ''}`} aria-expanded={moreOpen}>
+          <Icon k="menu" /><span>Ещё</span>
+        </button>
       </nav>
 
-      {/* Агент-ассистент (на всех экранах) */}
-      <Agent />
+      {/* Лист «Ещё» — полный список разделов, сгруппированный как в доке */}
+      <AnimatePresence>
+        {moreOpen && (
+          <>
+            <motion.div className="lg-sheet-scrim" onClick={() => setMoreOpen(false)}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+            <motion.div className="lg-sheet glass" role="dialog" aria-label="Все разделы"
+              initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+              transition={{ type: 'spring', stiffness: 340, damping: 34 }}>
+              <div className="lg-sheet-grip" aria-hidden />
+              {GROUPS.map(([group, items]) => (
+                <div key={group} className="lg-sheet-group">
+                  <div className="lg-sheet-head">{group}</div>
+                  {items.map((s) => (
+                    <button key={s.id} className={`lg-sheet-item ${active === s.id ? 'on' : ''}`}
+                      onClick={() => { setActive(s.id); setMoreOpen(false) }}>
+                      <Icon k={s.icon} size={17} />
+                      <span>{s.label}</span>
+                      {s.badge && <span className="lg-sheet-badge" style={{ background: s.badge }} />}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Плавающий ассистент рядом с доком убран по просьбе владельца.
+          Файл Agent.tsx и вся его логика на месте — вернуть можно одной строкой:
+          <Agent /> здесь же. */}
     </div>
   )
 }

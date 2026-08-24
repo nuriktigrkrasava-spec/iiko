@@ -42,3 +42,10 @@ Thumbs.db
 /scratch_*.log
 /app-build.html
 .playwright-mcp/
+
+# Загруженные фото чек-листов — данные филиалов, не код
+checklists/
+
+# Состояние инструментов и вендоринг: в репозитории им делать нечего
+.claude-flow/
+vendor/

@@ -1,7 +1,8 @@
 import { useApi } from '../lib/useApi'
+import { periodLabel } from '../lib/api'
 import { Glass, Chart, Delta, Orb } from './ui'
 import { barChart } from './charts'
-import { tengeShort } from '../lib/format'
+import { tenge } from '../lib/format'
 
 /* ── Формы данных ── */
 type Health = { key: string; value: string; status: 'red' | 'yellow' | 'green' }
@@ -60,7 +61,7 @@ export function AIAdvisor() {
         <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 32, marginTop: 26, flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontSize: 11, letterSpacing: '.09em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 650 }}>Утечка за месяц</div>
-            <div className="tnum" style={{ fontSize: 48, fontWeight: 720, letterSpacing: '-.035em', lineHeight: 1, marginTop: 8, color: '#ff8f6b' }}>{tengeShort(data.leakage_total)}</div>
+            <div className="tnum" style={{ fontSize: 48, fontWeight: 720, letterSpacing: '-.035em', lineHeight: 1, marginTop: 8, color: '#ff8f6b' }}>{tenge(data.leakage_total)}</div>
             {driver && <div style={{ fontSize: 13, color: 'var(--lo)', marginTop: 8 }}>основной источник — {driver.toLowerCase()}</div>}
           </div>
           <div style={{ minWidth: 200 }}>
@@ -153,10 +154,14 @@ export function AIOverview() {
         </div>
       </Glass>
 
-      {/* KPI-плитки из живого дашборда */}
-      <Kpi label="Выручка · сегодня" value={tengeShort(d.revenue_today)} delta={d.revenue_change} />
-      <Kpi label="Средний чек" value={tengeShort(d.avg_check)} delta={d.avg_check_change} />
-      <Kpi label="Гостей" value={String(d.guests)} delta={d.guests_change} />
+      {/* KPI-плитки из живого дашборда.
+          Ярлык — по фактическому периоду запроса (месяц), а не «сегодня»: поле
+          зовётся revenue_today, но содержит сумму запрошенного периода.
+          Дельты убраны: бэкенд отдаёт *_change нулями, и вечное «0,0%» читалось
+          как «изменений нет», хотя это просто отсутствие расчёта. */}
+      <Kpi label={`Выручка · ${periodLabel()}`} value={tenge(d.revenue_today)} />
+      <Kpi label="Средний чек" value={tenge(d.avg_check)} />
+      <Kpi label="Гостей" value={String(d.guests)} />
       <Kpi label="Фудкост" value={`${fc.data.fact_pct}%`} delta={fc.data.diff_pct} invert />
 
       {/* Большой график выручки */}
