@@ -66,15 +66,24 @@ export default function LiquidApp() {
   // Переключатель филиалов нужен ВЛАДЕЛЬЦУ — он смотрит сеть. Прячем его только
   // у управляющего: его филиал задан ссылкой, а список чужих точек обещал бы
   // доступ, которого нет. Роль спрашиваем лёгким запросом, не всей доской.
-  const [isManager, setIsManager] = useState(false)
+  // По ссылке филиала переключателя нет с первого кадра: иначе он успевал
+  // мигнуть выпадающим списком, пока едет ответ о роли.
+  const [isManager, setIsManager] = useState(
+    () => (new URLSearchParams(window.location.search).get('m') || '').startsWith('b'))
   const [myBranch, setMyBranch] = useState('')
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get('m')
     if (!t) return
     fetch(`/api/mountain/whoami/${t}`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { setIsManager(d?.role === 'manager'); setMyBranch(d?.branch || '') })
-      .catch(() => {})
+      .then((d) => {
+        // Ссылка филиала (`b…`) прибивает человека к одному филиалу — списка
+        // быть не должно ни при каких обстоятельствах. Роль спрашиваем, но не
+        // полагаемся только на неё: вид ссылки виден прямо из адреса.
+        setIsManager(t.startsWith('b') || d?.role === 'manager')
+        setMyBranch(d?.branch || '')
+      })
+      .catch(() => setIsManager(t.startsWith('b')))
   }, [])
 
   useEffect(() => { savePref('section', active) }, [active])

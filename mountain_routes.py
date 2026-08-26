@@ -673,6 +673,7 @@ def _rest_by_org(org_id: str) -> Dict[str, Any]:
 
 async def _salmon_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, Any]:
     import api                                   # ленивый импорт: избегаем цикла
+    uid = sc["uid"]        # от чьего имени идём в iiko (владелец филиала)
     b = _branch_or_403(sc, org)
     if not b:
         return {"error": "нет доступа к филиалу"}
@@ -733,7 +734,8 @@ async def acts_salmon_get(token: str, org: Optional[str] = None):
     ctx = await _salmon_context(sc, sc["org"] or org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
-    sc = _scope(uid)
+    # филиалы для выбора — из УЖЕ разобранного доступа. Тут стоял _scope(uid), и
+    # по ссылке филиала выпадал список всей сети: uid у неё — владелец.
     ctx["branches"] = sc["branches"]
     ctx["role"] = sc["role"]
     return JSONResponse(ctx)

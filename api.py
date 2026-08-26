@@ -1659,6 +1659,11 @@ async def mountain_links(user: Dict = Depends(get_current_user)):
     branches = []
     for r in rests:
         org = r["organization_id"]
+        # Ссылки выдаём по тому же правилу, что и «Гора»: только точки продаж.
+        # Иначе в списке оказывались КЦ, ЦЕХ, ОФИС, РОЯЛТИ и города, которых на
+        # доске нет вовсе — семнадцать ссылок вместо девяти.
+        if not mountain_routes._is_branch(r.get("organization_name") or ""):
+            continue
         m = mgrs.get(org)
         branches.append({
             "organization_id": org,
