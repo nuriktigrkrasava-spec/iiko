@@ -1038,11 +1038,6 @@ async def root():
     return FileResponse(index, headers={"Cache-Control": "no-store, must-revalidate"})
 
 
-@app.get("/favicon.svg")
-async def site_favicon():
-    f = os.path.join(SITE_DIR, "favicon.svg")
-    return FileResponse(f) if os.path.exists(f) else Response(status_code=404)
-
 
 @app.get("/api/version")
 async def version():
@@ -10100,3 +10095,26 @@ async def cashshifts_pending(org_id: str, days: int = 30,
     resp = {"count": len(items), "items": items}
     _set_cached(cache_key, resp)
     return resp
+
+
+# ── Файлы сайта ──
+# Vite кладёт содержимое public/ в КОРЕНЬ сборки, а не в /assets: mountain.jpg,
+# truck.png, icons.svg, favicon.svg. Примонтировав только /assets, мы отдавали
+# по ним 404 — «Гора» открывалась без самой горы, а поиск цены без фуры.
+#
+# Маршрут объявлен последним в файле, поэтому и регистрируется последним: все
+# API-пути выше выигрывают у него по приоритету. Префиксы api/ и w/ отсекаем
+# явно, чтобы опечатка в адресе API давала честный 404, а не страницу сайта.
+@app.get("/{path:path}", include_in_schema=False)
+async def site_files(path: str):
+    if path.startswith(("api/", "w/", "m/")):
+        raise HTTPException(status_code=404, detail="Not Found")
+    target = os.path.abspath(os.path.join(SITE_DIR, path))
+    # защита от «../»: наружу из web/dist не выпускаем
+    if os.path.isfile(target) and os.path.commonpath([target, SITE_DIR]) == SITE_DIR:
+        return FileResponse(target)
+    # неизвестный путь — это маршрут одностраничного приложения, отдаём его точку входа
+    index = os.path.join(SITE_DIR, "index.html")
+    if os.path.exists(index):
+        return FileResponse(index, headers={"Cache-Control": "no-store, must-revalidate"})
+    raise HTTPException(status_code=404, detail="Not Found")

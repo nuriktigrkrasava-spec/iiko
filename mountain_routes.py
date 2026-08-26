@@ -120,9 +120,16 @@ def _is_branch(name: str) -> bool:
 
 def _scope(uid: int) -> Dict[str, Any]:
     """Что видит этот uid: владелец — свои филиалы, управляющий — свой."""
-    # ВЛАДЕНИЕ, а не доступ: get_restaurants отдаёт и филиалы, где человек
-    # управляющий, и по ней роль определять нельзя (см. get_owned_restaurants).
-    own = get_owned_restaurants(uid) or []
+    # ВЛАДЕНИЕ, а не доступ. Две ловушки, обе живые:
+    # 1. get_restaurants отдаёт и филиалы, где человек лишь управляющий;
+    # 2. один филиал бывает заведён НЕСКОЛЬКО раз под разными telegram id —
+    #    управляющему дали креды владельца, и он подключил через бота всю сеть.
+    #    Из-за этого двое управляющих открывали доску как владельцы: видели все
+    #    девять филиалов, могли ставить задачи любому и слать рассылку сети.
+    # Владелец — тот, чья регистрация филиала ПЕРВАЯ.
+    mine_orgs = _owned_org_ids(uid)
+    own = [r for r in (get_owned_restaurants(uid) or [])
+           if r.get("organization_id") in mine_orgs]
     if own:
         return {"role": "owner", "branches": [
             {"organization_id": r["organization_id"],
@@ -245,13 +252,34 @@ def _signals_by_branch(uid: int) -> Dict[str, Dict[str, Any]]:
 
 def _owner_of(org_id: str) -> int:
     """Кому принадлежит филиал. Нужен, чтобы управляющий видел рейтинг СВОЕЙ
-    сети, а не всех клиентов платформы."""
+    сети, а не всех клиентов платформы.
+
+    Владелец — тот, кто зарегистрировал филиал ПЕРВЫМ. Порядок задан явно:
+    один и тот же филиал бывает заведён несколько раз под разными telegram id
+    (управляющему дали креды владельца, и он подключил всю сеть через бота), а
+    без ORDER BY «первый» зависел бы от того, как SQLite сегодня вернёт строки.
+    """
     from database import get_db
     conn = get_db()
-    row = conn.execute("SELECT telegram_id FROM restaurants WHERE organization_id = ? LIMIT 1",
-                       (org_id,)).fetchone()
+    row = conn.execute("SELECT telegram_id FROM restaurants WHERE organization_id = ? "
+                       "ORDER BY id LIMIT 1", (org_id,)).fetchone()
     conn.close()
     return int(row[0]) if row and row[0] else 0
+
+
+def _owned_org_ids(uid: int) -> set:
+    """Филиалы, где uid — ПЕРВАЯ регистрация, то есть настоящий владелец.
+
+    Одним запросом, а не _owner_of по каждому: филиалов два десятка.
+    """
+    from database import get_db
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT organization_id, telegram_id FROM restaurants r1 WHERE id = "
+        "(SELECT MIN(id) FROM restaurants r2 WHERE r2.organization_id = r1.organization_id)"
+    ).fetchall()
+    conn.close()
+    return {r[0] for r in rows if int(r[1] or 0) == int(uid)}
 
 
 def _all_branches(owner_uid: int) -> List[Dict[str, str]]:
