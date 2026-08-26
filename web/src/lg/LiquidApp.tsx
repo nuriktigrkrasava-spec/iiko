@@ -24,7 +24,8 @@ const Supply = lazy(() => import('./Supply'))
 const Schedule = lazy(() => import('./Schedule'))
 const Shifts = lazy(() => import('./Shifts'))
 const Mountain = lazy(() => import('./Mountain'))
-import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref, type Period } from '../lib/api'
+import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref,
+         getOrg, setOrg, getBranches, type Period } from '../lib/api'
 
 // render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
 type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
@@ -71,6 +72,21 @@ export default function LiquidApp() {
   const [isManager, setIsManager] = useState(
     () => (new URLSearchParams(window.location.search).get('m') || '').startsWith('b'))
   const [myBranch, setMyBranch] = useState('')
+  /* Филиал должен быть выбран ДО первого запроса данных.
+
+     Раньше это делал переключатель филиалов в шапке — он единственный звал
+     getBranches и ставил org. Спрятав его от управляющего, мы оставили org
+     пустым: useApi по договорённости ждёт выбора филиала и не показывает
+     демо-данные, поэтому каждая вкладка висела в бесконечной загрузке. «Гора»
+     работала, потому что ходит по токену, а не через useApi.
+
+     Теперь филиал ставится здесь, независимо от того, нарисован переключатель
+     или нет. По ссылке филиала /api/restaurants и так отдаёт ровно один. */
+  useEffect(() => {
+    if (getOrg()) return
+    getBranches().then((b) => { if (b.length) setOrg(b[0].organization_id) }).catch(() => {})
+  }, [])
+
   useEffect(() => {
     const t = new URLSearchParams(window.location.search).get('m')
     if (!t) return
