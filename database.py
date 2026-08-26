@@ -1306,7 +1306,6 @@ def _ensure_bot_tasks(conn):
         money REAL,
         created_at TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'open',   -- open | done | later
-        status TEXT NOT NULL DEFAULT 'open',
         answered_at TEXT,
         answered_by TEXT
     )""")
@@ -1341,10 +1340,14 @@ def answer_bot_task(task_id: int, status: str, who: str = "") -> Optional[Dict[s
     return dict(row) if row else None
 
 
-def get_bot_tasks_all(days: int = 14) -> List[Dict[str, Any]]:
-    """Все задачи трекера за период — для админки владельца и вечернего отчёта."""
 def get_bot_tasks(days: int = 14) -> List[Dict[str, Any]]:
-    """Все задачи трекера за период — свежие сверху."""
+    """Все задачи трекера за период — свежие сверху.
+
+    Одна реализация на два имени: ветки называли её по-разному
+    (`get_bot_tasks_all` в боте, `get_bot_tasks` на сайте), и при слиянии
+    первая осталась с одним докстрингом — то есть возвращала None, а вызывающий
+    код по ней итерировал и падал 500.
+    """
     conn = get_db()
     _ensure_bot_tasks(conn)
     since = (datetime.now() - timedelta(days=days)).isoformat()
@@ -1353,6 +1356,10 @@ def get_bot_tasks(days: int = 14) -> List[Dict[str, Any]]:
         (since,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# Имя из бота — тот же список задач.
+get_bot_tasks_all = get_bot_tasks
 
 
 def get_open_bot_tasks(telegram_id: int, days: int = 14) -> List[Dict[str, Any]]:
