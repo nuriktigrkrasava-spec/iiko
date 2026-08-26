@@ -25,7 +25,7 @@ const Schedule = lazy(() => import('./Schedule'))
 const Shifts = lazy(() => import('./Shifts'))
 const Mountain = lazy(() => import('./Mountain'))
 import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref,
-         getOrg, setOrg, getBranches, type Period } from '../lib/api'
+         getOrg, setOrg, getBranches, pickOrg, type Period } from '../lib/api'
 
 // render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
 type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
@@ -72,19 +72,20 @@ export default function LiquidApp() {
   const [isManager, setIsManager] = useState(
     () => (new URLSearchParams(window.location.search).get('m') || '').startsWith('b'))
   const [myBranch, setMyBranch] = useState('')
-  /* Филиал должен быть выбран ДО первого запроса данных.
+  /* Филиал должен быть выбран ДО первого запроса данных — и по личной ссылке
+     его задаёт ССЫЛКА, а не прошлый визит.
 
      Раньше это делал переключатель филиалов в шапке — он единственный звал
      getBranches и ставил org. Спрятав его от управляющего, мы оставили org
-     пустым: useApi по договорённости ждёт выбора филиала и не показывает
-     демо-данные, поэтому каждая вкладка висела в бесконечной загрузке. «Гора»
-     работала, потому что ходит по токену, а не через useApi.
+     пустым, и каждая вкладка висела в бесконечной загрузке. Починили ранним
+     выходом `if (getOrg()) return` — и завели вторую беду: сохранённый в
+     localStorage филиал прошлого визита побеждал ссылку. С `demo-org-1` весь
+     сайт показывал ДЕМО-ДАННЫЕ, с чужим реальным филиалом — 403.
 
-     Теперь филиал ставится здесь, независимо от того, нарисован переключатель
-     или нет. По ссылке филиала /api/restaurants и так отдаёт ровно один. */
+     Теперь филиал сверяется со списком доступных (pickOrg): по ссылке филиала
+     он ровно один, у владельца сохранённый выбор переживает F5 как и раньше. */
   useEffect(() => {
-    if (getOrg()) return
-    getBranches().then((b) => { if (b.length) setOrg(b[0].organization_id) }).catch(() => {})
+    getBranches().then((b) => setOrg(pickOrg(b, getOrg()))).catch(() => {})
   }, [])
 
   useEffect(() => {

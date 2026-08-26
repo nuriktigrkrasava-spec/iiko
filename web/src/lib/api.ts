@@ -109,6 +109,21 @@ const DEMO_BRANCHES: Branch[] = [
   { organization_id: 'demo-org-1', organization_name: 'Демо-ресторан' },
 ]
 
+/* Какой филиал показывать: сохранённый — ТОЛЬКО если он есть среди доступных.
+
+   Сохранённый в localStorage филиал переживал смену ссылки: человек однажды
+   смотрел демо или сеть владельца, открывал ссылку своего филиала — и экраны
+   продолжали спрашивать прошлый org. С `demo-org-1` это давало демо-данные на
+   всём сайте (_get_org_id пропускает его даже по ссылке филиала), с чужим
+   реальным филиалом — 403. Проверку делал BranchSwitcher, но у управляющего он
+   скрыт, и проверять стало некому. Правило переехало сюда — оно не зависит от
+   того, нарисован переключатель или нет. */
+export function pickOrg(branches: Branch[], saved: string): string {
+  if (!branches.length) return saved
+  if (saved && branches.some((b) => b.organization_id === saved)) return saved
+  return branches[0].organization_id
+}
+
 export async function getBranches(): Promise<Branch[]> {
   if (BAKED_MODE) return DEMO_BRANCHES
   try {
