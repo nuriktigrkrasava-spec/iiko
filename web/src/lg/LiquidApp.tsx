@@ -1,0 +1,232 @@
+import { useEffect, useState, lazy, Suspense } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
+import './lg.css'
+import { container } from './ui'
+import { Icon } from './icons'
+import BranchSwitcher from './Branch'
+import DataBadge from './DataBadge'
+import NoticeCenter from './Notices'
+
+/* Экраны грузятся по требованию: раньше все 16 ехали одним куском в 514 kB,
+   хотя при заходе виден ровно один. Главная остаётся статичной — она открывается
+   первой, и ленивая загрузка дала бы ей лишнее мигание. */
+const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key: keyof M) =>
+  lazy(() => load().then((m) => ({ default: m[key] as React.ComponentType })))
+
+const Dash = lazyFrom(() => import('./screens'), 'Dash')
+const YoY = lazyFrom(() => import('./screens'), 'YoY')
+const Staff = lazyFrom(() => import('./screens'), 'Staff')
+const Plan = lazy(() => import('./Plan'))
+const Onboarding = lazy(() => import('./Onboarding'))
+const Reputation = lazy(() => import('./Reputation'))
+const Menu = lazy(() => import('./Menu'))
+const Supply = lazy(() => import('./Supply'))
+const Schedule = lazy(() => import('./Schedule'))
+const Shifts = lazy(() => import('./Shifts'))
+const Mountain = lazy(() => import('./Mountain'))
+import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref, type Period } from '../lib/api'
+
+// render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
+type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
+
+const SECTIONS: Sec[] = [
+  { id: 'dash', group: 'Сводка', label: 'Главная', icon: 'dash', periodic: true, render: Dash },
+  { id: 'menu', group: 'Деньги', label: 'Меню · продажи', icon: 'menu', periodic: false, render: Menu },
+  { id: 'supply', group: 'Деньги', label: 'Склад · заявки', icon: 'supply', badge: 'var(--red)', periodic: false, render: Supply },
+  { id: 'yoy', group: 'Деньги', label: 'Год к году', icon: 'yoy', periodic: false, render: YoY },
+  { id: 'shifts', group: 'Операции', label: 'Кассовые смены', icon: 'yoy', periodic: false, render: Shifts },
+  { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: false, render: Staff },
+  { id: 'sched', group: 'Операции', label: 'Расписание', icon: 'sched', periodic: false, render: Schedule },
+  { id: 'plan', group: 'Операции', label: 'План', icon: 'feed', periodic: false, render: Plan },
+  { id: 'mountain', group: 'Сводка', label: 'Гора · задачи', icon: 'anom', periodic: false, render: Mountain },
+  { id: 'rep', group: 'Гости', label: 'Соцсети', icon: 'rep', periodic: false, render: Reputation },
+  { id: 'connect', group: 'Настройки', label: 'Подключить', icon: 'link', periodic: false, render: Onboarding },
+]
+const TABS = ['mountain', 'dash', 'supply']
+// разделы, сгруппированные как в доке — для листа «Ещё» на узких экранах
+const GROUPS: [string, Sec[]][] = SECTIONS.reduce((acc, s) => {
+  const g = acc.find((x) => x[0] === s.group)
+  if (g) g[1].push(s); else acc.push([s.group, [s]])
+  return acc
+}, [] as [string, Sec[]][])
+const PERIODS = [['today', 'Сегодня'], ['yesterday', 'Вчера'], ['week', 'Неделя'], ['month', 'Месяц']] as const
+
+export default function LiquidApp() {
+  // раздел, период и тема переживают F5 — обновление страницы не должно
+  // выкидывать из «Расписания» обратно на «Ресторан» (см. loadPref в lib/api).
+  const [active, setActive] = useState(() => {
+    const saved = loadPref('section')
+    return saved && SECTIONS.some((s) => s.id === saved) ? saved : 'mountain'
+  })
+  const [period, setPeriodLocal] = useState<Period>(getPeriod())
+  // единый источник периода: пилл подсвечивает локально и пишет в глобальный стор (useApi перезапрашивает)
+  const setPeriod = (p: Period) => { setPeriodLocal(p); setGlobalPeriod(p) }
+  const [dark, setDark] = useState(() => loadPref('theme') === 'dark') // светлый — главная тема (референс Truck&Co)
+  const [moreOpen, setMoreOpen] = useState(false) // лист «Ещё» на узких экранах
+  // Переключатель филиалов нужен ВЛАДЕЛЬЦУ — он смотрит сеть. Прячем его только
+  // у управляющего: его филиал задан ссылкой, а список чужих точек обещал бы
+  // доступ, которого нет. Роль спрашиваем лёгким запросом, не всей доской.
+  const [isManager, setIsManager] = useState(false)
+  const [myBranch, setMyBranch] = useState('')
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('m')
+    if (!t) return
+    fetch(`/api/mountain/whoami/${t}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { setIsManager(d?.role === 'manager'); setMyBranch(d?.branch || '') })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => { savePref('section', active) }, [active])
+
+  // тема применяется к <html> сразу и при переключении
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+    savePref('theme', dark ? 'dark' : 'light')
+  }, [dark])
+
+  // другие экраны просят переключить вкладку событием
+  useEffect(() => {
+    const go = (e: Event) => setActive((e as CustomEvent<string>).detail)
+    window.addEventListener('lg:go', go)
+    return () => window.removeEventListener('lg:go', go)
+  }, [])
+  const sec = SECTIONS.find((s) => s.id === active)!
+  const Body = sec.render
+
+  function toggleTheme() {
+    setDark((d) => !d)
+  }
+
+  const dockBtn = (s: Sec) => (
+    <button key={s.id} onClick={() => setActive(s.id)} className={`lg-dock-btn ${active === s.id ? 'on' : ''}`} aria-label={s.label}>
+      {active === s.id && <motion.span layoutId="dock" className="lg-dock-pill" transition={{ type: 'spring', stiffness: 340, damping: 30 }} />}
+      <span style={{ position: 'relative', zIndex: 1, display: 'grid', placeItems: 'center' }}><Icon k={s.icon} size={19} /></span>
+      {s.badge && <span className="lg-dock-badge" style={{ background: s.badge }} />}
+      <span className="lg-dock-label">{s.label}</span>
+    </button>
+  )
+
+  return (
+    <div className="lg-root" style={{ minHeight: '100vh' }}>
+      <div className="lg-wallpaper" aria-hidden />
+      <div className="lg-grain" aria-hidden />
+
+      {/* Сообщения владельца. Живут на уровне приложения, а не внутри «Горы»:
+          управляющий, оставивший сайт на «Главной», не видел их вообще —
+          раздел не смонтирован, опрашивать некому. */}
+      <NoticeCenter />
+
+      {/* Основная (на всю ширину — меню ушло в нижний док) */}
+      <main style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+        {(
+          <header className="lg-head">
+            <div>
+              <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>{sec.group}</div>
+              <motion.h1 key={sec.id} className="display" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} style={{ margin: '2px 0 0', fontSize: 32, lineHeight: 1.04 }}>{sec.label}</motion.h1>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <DataBadge />
+              {/* По личной ссылке (?m=…) филиал уже задан токеном — переключатель
+                  сети управляющему только мешает и обещает доступ, которого нет. */}
+              {/* Владельцу — выбор филиала, управляющему — та же плашка, но со
+                  своим филиалом и без выпадающего списка: переключать ему нечего. */}
+              {isManager
+                ? <span className="lg-branch-btn" style={{ cursor: 'default' }} title={myBranch || 'ваш филиал'}>
+                    <span className="lg-branch-ic" aria-hidden>◈</span>
+                    {/* Название режем многоточием, как у владельца в BranchSwitcher:
+                        «Астана, ул. Г.Алиева 10 (EXPO)» в одну строку распирало
+                        шапку и вся страница ехала вбок на телефоне. */}
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160 }}>
+                      {myBranch || 'Ваш филиал'}
+                    </span>
+                  </span>
+                : <BranchSwitcher />}
+              {sec.periodic && (
+                <div className="lg-seg">
+                  {PERIODS.map((p) => (
+                    <button key={p[0]} onClick={() => setPeriod(p[0])} className={`lg-per ${period === p[0] ? 'on' : ''}`}>
+                      {period === p[0] && <motion.span layoutId="seg" className="lg-seg-pill" transition={{ type: 'spring', stiffness: 320, damping: 30 }} />}
+                      <span style={{ position: 'relative', zIndex: 1 }}>{p[1]}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </header>
+        )}
+
+        <div style={{ padding: '24px 40px 130px', maxWidth: 1360, width: '100%', margin: '0 auto' }}>
+          <AnimatePresence mode="wait">
+            <motion.div key={active} variants={container} initial="hidden" animate="show" exit={{ opacity: 0, y: -8, transition: { duration: 0.18 } }}
+              style={{ display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', gap: 16, alignItems: 'stretch' }} className="lg-bento">
+              <Suspense fallback={<div style={{ gridColumn: 'span 12', padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Открываю раздел…</div>}>
+                <Body />
+              </Suspense>
+            </motion.div>
+          </AnimatePresence>
+        </div>
+      </main>
+
+      {/* Нижний плавающий стеклянный док (десктоп) — вся навигация */}
+      <nav className="lg-dock glass warp" aria-label="Разделы">
+        <span className="lg-dock-brand">iiko</span>
+        <span className="lg-dock-sep" />
+        {SECTIONS.map(dockBtn)}
+        <span className="lg-dock-sep" />
+        <button onClick={toggleTheme} className="lg-dock-btn" aria-label="Сменить тему">
+          <span style={{ position: 'relative', zIndex: 1, fontSize: 17 }}>{dark ? '◐' : '◑'}</span>
+          <span className="lg-dock-label">{dark ? 'Ночь' : 'День'}</span>
+        </button>
+      </nav>
+
+      {/* Таб-бар (телефон). Док на узких экранах скрыт, поэтому «Ещё» — единственный
+          путь к остальным 13 разделам: без него Расписание/Склад/План недостижимы. */}
+      <nav className="lg-tabbar glass">
+        {TABS.map((id) => {
+          const s = SECTIONS.find((x) => x.id === id)!
+          return (
+            <button key={id} onClick={() => { setActive(id); setMoreOpen(false) }} className={`lg-tab ${active === id && !moreOpen ? 'on' : ''}`}>
+              <Icon k={s.icon} /><span>{s.label}</span>
+            </button>
+          )
+        })}
+        <button onClick={() => setMoreOpen((o) => !o)} className={`lg-tab ${moreOpen || !TABS.includes(active) ? 'on' : ''}`} aria-expanded={moreOpen}>
+          <Icon k="menu" /><span>Ещё</span>
+        </button>
+      </nav>
+
+      {/* Лист «Ещё» — полный список разделов, сгруппированный как в доке */}
+      <AnimatePresence>
+        {moreOpen && (
+          <>
+            <motion.div className="lg-sheet-scrim" onClick={() => setMoreOpen(false)}
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} />
+            <motion.div className="lg-sheet glass" role="dialog" aria-label="Все разделы"
+              initial={{ y: '100%' }} animate={{ y: 0 }} exit={{ y: '100%' }}
+              transition={{ type: 'spring', stiffness: 340, damping: 34 }}>
+              <div className="lg-sheet-grip" aria-hidden />
+              {GROUPS.map(([group, items]) => (
+                <div key={group} className="lg-sheet-group">
+                  <div className="lg-sheet-head">{group}</div>
+                  {items.map((s) => (
+                    <button key={s.id} className={`lg-sheet-item ${active === s.id ? 'on' : ''}`}
+                      onClick={() => { setActive(s.id); setMoreOpen(false) }}>
+                      <Icon k={s.icon} size={17} />
+                      <span>{s.label}</span>
+                      {s.badge && <span className="lg-sheet-badge" style={{ background: s.badge }} />}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Плавающий ассистент рядом с доком убран по просьбе владельца.
+          Файл Agent.tsx и вся его логика на месте — вернуть можно одной строкой:
+          <Agent /> здесь же. */}
+    </div>
+  )
+}

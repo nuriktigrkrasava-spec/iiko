@@ -7,17 +7,19 @@ import hashlib
 import base64
 import html
 import json
+import base64
 import csv
 import re
 import time
 import calendar
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, date, timezone
+from difflib import SequenceMatcher
 from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -41,6 +43,11 @@ from database import (
     create_bot_task, answer_bot_task, get_bot_tasks_all,
     add_branch_manager, get_branch_managers,
     save_journal_entry, get_journal_entries, seen_photo, remember_photo,
+    set_weekly_plan, get_weekly_plans,
+    get_signal_snapshot, save_signal_snapshot,
+    get_branch_managers, set_branch_manager,
+    upsert_director_task, close_director_task, get_director_tasks,
+    get_bot_tasks,
     save_bot_invoice, get_bot_invoices, get_bot_invoice,
     update_bot_invoice, find_invoice_by_dedup, get_price_history,
     save_pending_invoice, get_pending_invoice, get_pending_invoice_by_chat,
@@ -52,8 +59,11 @@ from database import (
     get_quota, quota_available, consume_quota, add_quota_extra,
     reset_quota_if_due, should_notify_limit, quota_stats,
 )
-from iiko import get_client
-from claude_api import analyze_invoice_photos, analyze_invoice_text
+from iiko import IikoClient, get_client
+from claude_api import analyze_with_claude, analyze_invoice_photos, analyze_invoice_text
+import assistant_ai
+import social_ig
+import staff_late as SL
 from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -135,7 +145,7 @@ QUOTA_ENFORCE = os.getenv("QUOTA_ENFORCE", "0").strip().lower() in ("1", "true",
 # Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
 ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 CHASPIK_ORG_ID = os.getenv("CHASPIK_ORG_ID", "")
-CHASPIK_BASE_URL = os.getenv("CHASPIK_BASE_URL", "https://saya-kds.onrender.com")
+CHASPIK_BASE_URL = os.getenv("CHASPIK_BASE_URL", "https://saya-kds-irlg.onrender.com")
 CHASPIK_TG_IDS = {355897224, 8727082281}
 
 # Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
@@ -176,15 +186,18 @@ def _is_live_period(date_from: str, date_to: str) -> bool:
 # Насколько оплаченное может превысить проданное, прежде чем считать выборку
 # смен загрязнённой. Небольшой запас — на округления и правки при приёмке смены.
 SHIFT_SANITY_RATIO = float(os.getenv("SHIFT_SANITY_RATIO", "1.02"))
+# Совет ассистента меняется не чаще раза в день — держим его отдельно и долго,
+# иначе каждый заход на сайт оплачивается новым вызовом модели.
+ASSISTANT_TTL = timedelta(hours=int(os.getenv("ASSISTANT_TTL_HOURS", "12")))
 
 
 def _cache_key(user_id: int, endpoint: str, org_id: str, period: str) -> str:
     return f"{user_id}:{endpoint}:{org_id}:{period}"
 
 
-def _get_cached(key: str) -> Optional[Any]:
+def _get_cached(key: str, ttl: Optional[timedelta] = None) -> Optional[Any]:
     if key in _cache and key in _cache_time:
-        if datetime.now() - _cache_time[key] < _cache_ttl.get(key, _CACHE_TTL):
+        if datetime.now() - _cache_time[key] < (ttl or _cache_ttl.get(key) or _CACHE_TTL):
             return _cache[key]
     return None
 
@@ -261,13 +274,32 @@ def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="Invalid Telegram init data")
 
 
-async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
-    if not x_telegram_init_data:
-        if not BOT_TOKEN:
-            return {"id": 0, "username": "dev", "first_name": "Developer"}
-        raise HTTPException(status_code=401, detail="Missing init data")
-    user = validate_telegram_init_data(x_telegram_init_data)
-    return user
+async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+                           x_site_token: Optional[str] = Header(None, alias="X-Site-Token")):
+    """Кто спрашивает. Три пути входа, по убыванию строгости.
+
+    1. `X-Telegram-Init-Data` — подпись Telegram, как у мини-аппа.
+    2. `X-Site-Token` — личная ссылка сайта (`?m=…`), подписанная на
+       ENCRYPTION_KEY. Без неё сайт на проде отвечал бы 401 на КАЖДЫЙ запрос:
+       он не живёт внутри Telegram и init-data взять негде. Токен даёт ровно ту
+       же личность, что и uid в подписи, дальше работает обычная изоляция по
+       филиалам — новых прав он не открывает.
+    3. dev-режим без бота: DEV_TID. Только когда BOT_TOKEN пуст.
+    """
+    if x_telegram_init_data:
+        return validate_telegram_init_data(x_telegram_init_data)
+    if x_site_token:
+        import mountain_routes
+        uid = mountain_routes.uid_from_token(x_site_token)
+        if uid:
+            return {"id": uid, "username": "site", "first_name": "Site"}
+        raise HTTPException(status_code=401, detail="Ссылка недействительна")
+    if not BOT_TOKEN:
+        # dev-режим без Telegram: DEV_TID позволяет действовать как владелец
+        # (видеть его реальные филиалы из локальной БД). По умолчанию 0.
+        dev_tid = int(os.getenv("DEV_TID", "0") or 0)
+        return {"id": dev_tid, "username": "dev", "first_name": "Developer"}
+    raise HTTPException(status_code=401, detail="Missing init data")
 
 
 def get_period_dates(period: str, custom_from: Optional[str] = None,
@@ -426,29 +458,42 @@ DEMO_FOODCOST = {
 }
 
 DEMO_EXPENSES = {
-    "total": 674420,
+    "total": 26640000,
     "operations": [
-        {"name": "Маркетинг", "cat": "маркетинг", "date": "25.03.2026", "kassa": "Основная касса", "amount": 20000},
-        {"name": "Услуги специалистов", "cat": "Заплатили охраннику", "date": "23.03.2026",
-         "kassa": "Касса руководства", "amount": 70000},
-        {"name": "Услуги специалистов", "cat": "Зп официантам", "date": "20.03.2026", "kassa": "Касса руководства",
-         "amount": 200000},
+        {"name": "Зарплата официантам и поварам", "cat": "ФОТ (зарплаты)", "date": "25.03.2026", "kassa": "Касса руководства", "amount": 6400000},
+        {"name": "Аренда помещения", "cat": "Аренда", "date": "01.03.2026", "kassa": "Касса руководства", "amount": 4757000},
+        {"name": "Налоги", "cat": "Налоги", "date": "20.03.2026", "kassa": "Касса руководства", "amount": 2854000},
+        {"name": "Роялти франчайзеру", "cat": "Роялти (франшиза)", "date": "05.03.2026", "kassa": "Касса руководства", "amount": 2379000},
+        {"name": "Электричество и вода", "cat": "Коммуналка", "date": "15.03.2026", "kassa": "Основная касса", "amount": 1189000},
+        {"name": "Комиссия эквайринга", "cat": "Эквайринг", "date": "28.03.2026", "kassa": "Основная касса", "amount": 951000},
+        {"name": "Реклама в соцсетях", "cat": "Маркетинг", "date": "22.03.2026", "kassa": "Основная касса", "amount": 951000},
+        {"name": "Хозтовары и уборка", "cat": "Хозрасходы", "date": "18.03.2026", "kassa": "Основная касса", "amount": 714000},
     ],
     "categories": [
-        {"name": "Услуги специалистов", "amount": 270000},
-        {"name": "Хозяйственные расходы", "amount": 150000},
-        {"name": "Маркетинг", "amount": 20000},
-        {"name": "Аренда", "amount": 234420},
+        {"name": "ФОТ (зарплаты)", "amount": 12845000},
+        {"name": "Аренда", "amount": 4757000},
+        {"name": "Налоги", "amount": 2854000},
+        {"name": "Роялти (франшиза)", "amount": 2379000},
+        {"name": "Коммуналка", "amount": 1189000},
+        {"name": "Эквайринг", "amount": 951000},
+        {"name": "Маркетинг", "amount": 951000},
+        {"name": "Хозрасходы", "amount": 714000},
     ]
 }
 
 DEMO_INVOICES = [
-    {"id": "0013", "status": "Проведена", "supplier": "ТОО АгроПром", "date": "08.03.2026", "items": 3,
-     "amount": 279850},
-    {"id": "0014", "status": "Проведена", "supplier": "ТОО МясоОпт", "date": "09.03.2026", "items": 2,
-     "amount": 185000},
-    {"id": "0015", "status": "Проведена", "supplier": "ИП Фермер", "date": "10.03.2026", "items": 2, "amount": 92500},
-    {"id": "0016", "status": "Новая", "supplier": "ТОО АгроПром", "date": "12.03.2026", "items": 1, "amount": 312400},
+    {"id": "0013", "status": "Проведена", "supplier": "ТОО АгроПром", "date": "08.03.2026", "items": 3, "amount": 279850,
+     "positions": [{"name": "Говядина вырезка", "qty": 20, "unit": "кг", "price": 9500, "sum": 190000},
+                   {"name": "Овощи микс", "qty": 45, "unit": "кг", "price": 1300, "sum": 58500},
+                   {"name": "Зелень свежая", "qty": 21, "unit": "кг", "price": 1493, "sum": 31350}]},
+    {"id": "0014", "status": "Проведена", "supplier": "ТОО МясоОпт", "date": "09.03.2026", "items": 2, "amount": 185000,
+     "positions": [{"name": "Куриное филе", "qty": 60, "unit": "кг", "price": 1950, "sum": 117000},
+                   {"name": "Фарш говяжий", "qty": 40, "unit": "кг", "price": 1700, "sum": 68000}]},
+    {"id": "0015", "status": "Проведена", "supplier": "ИП Фермер", "date": "10.03.2026", "items": 2, "amount": 92500,
+     "positions": [{"name": "Молоко 3.2%", "qty": 100, "unit": "л", "price": 450, "sum": 45000},
+                   {"name": "Сыр моцарелла", "qty": 25, "unit": "кг", "price": 1900, "sum": 47500}]},
+    {"id": "0016", "status": "Новая", "supplier": "ТОО АгроПром", "date": "12.03.2026", "items": 1, "amount": 312400,
+     "positions": [{"name": "Стейк рибай (отруб)", "qty": 40, "unit": "кг", "price": 7810, "sum": 312400}]},
 ]
 
 DEMO_WRITEOFFS = {
@@ -886,6 +931,7 @@ class SetupSave(BaseModel):
     organization_name: str
     iiko_server: Optional[str] = None
     api_password: Optional[str] = None
+    cloud_api_login: Optional[str] = None  # ключ iiko Cloud для живого зала/стоп-листов
 
 
 class AIAnalyze(BaseModel):
@@ -956,16 +1002,46 @@ async def startup():
     # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
     # основной — квоты накладных (см. _build_stats_text, БД у сервисов разные).
     asyncio.create_task(_daily_stats_scheduler())
+    # Ночная оценка филиалов + вторничная средняя
+    asyncio.create_task(_daily_scores_scheduler())
+    # Опоздания сотрудников: управляющему сразу, владельцу — сводка в 21:00.
+    # За рубильником: без реальных telegram id управляющих слать некому.
+    if os.getenv("LATE_ALERTS") == "1":
+        asyncio.create_task(_late_alerts_scheduler())
     if DEMO_ONLY:
         asyncio.create_task(_demo_sales_scheduler())
+
+
+# ── Сайт ──
+# Раньше по «/» лежал мини-апп (index.html, 5 400 строк одним файлом). Теперь
+# отдаём собранный сайт из web/dist. Он попадает в репозиторий собранным:
+# у Render'а в этом сервисе Python-окружение без Node, собирать там нечем.
+SITE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "dist")
+
+if os.path.isdir(os.path.join(SITE_DIR, "assets")):
+    app.mount("/assets", StaticFiles(directory=os.path.join(SITE_DIR, "assets")),
+              name="site-assets")
 
 
 @app.get("/")
 async def root():
     # no-store — иначе Telegram-webview держит старый бандл и не подхватывает
     # новые правки фронта (показывал старую выручку из старого index.html).
-    return FileResponse("index.html",
-                        headers={"Cache-Control": "no-store, must-revalidate"})
+    index = os.path.join(SITE_DIR, "index.html")
+    if not os.path.exists(index):
+        # Честная ошибка вместо белого экрана: значит, сайт не собран.
+        return HTMLResponse(
+            "<meta charset='utf-8'><body style='font:15px system-ui;padding:40px'>"
+            "Сайт не собран: нет <code>web/dist</code>. Собрать: "
+            "<code>cd web &amp;&amp; npm ci &amp;&amp; npm run build</code>, "
+            "затем закоммитить dist.</body>", status_code=503)
+    return FileResponse(index, headers={"Cache-Control": "no-store, must-revalidate"})
+
+
+@app.get("/favicon.svg")
+async def site_favicon():
+    f = os.path.join(SITE_DIR, "favicon.svg")
+    return FileResponse(f) if os.path.exists(f) else Response(status_code=404)
 
 
 @app.get("/api/version")
@@ -1023,9 +1099,19 @@ async def setup_save(payload: SetupSave, user: Dict = Depends(get_current_user))
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     add_restaurant(tid, payload.api_login, payload.organization_id, payload.organization_name,
-                   payload.iiko_server, payload.api_password)
+                   payload.iiko_server, payload.api_password, payload.cloud_api_login)
     set_demo_mode(tid, 0)
     return {"success": True}
+
+
+def _safe_restaurant(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Только безопасные поля в браузер — БЕЗ api_password / cloud_api_login / api_login."""
+    return {
+        "id": r.get("id"),
+        "organization_id": r.get("organization_id"),
+        "organization_name": r.get("organization_name"),
+        "has_cloud": bool(r.get("cloud_api_login")),  # подключён ли живой зал (Cloud)
+    }
 
 
 @app.get("/api/restaurants")
@@ -1035,10 +1121,142 @@ async def list_restaurants(user: Dict = Depends(get_current_user)):
     rests = get_restaurants(tid)
     if not rests:
         # Не меняем is_demo флаг автоматически — только явный /api/demo его ставит
-        return [DEMO_RESTAURANT]
+        return [_safe_restaurant(DEMO_RESTAURANT)]
     # Если есть реальные рестораны — сбрасываем demo флаг на всякий случай
     set_demo_mode(tid, 0)
-    return rests
+    return [_safe_restaurant(r) for r in rests]
+
+
+def _pseudo_section(name: str) -> bool:
+    """Псевдо-секции (не настоящий зал): вынос, доставка, агрегаторы, касса."""
+    n = (name or "").lower()
+    # Кириллица обязательна: филиалы называют секции «Вольт» и «Глово», и без этих
+    # написаний агрегаторы попадали в список ЗАЛОВ — с фейковыми столами без схемы.
+    return any(k in n for k in ["вынос", "достав", "wolt", "glovo", "вольт", "глово",
+                                "яндекс", "yandex", "касса", "самовывоз", "агрегат"])
+
+
+_hall_cache: Dict[str, tuple] = {}  # org_id -> (ts, data)
+_HALL_TTL = 20  # сек: живой зал кэшируем, чтобы не хаммерить Cloud и переживать флап сети
+
+
+@app.get("/api/hall/{org_id}")
+async def hall(org_id: str, user: Dict = Depends(get_current_user)):
+    """Живой зал из iiko Cloud: секции+схема+занятость. Нужен cloud_api_login у филиала."""
+    if _use_demo_data(user, org_id):
+        return {"connected": False, "demo": True}
+    rests = get_restaurants(user.get("id", 0))
+    r = next((x for x in rests if x.get("organization_id") == org_id), None)
+    enc = r.get("cloud_api_login") if r else None
+    if not enc:
+        return {"connected": False}
+    # свежий кэш — сразу
+    cached = _hall_cache.get(org_id)
+    if cached and (time.time() - cached[0]) < _HALL_TTL:
+        return cached[1]
+    last_err = ""
+    for _attempt in range(2):  # ретрай на флап сети до Cloud
+      try:
+        client = get_client(decrypt_password(enc))  # кэш-клиент: токен переиспользуется (не хаммерим /access_token)
+        org_name = (r.get("organization_name") or "").strip().lower()
+        orgs = await client.get_organizations()
+        cloud = next((o for o in orgs if (o.get("name") or "").strip().lower() == org_name), None)
+        if not cloud:
+            return {"connected": False, "error": "Организация не найдена в iiko Cloud"}
+        coid = cloud["id"]
+        tgs = await client.terminal_groups([coid])
+        secs = await client.restaurant_sections(tgs)
+        all_ids = [t["id"] for s in secs for t in s.get("tables", [])]
+        orders = await client.hall_orders(coid, all_ids, tgs[0] if tgs else None)
+        busy, guests_by, sum_by = {}, {}, {}
+        for o in orders:
+            oo = o.get("order", {}) or {}
+            g = oo.get("guestCount") or oo.get("guestsCount") or 0
+            sm = oo.get("sum") or 0
+            for tid in (oo.get("tableIds") or []):
+                busy[tid] = True
+                guests_by[tid] = g
+                sum_by[tid] = sm
+        tables, channels = [], []
+        real_sec_ids = []  # id настоящих залов (для запроса броней)
+        for s in secs:
+            sname = s.get("name", "")
+            if _pseudo_section(sname):
+                cnt = sum(1 for t in s.get("tables", []) if busy.get(t["id"]))
+                channels.append({"name": sname, "count": cnt})
+                continue
+            if s.get("id"):
+                real_sec_ids.append(s["id"])
+            schema = s.get("schema") or {}
+            elems = {e.get("tableId"): e for e in schema.get("tableElements", [])}
+            # iiko отдаёт tableElements, но НЕ отдаёт размер холста. Прежние 810×550
+            # были выдумкой: у реальных схем столы стоят на y=550 при высоте 80, то
+            # есть вылезают за холст — на плане они уезжали за пол. Считаем габариты
+            # по самим элементам (правый-нижний край + поле), тогда план сходится.
+            # Заявленный размер холста бывает МЕНЬШЕ расстановки: у Г.Алиева schema
+            # 810×550, а стол стоит на y=550 при высоте 80 — нижний край 630. Берём
+            # максимум из заявленного и фактического, иначе столы уезжают за пол.
+            pad = 40
+            right = [(e.get("x") or 0) + (e.get("width") or 0) for e in elems.values()]
+            bottom = [(e.get("y") or 0) + (e.get("height") or 0) for e in elems.values()]
+            sw = max(schema.get("width") or 0, (max(right) + pad) if right else 0) or 810
+            sh = max(schema.get("height") or 0, (max(bottom) + pad) if bottom else 0) or 550
+            for t in s.get("tables", []):
+                tid = t["id"]
+                el = elems.get(tid, {})
+                tables.append({
+                    "id": tid, "section": sname, "number": t.get("number"),
+                    "seats": t.get("seatingCapacity") or 0,
+                    "x": el.get("x"), "y": el.get("y"), "w": el.get("width"), "h": el.get("height"),
+                    "angle": el.get("angle") or 0, "sw": sw, "sh": sh,
+                    "busy": bool(busy.get(tid)), "guests": guests_by.get(tid, 0), "sum": sum_by.get(tid, 0),
+                })
+        occ = [t for t in tables if t["busy"]]
+
+        # ── Бронь: показываем ТОЛЬКО если у организации включён модуль броней (reserve API).
+        # Ошибка reserve не должна ронять зал → has_reservations=false, столы просто без метки.
+        has_reservations = False
+        reserved_ids = set()
+        try:
+            reserve_orgs = await client.reserve_available_orgs([coid])
+            has_reservations = coid in reserve_orgs
+            if has_reservations and real_sec_ids:
+                _n = local_now()
+                d0 = _n.strftime("%Y-%m-%d %H:%M:%S.000")
+                d1 = _n.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%d %H:%M:%S.000")
+                for rv in await client.reserve_workload(real_sec_ids, d0, d1):
+                    tids = rv.get("tableIds") or ([rv["tableId"]] if rv.get("tableId") else [])
+                    for tid in tids:
+                        reserved_ids.add(tid)
+        except Exception as _re:
+            logger.warning(f"[hall] reserve for {org_id}: {_re!r}")
+        for t in tables:
+            # занятый стол важнее брони: если за ним уже сидят — это occ, а не «бронь».
+            t["reserved"] = (not t["busy"]) and (t["id"] in reserved_ids)
+
+        # Список секций для переключателя залов (только настоящие залы, без псевдо-секций).
+        section_names = []
+        for t in tables:
+            if t["section"] not in section_names:
+                section_names.append(t["section"])
+        result = {
+            "connected": True, "branch": r.get("organization_name"),
+            "tables": tables, "channels": channels, "sections": section_names,
+            "has_reservations": has_reservations,
+            "reserved": sum(1 for t in tables if t["reserved"]),
+            "guests": sum(t["guests"] for t in occ), "open_orders": len(orders),
+            "occupied": len(occ), "total": len(tables),
+            "load": round(len(occ) / len(tables) * 100) if tables else 0,
+        }
+        _hall_cache[org_id] = (time.time(), result)
+        return result
+      except Exception as e:
+        last_err = repr(e)
+        continue
+    # обе попытки не удались — отдаём последний хороший кэш (если есть), иначе ошибку
+    if cached:
+        return cached[1]
+    return {"connected": False, "error": last_err}
 
 
 @app.delete("/api/restaurants/{rest_id}")
@@ -1125,6 +1343,117 @@ def _get_restaurant_info(org_id: str, user: Dict) -> Dict[str, Any]:
                 "org_name": r.get("organization_name", ""),
             }
     return {"api_login": "demo", "iiko_server": None, "api_password": None, "org_name": ""}
+
+
+# Опоздание больше этого — почти наверняка заказ, который забыли закрыть в iiko
+# (у Алиева встречаются «опоздания» на 21 час). Не прячем, но помечаем.
+LATE_SUSPICIOUS_MIN = 120
+
+DEMO_LATE_DELIVERIES = {
+    "delivered": 128, "late": 14, "late_pct": 11, "median_delay": 17,
+    "worst_delay": 63, "suspicious": 0,
+    "orders": [
+        {"number": 412, "date": "2026-08-09", "courier": "Жумабек", "address": "ул. Кабанбай батыра 53",
+         "expected": "09.08 19:40", "actual": "09.08 20:43", "delay_min": 63, "amount": 14200, "suspicious": False},
+        {"number": 398, "date": "2026-08-08", "courier": "Рысдаулет", "address": "пр. Мангилик Ел 28",
+         "expected": "08.08 13:10", "actual": "08.08 13:52", "delay_min": 42, "amount": 8900, "suspicious": False},
+        {"number": 377, "date": "2026-08-07", "courier": "Жумабек", "address": "ул. Сыганак 10",
+         "expected": "07.08 20:05", "actual": "07.08 20:28", "delay_min": 23, "amount": 21400, "suspicious": False},
+    ],
+    "period": {"from": "2026-07-12", "to": "2026-08-11"},
+}
+
+
+_SOURCE_RU = {"WEB": "сайт", "IOS": "iOS", "ANDROID": "Android",
+              "MOBILE": "приложение", "CALLCENTER": "колл-центр"}
+
+
+def _clean_address(v: Any, line1: Any = None) -> str:
+    """Адрес доставки без мусора оператора.
+
+    У заказов с сайта и приложения улица приходит заглушкой «ул. ---------- д. 0»,
+    а настоящий адрес лежит в Delivery.Line1 — берём его. Если и там пусто,
+    честнее сказать, что адреса нет, чем показывать прочерки.
+    """
+    s = " ".join(str(v or "").split())
+    l1 = " ".join(str(line1 or "").split())
+    if (not s or re.search(r"-{3,}", s)) and l1:
+        # «г. Астана, ул. г. Астана, ул. …» — оператор дублирует префикс, чистим
+        return re.sub(r"^(г\.\s*[^,]+,\s*ул\.\s*)(?=г\.\s)", "", l1).strip(" ,")
+    if not s:
+        return l1
+    body = re.sub(r"^ул\.\s*", "", s, flags=re.I)          # «ул. » ничего не добавляет
+    body = re.sub(r"\s*д\.\s*0\b", "", body)               # «д. 0» — дом не указан
+    street = re.split(r"\s*д\.\s*", body)[0].strip(" .,-–—_")
+    if not street or not re.search(r"[a-zA-Zа-яА-ЯёЁ0-9]", street):
+        return ""                                          # одни прочерки — адреса нет
+    return body.strip(" .,-") or ""
+
+
+def _hhmm(v: Any) -> str:
+    """'2026-07-15T13:36:15.644' → '15.07 13:36'. Пусто — прочерк."""
+    s = str(v or "")
+    if len(s) < 16 or "T" not in s:
+        return "—"
+    d, t = s[:10], s[11:16]
+    return f"{d[8:10]}.{d[5:7]} {t}"
+
+
+def _mins_between(a: Any, b: Any) -> Optional[float]:
+    """Минуты между двумя отметками iiko. None — если хоть одной нет."""
+    from datetime import datetime as _dt
+    try:
+        fmt = lambda v: _dt.fromisoformat(str(v)[:26])
+        return (fmt(b) - fmt(a)).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
+# Ярлыки этапов. Их видит человек, поэтому формулируем как ответственность,
+# а не как техническое название поля.
+LATE_STAGES = {
+    "kitchen": "кухня готовила дольше обычного",
+    "idle": "заказ ждал курьера",
+    "road": "дорога заняла дольше обычного",
+    "accepted_late": "заказ приняли впритык",
+    "unknown": "нет отметок времени",
+}
+
+
+def _late_stages(r: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Опоздание по этапам: кухня, простой готового заказа, дорога."""
+    open_t = r.get("OpenTime")
+    cooked = r.get("Delivery.CookingFinishTime")
+    sent = r.get("Delivery.SendTime")
+    actual = r.get("Delivery.ActualTime")
+    road = r.get("Delivery.WayDuration")
+    return {
+        "kitchen": _mins_between(open_t, cooked),
+        "idle": _mins_between(cooked, sent),
+        # WayDuration надёжнее разницы отметок: у части заказов ActualTime
+        # проставляют вручную при закрытии, и разница уезжает в часы.
+        "road": (float(road) if road not in (None, "") else _mins_between(sent, actual)),
+    }
+
+
+def _median(xs: List[float]) -> float:
+    xs = sorted(x for x in xs if x is not None)
+    return xs[len(xs) // 2] if xs else 0.0
+
+
+def _attribute_cause(stages: Dict[str, Optional[float]],
+                     norms: Dict[str, float], delay: float) -> Dict[str, Any]:
+    """Кто съел время. Сравниваем каждый этап с НОРМОЙ ЭТОГО ЖЕ ФИЛИАЛА — так
+    «долго» означает «дольше, чем у них обычно», а не абстрактный норматив."""
+    excess = {k: max(0.0, (v or 0.0) - norms.get(k, 0.0))
+              for k, v in stages.items() if v is not None}
+    if not excess or max(excess.values()) <= 1:
+        # Все этапы в своей норме, а заказ всё равно опоздал — значит обещали
+        # срок, в который эта кухня и дорога не укладываются в принципе.
+        key = "accepted_late" if any(v is not None for v in stages.values()) else "unknown"
+        return {"key": key, "label": LATE_STAGES[key], "minutes": round(delay)}
+    key = max(excess, key=excess.get)
+    return {"key": key, "label": LATE_STAGES[key], "minutes": round(excess[key])}
 
 
 def _olap_dept(real_org: str, info: Dict) -> str:
@@ -1248,6 +1577,178 @@ async def branch_shift_revenue(client, dept: str, date_from: str, date_to: str
     rev = client.cashshifts_revenue(sel)
     dbg["revenue"] = rev
     return rev, dbg
+
+
+@app.get("/api/widget/{org_id}")
+async def widget(org_id: str, response: Response, user: Dict = Depends(get_current_user)):
+    """Единый render-ready JSON для iOS-виджетов («Команды»/WidgetKit).
+    Виджет тянет только этот ответ и рисует — без расчётов на клиенте.
+    Демо-филиал отдаёт готовые демо-значения; для реального орга агрегатор
+    переиспользует dashboard()/insights (следующий шаг)."""
+    response.headers["Cache-Control"] = "max-age=300"  # кэш 5 минут
+    is_demo = _use_demo_data(user, org_id)
+    d = DEMO_DASHBOARD
+    spark = d["chart_7days"]["data"]
+    rev, fc = d["revenue_today"], d["forecast"]
+    pct = round(rev / fc * 100) if fc else 0
+
+    # задачи недели — из плана ИИ-советника (insights-сервис :8010)
+    tasks = []
+    try:
+        async with httpx.AsyncClient(timeout=4) as c:
+            r = await c.get(f"http://localhost:8010/api/insights/{org_id}")
+            if r.status_code == 200:
+                for i, p in enumerate(r.json().get("plan", [])[:4]):
+                    tasks.append({"title": (p.get("action") or "")[:48],
+                                  "target": p.get("effect", ""),
+                                  "done": i < 2})
+    except Exception as e:
+        logger.warning(f"[widget] insights unavailable: {e}")
+
+    done = sum(1 for t in tasks if t["done"])
+    yday = spark[-1]
+    return {
+        "generated_at": local_now().isoformat(),
+        "demo": is_demo,
+        "revenue": {
+            "today": rev, "forecast": fc, "pct_to_forecast": pct,
+            "delta_pct": d["revenue_change"], "avg_check": d["avg_check"],
+            "guests": d["guests"], "open_orders": d["open_orders"], "spark7": spark,
+        },
+        "todo": {"progress": f"{done}/{len(tasks)}" if tasks else "0/0", "tasks": tasks},
+        "seating": {
+            "orders_now": d["open_orders"], "peak_orders": 11, "peak_label": "Пт 19:00",
+            "occupancy_pct": round(d["open_orders"] / 11 * 100),
+        },
+        "push": {
+            "hero": f"Вчера {yday:,} ₸".replace(",", " "),
+            "body": f"+{d['revenue_change']:.0f}% к плану. Фудкост 36% — 1 задача на сегодня.",
+        },
+    }
+
+
+# Виджет подключён выше, рядом с остальными роутерами: после слияния веток
+# include_router(widget_routes) стоял дважды и /w/{token} регистрировался
+# два раза. Работало (побеждал первый), но такое надо убирать сразу.
+
+# ==== «Гора»: задачи филиалам, баллы, чек-листы. Доступ по личной ссылке ====
+import mountain_routes
+app.include_router(mountain_routes.router)
+
+
+@app.get("/api/mountain/links")
+async def mountain_links(user: Dict = Depends(get_current_user)):
+    """Личные ссылки: владельцу — своя, каждому филиалу — своя.
+    Ссылка = подписанный uid на общем ENCRYPTION_KEY, поэтому она одинакова
+    локально и на проде и не требует отдельного входа."""
+    uid = user.get("id", 0)
+    rests = get_restaurants(uid) or []
+    mgrs = {m["organization_id"]: m for m in get_branch_managers()}
+    branches = []
+    for r in rests:
+        org = r["organization_id"]
+        m = mgrs.get(org)
+        branches.append({
+            "organization_id": org,
+            "name": r.get("organization_name") or "Филиал",
+            "manager_tid": (m or {}).get("telegram_id"),
+            "link": (f"/m/{mountain_routes.token_for(int(m['telegram_id']))}"
+                     if m and m.get("telegram_id") else None),
+        })
+    return {"owner": {"tid": uid, "link": f"/m/{mountain_routes.token_for(uid)}"},
+            "branches": branches}
+
+
+@app.get("/api/mountain/digest/{token}")
+async def mountain_digest(token: str, refresh: bool = Query(False)):
+    """«Что изменилось» по каждому филиалу — наблюдение, а не задачи.
+
+    По умолчанию считается ТОЛЬКО из кэша: сбор сигналов идёт по всем филиалам
+    и занимает полторы минуты, а владелец ждать не должен. refresh=1 — когда он
+    осознанно хочет свежие цифры.
+    """
+    uid = mountain_routes.uid_from_token(token)
+    if not uid:
+        raise HTTPException(status_code=404, detail="bad token")
+    if not (get_restaurants(uid) or []):
+        raise HTTPException(status_code=403, detail="только владельцу")
+    sig_key = _cache_key(uid, "mountain-signals", "all", "month")
+    signals = None if refresh else _get_cached(sig_key, ttl=ASSISTANT_TTL)
+    if signals is None:
+        if not refresh:
+            return {"notes": [], "stale": True,
+                    "hint": "Показатели ещё не собраны — нажми «Обновить», это займёт до двух минут."}
+        signals = await _gather_assistant_signals({"id": uid})
+        _set_cached(sig_key, signals, ttl=ASSISTANT_TTL)
+    key = _cache_key(uid, "mountain-digest", "all", "month")
+    cached = _get_cached(key, ttl=ASSISTANT_TTL)
+    if cached is not None and not refresh:
+        return cached
+    # Считаем только по филиалам «Горы»: регионы и служебные организации
+    # владельцу в этой сводке не нужны, а каждая лишняя строка — токены.
+    names = {b["name"] for b in mountain_routes._scope(uid)["branches"]}
+    slim = {"branches": [b for b in (signals.get("branches") or []) if b.get("name") in names]}
+    # Проверяем СПИСОК, а не словарь: {"branches": []} истинен, и клиент без
+    # подходящих филиалов получал пустой дайджест, закэшированный на 12 часов.
+    notes = await assistant_ai.digest(slim if slim["branches"] else signals)
+    res = {"notes": notes, "stale": False}
+    _set_cached(key, res, ttl=ASSISTANT_TTL)
+    return res
+
+
+@app.post("/api/mountain/propose/{token}")
+async def mountain_propose(token: str, force: bool = Query(False),
+                           org: Optional[str] = Query(None)):
+    """ИИ предлагает по одной задаче на филиал. Ставит их потом владелец руками.
+
+    Один вызов модели на ВСЮ сеть: правила выбирают больное место каждого
+    филиала бесплатно, модель только формулирует. Тринадцать филиалов — один
+    запрос, а не тринадцать."""
+    uid = mountain_routes.uid_from_token(token)
+    if not uid:
+        raise HTTPException(status_code=404, detail="bad token")
+    if not (get_restaurants(uid) or []):
+        raise HTTPException(status_code=403, detail="предлагать задачи может только владелец")
+    # Сбор сигналов — это поход в iiko по всем филиалам, дорого и небыстро.
+    # Держим результат столько же, сколько разбор ассистента: повторное нажатие
+    # кнопки не должно ни платить модели, ни хаммерить сервера клиента.
+    key = _cache_key(uid, "mountain-propose", org or "all", "month")
+    cached = _get_cached(key, ttl=ASSISTANT_TTL)
+    if cached is not None and not force:
+        return cached
+
+    signals = await _gather_assistant_signals({"id": uid})
+    # Кладём сигналы в кэш: по ним «Гора» считает оценку филиала, не запуская
+    # сбор заново — он идёт по всем филиалам и стоит минуты.
+    _set_cached(_cache_key(uid, "mountain-signals", "all", "month"), signals, ttl=ASSISTANT_TTL)
+    if org:
+        # Проверка на одном филиале: не тратим ни токены, ни походы в iiko на сеть.
+        want = next((r.get("organization_name") for r in get_restaurants(uid)
+                     if r["organization_id"] == org), None)
+        signals["branches"] = [b for b in (signals.get("branches") or [])
+                               if b.get("name") == want]
+    names = {r.get("organization_name") or "Филиал": r["organization_id"]
+             for r in get_restaurants(uid)}
+    tasks = await assistant_ai.propose_tasks(signals)
+    for t in tasks:
+        t["organization_id"] = names.get(t.get("branch"), "")
+    res = {"tasks": [t for t in tasks if t.get("organization_id")]}
+    _set_cached(key, res, ttl=ASSISTANT_TTL)
+    return res
+
+
+@app.post("/api/widget/token")
+async def widget_token(request: Request, user: Dict = Depends(get_current_user)):
+    """Личная ссылка на виджет владельца + ссылки по каждому филиалу."""
+    uid = int(user.get("id", 0) or 0)
+    if not uid:
+        raise HTTPException(status_code=401, detail="no user")
+    t = widget_routes.widget_token_for(uid)
+    base = str(request.base_url).rstrip("/")
+    branches = [{"id": o["organization_id"], "name": o["organization_name"],
+                 "url": f"{base}/w/{t}/{o['organization_id']}"}
+                for o in get_restaurants(uid)]
+    return {"token": t, "url": f"{base}/w/{t}", "branches": branches}
 
 
 @app.get("/api/dashboard/{org_id}")
@@ -1384,6 +1885,10 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             "forecast": total * 1.4,
             "chart_7days": chart,
             "branches_count": len(orgs),
+            # Откуда взялась выручка: смены (как в кассе) или откат на OLAP.
+            # Без этого поля ни сайт, ни мини-апп не могли отличить эталон от
+            # запасного источника — и расхождение выглядело как «баг в цифре».
+            "source": "cashshifts" if (got_sessions and len(got_sessions) == len(orgs)) else "olap",
         }
         _set_cached(key, resp,
                     ttl=_CACHE_TTL_LIVE if _is_live_period(date_from, date_to) else None)
@@ -1758,6 +2263,138 @@ async def couriers(org_id: str, period: str = "month",
     return {"couriers": couriers_list, "summary": summary}
 
 
+@app.get("/api/late-deliveries/{org_id}")
+async def late_deliveries(org_id: str, period: str = "month",
+                          from_: Optional[str] = Query(None, alias="from"),
+                          to: Optional[str] = Query(None),
+                          limit: int = Query(200, ge=1, le=1000),
+                          user: Dict = Depends(get_current_user)):
+    """Опоздавшие доставки филиала ПОИМЁННО — из OLAP «Заказы-доставка».
+
+    Строка = заказ: номер, дата, курьер, адрес, обещанное и фактическое время,
+    опоздание в минутах, сумма. Отдаём и сводку (сколько всего доставок, сколько
+    опоздали, медиана опоздания), и список каждого опоздания.
+    """
+    if _use_demo_data(user, org_id):
+        return DEMO_LATE_DELIVERIES
+    real_org = _get_org_id(org_id, user)
+    if from_ and to:
+        date_from, date_to = get_period_dates("custom", from_, to)
+    else:
+        date_from, date_to = get_period_dates(period)
+
+    key = _cache_key(user.get("id", 0), "late-deliveries", real_org, f"{date_from}:{date_to}")
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
+
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        rows = await client.olap_deliveries_detail(_olap_dept(real_org, info), date_from, date_to)
+    except Exception as e:
+        logger.warning(f"[late-deliveries] {real_org}: {e!r}")
+        return _iiko_unavailable()
+
+    # Самовывоз — не доставка: у Алиева он давал 318 «опозданий» из 443 и полностью
+    # искажал картину. Отсекаем так же, как в /api/couriers.
+    def _is_courier(name: str) -> bool:
+        n = (name or "").strip().lower()
+        return bool(n) and "амовывоз" not in n
+
+    # Разрез по типу заказа. Одни и те же строки уже загружены — второй запрос
+    # в iiko не нужен. Важно: у самовывоза отметка «приготовлено» стоит далеко
+    # не всегда (её ставят только на предзаказах с сайта и приложения), поэтому
+    # рядом с медианой отдаём охват — сколько заказов её вообще имеют.
+    def _kind(name: str) -> str:
+        return "pickup" if "амовывоз" in (name or "").lower() else "courier"
+
+    by_type: Dict[str, Any] = {}
+    for kind_key, title in (("courier", "Доставка курьером"), ("pickup", "Вынос и самовывоз")):
+        grp = [x for x in rows
+               if str(x.get("Delivery.Courier") or "").strip()
+               and _kind(str(x.get("Delivery.Courier"))) == kind_key]
+        if not grp:
+            continue
+        st = [_late_stages(x) for x in grp]
+        pick = lambda k: [v[k] for v in st if v[k] is not None and 0 <= v[k] < 600]
+        kitchen, idle, road = pick("kitchen"), pick("idle"), pick("road")
+        by_type[kind_key] = {
+            "title": title,
+            "orders": len(grp),
+            "measured": len(kitchen),
+            "kitchen": round(_median(kitchen)),
+            "idle": round(_median(idle)),
+            "road": round(_median(road)) if kind_key == "courier" else 0,
+            "total": round(_median(kitchen) + _median(idle)
+                           + (_median(road) if kind_key == "courier" else 0)),
+        }
+
+    # Норма этапов — медиана по ВСЕМ доставкам филиала за период, включая
+    # приехавшие вовремя. Считать норму по одним опоздавшим нельзя: тогда
+    # «нормально» окажется тем, что как раз и сломалось.
+    stage_pool: Dict[str, List[float]] = {"kitchen": [], "idle": [], "road": []}
+    for r in rows:
+        if not _is_courier(str(r.get("Delivery.Courier") or "")):
+            continue
+        for k, v in _late_stages(r).items():
+            if v is not None and 0 <= v < 600:
+                stage_pool[k].append(v)
+    norms = {k: _median(v) for k, v in stage_pool.items()}
+
+    delivered, late = 0, []
+    for r in rows:
+        if not _is_courier(str(r.get("Delivery.Courier") or "")):
+            continue
+        delivered += 1
+        delay = float(r.get("Delivery.Delay") or 0)
+        if delay <= 0:
+            continue
+        stages = _late_stages(r)
+        late.append({
+            "cause": _attribute_cause(stages, norms, delay),
+            "stages": {k: (round(v) if v is not None else None) for k, v in stages.items()},
+            "number": r.get("Delivery.Number"),
+            "date": str(r.get("OpenDate.Typed") or "")[:10],
+            "courier": str(r.get("Delivery.Courier") or "").strip(),
+            "address": _clean_address(r.get("Delivery.Address"), r.get("Delivery.Line1")),
+            "source": _SOURCE_RU.get(str(r.get("Delivery.SourceKey") or "").upper(), ""),
+            "expected": _hhmm(r.get("Delivery.ExpectedTime")),
+            "actual": _hhmm(r.get("Delivery.ActualTime")),
+            "delay_min": round(delay),
+            "amount": round(float(r.get("DishDiscountSumInt") or 0)),
+            # Опоздание в сутки — это не «курьер задержался», а незакрытый вовремя
+            # заказ. Помечаем, чтобы такие строки не читались как реальный сервис.
+            "suspicious": delay > LATE_SUSPICIOUS_MIN,
+        })
+
+    late.sort(key=lambda x: x["delay_min"], reverse=True)
+    delays = sorted(x["delay_min"] for x in late)
+    # Что чаще всего съедало время — главный вывод карточки, а не список строк.
+    cause_count: Dict[str, int] = {}
+    for x in late:
+        cause_count[x["cause"]["key"]] = cause_count.get(x["cause"]["key"], 0) + 1
+    top = max(cause_count, key=cause_count.get) if cause_count else None
+    resp = {
+        "delivered": delivered,
+        "late": len(late),
+        "norms": {k: round(v) for k, v in norms.items()},
+        "by_type": by_type,
+        "causes": [{"key": k, "label": LATE_STAGES[k], "count": n}
+                   for k, n in sorted(cause_count.items(), key=lambda kv: -kv[1])],
+        "top_cause": ({"key": top, "label": LATE_STAGES[top], "count": cause_count[top]}
+                      if top else None),
+        "late_pct": round(len(late) / delivered * 100) if delivered else 0,
+        "median_delay": delays[len(delays) // 2] if delays else 0,
+        "worst_delay": delays[-1] if delays else 0,
+        "suspicious": sum(1 for x in late if x["suspicious"]),
+        "orders": late[:limit],
+        "period": {"from": date_from, "to": date_to},
+    }
+    _set_cached(key, resp)
+    return resp
+
+
 @app.get("/api/staff/{org_id}")
 async def staff(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
@@ -1895,6 +2532,199 @@ async def chaspik_export(
     if r.status_code != 200:
         raise HTTPException(status_code=502, detail=f"saya-kds {r.status_code}: {r.text[:200]}")
     return r.json()
+
+
+# Склад: строгий баланс по позиции — было + приход − остаток = фактически ушло;
+# сверяем с «ушло по продажам» → расхождение (недостача/фрод/списание) в тенге.
+_DEMO_STOCK_RAW = [
+    # (позиция, ед, было, приход, продано, остаток, цена ₸/ед)
+    ("Говядина рибай", "кг", 16, 42, 44, 6, 5200),
+    ("Сыр моцарелла", "кг", 24, 16, 30, 8, 3100),
+    ("Лосось филе", "кг", 12, 20, 20, 6, 6800),
+    ("Томаты", "кг", 30, 8, 33, 2, 900),
+    ("Сливки 33%", "л", 8, 28, 7, 27, 1400),
+    ("Оливковое масло", "л", 14, 6, 5, 15, 2600),
+    ("Мука", "кг", 50, 0, 12, 38, 320),
+]
+
+
+def _demo_stock() -> Dict[str, Any]:
+    rows = []
+    for name, unit, opening, incoming, sold, closing, price in _DEMO_STOCK_RAW:
+        actual = opening + incoming - closing          # фактически ушло
+        disc = actual - sold                            # расхождение (>0 — недостача)
+        disc_money = max(0, round(disc * price))
+        issue = None
+        if closing <= 2 and sold >= 25:
+            issue = "stockout"                          # стокаут ходовой — потеря выручки
+        elif closing >= 25 and sold <= 8:
+            issue = "overstock"                         # перезатарка скоропорта — будущее списание
+        rows.append({
+            "position": name, "unit": unit, "opening": opening, "incoming": incoming,
+            "sold": sold, "closing": closing, "actual_used": actual, "discrepancy": disc,
+            "discrepancy_money": disc_money, "price": price, "issue": issue,
+        })
+    rows.sort(key=lambda r: (r["discrepancy_money"], 1 if r["issue"] else 0), reverse=True)
+    return {"rows": rows, "total_discrepancy": sum(r["discrepancy_money"] for r in rows),
+            "branch": "Демо Ресторан · Алматы"}
+
+
+async def _stock_balance(client, dept: str, org_name: str, org_id_for_nom: str,
+                         date_from: str, date_to: str) -> Dict[str, Any]:
+    """Строгий баланс склада филиала: было(начало)+приход−остаток(конец)=ушло по факту;
+    сверяем с теоретическим расходом по техкартам → расхождение (утечка) в ₸."""
+    # 1. склады филиала (изоляция) — parentId == org
+    try:
+        stores = await client.get_stores(org_name)
+    except Exception:
+        stores = []
+    store_ids = {s.get("id") for s in stores if s.get("id")}
+
+    start_ts = date_from[:10] + "T00:00:00.000"
+    end_ts = date_to[:10] + "T23:59:59.000"
+    open_rows, close_rows, inc_items, fc = await asyncio.gather(
+        client.get_balance_rows(start_ts),
+        client.get_balance_rows(end_ts),
+        client.get_invoice_items_olap([dept], date_from, date_to),
+        _foodcost_month(client, dept, date_from, date_to),
+        return_exceptions=True,
+    )
+    if isinstance(open_rows, Exception) or isinstance(close_rows, Exception):
+        raise open_rows if isinstance(open_rows, Exception) else close_rows
+
+    def _agg(rows):
+        amt, summ = {}, {}
+        for r in (rows or []):
+            if store_ids and r.get("store") not in store_ids:
+                continue
+            pid = r.get("product")
+            if not pid:
+                continue
+            amt[pid] = amt.get(pid, 0.0) + float(r.get("amount", 0) or 0)
+            summ[pid] = summ.get(pid, 0.0) + float(r.get("sum", 0) or 0)
+        return amt, summ
+
+    opening, _ = _agg(open_rows)
+    closing, close_sum = _agg(close_rows)
+
+    incoming: Dict[str, float] = {}
+    if not isinstance(inc_items, Exception):
+        for it in inc_items:
+            pid = it.get("product_id")
+            if pid:
+                incoming[pid] = incoming.get(pid, 0.0) + float(it.get("amount", 0) or 0)
+
+    # 2. теоретический расход по техкартам (Σ продано×норма ингредиента)
+    consumed: Dict[str, float] = {}
+    dishes = fc[0] if (not isinstance(fc, Exception) and fc) else []
+    try:
+        name_map, prices = await asyncio.gather(client.get_dish_name_map(), client.get_stock_prices())
+        sold = [{"pid": name_map.get(str(d.get("name", "")).strip().lower()), "cnt": float(d.get("count", 0) or 0)}
+                for d in dishes]
+        pids = [s["pid"] for s in sold if s["pid"]]
+        recipes: Dict[str, list] = {}
+        for i in range(0, len(pids), 6):
+            batch = pids[i:i + 6]
+            got = await asyncio.gather(*[_get_recipe_cached(client, p, date_to[:10]) for p in batch],
+                                       return_exceptions=True)
+            for p, items in zip(batch, got):
+                recipes[p] = [] if isinstance(items, Exception) else items
+        stock_pids = set(opening) | set(closing) | set(incoming)
+        for s in sold:
+            rec = recipes.get(s["pid"], [])
+            if rec:
+                for ing in rec:
+                    ip = ing.get("productId")
+                    if ip:
+                        consumed[ip] = consumed.get(ip, 0.0) + s["cnt"] * float(ing.get("amount", 0) or 0)
+            elif s["pid"] in stock_pids:
+                # товар без техкарты, продан напрямую (напитки и т.п.) → расход = продажи
+                consumed[s["pid"]] = consumed.get(s["pid"], 0.0) + s["cnt"]
+    except Exception as e:
+        logger.warning(f"[stock] расход по техкартам {org_name}: {e!r}")
+        prices = {}
+
+    # 3. имена/ед. измерения (unit у части товаров приходит как id единицы → резолвим в «кг/шт/л»)
+    try:
+        munits = await client.get_measure_units_map()
+    except Exception:
+        munits = {}
+
+    def _unit_name(u: str) -> str:
+        if not u:
+            return ""
+        if u in munits:
+            return munits[u]
+        return "" if (len(u) >= 32 and u.count("-") >= 3) else u  # похоже на uuid — не показываем
+
+    names: Dict[str, str] = {}
+    units: Dict[str, str] = {}
+    try:
+        for p in await client.search_nomenclature(org_id_for_nom, "", limit=10000):
+            if p.get("id"):
+                names[p["id"]] = p.get("name") or ""
+                units[p["id"]] = _unit_name(p.get("unit") or "")
+    except Exception:
+        pass
+
+    pids_all = set(opening) | set(incoming) | set(closing) | set(consumed)
+    rows = []
+    for pid in pids_all:
+        op = round(opening.get(pid, 0.0), 2)
+        inc = round(incoming.get(pid, 0.0), 2)
+        cl = round(closing.get(pid, 0.0), 2)
+        sold_q = round(consumed.get(pid, 0.0), 2)
+        actual = round(op + inc - cl, 2)
+        # цена = учётная себестоимость (остаток) или из stock_prices
+        price = (close_sum.get(pid, 0.0) / closing[pid]) if closing.get(pid) else float(prices.get(pid, 0) or 0)
+        disc = round(actual - sold_q, 2)
+        disc_money = round(max(0.0, disc) * price)
+        # Отрицательный остаток в iiko = учёт по товару не ведётся (мусор) → выкидываем целиком:
+        # ни утечку по нему не посчитать, ни «−110 на складе» показывать нельзя.
+        if op < 0 or cl < 0:
+            continue
+        # интересны только позиции с движением/расхождением
+        if abs(actual) < 0.01 and sold_q < 0.01 and inc < 0.01:
+            continue
+        issue = None
+        if cl <= 0 and sold_q > 0:
+            issue = "stockout"
+        rows.append({
+            "position": names.get(pid) or pid[:8], "unit": units.get(pid, ""),
+            "opening": op, "incoming": inc, "sold": sold_q, "closing": cl,
+            "actual_used": actual, "discrepancy": disc,
+            "discrepancy_money": disc_money, "price": round(price, 2), "issue": issue,
+        })
+    rows.sort(key=lambda r: r["discrepancy_money"], reverse=True)
+    total = sum(r["discrepancy_money"] for r in rows)
+    return {"available": True, "rows": rows[:60], "total_discrepancy": total, "branch": org_name}
+
+
+@app.get("/api/stock/{org_id}")
+async def stock(org_id: str, user: Dict = Depends(get_current_user)):
+    """Склад: строгий баланс (было+приход−остаток=ушло по факту) vs расход по техкартам
+    → расхождение (утечка) в ₸. Изоляция по складу филиала."""
+    if _use_demo_data(user, org_id):
+        return _demo_stock()
+    real_org = _get_org_id(org_id, user)
+    key = _cache_key(user.get("id", 0), "stock", real_org, "month")
+    cached = _get_cached(key)
+    if cached is not None:
+        return cached
+    info = _get_restaurant_info(real_org, user)
+    login = info["api_login"]
+    date_from, date_to = get_period_dates("month")
+    client = get_client(login, info.get("iiko_server"), info.get("api_password"))
+    try:
+        res = await _stock_balance(client, _olap_dept(real_org, info),
+                                   info.get("org_name", ""), real_org, date_from, date_to)
+        _set_cached(key, res)
+        return res
+    except Exception as e:
+        logger.warning(f"[stock] {real_org}: {e!r}")
+        return {"available": False, "rows": [], "total_discrepancy": 0,
+                "branch": info.get("org_name", ""),
+                "reason": "Не удалось собрать баланс склада — обнови через минуту."}
 
 
 @app.get("/api/foodcost/{org_id}")
@@ -2062,6 +2892,22 @@ async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_c
     return {"total": round(sum(op["amount"] for op in operations)), "operations": operations, "categories": categories}
 
 
+def _own_position(it: Dict[str, Any]) -> Dict[str, Any]:
+    """Позиция своей накладной → строка состава для карточки.
+
+    Ключи у своих накладных СВОИ: распознавание и редактор пишут quantity и
+    price_per_unit, а из iiko приходят amount и price. Читаем оба набора —
+    иначе состав есть в базе, а в карточке нули.
+    """
+    return {
+        "name": it.get("name") or it.get("iiko_product_name") or "Позиция",
+        "qty": it.get("quantity") or it.get("qty") or it.get("amount") or 0,
+        "unit": it.get("unit") or it.get("iiko_unit") or "",
+        "price": it.get("price_per_unit") or it.get("price") or 0,
+        "sum": it.get("total") or it.get("sum") or 0,
+    }
+
+
 @app.get("/api/invoices/{org_id}")
 async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
@@ -2098,13 +2944,21 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
         for inv in data.get("invoiceIncomings", []):
             supplier = inv.get("supplier", {}) or {}
             items = inv.get("items", []) or []
+            positions = [{
+                "name": (it.get("product", {}) or {}).get("name") or it.get("productName") or it.get("name") or "Позиция",
+                "qty": it.get("amount") or it.get("num") or 0,
+                "unit": (it.get("product", {}) or {}).get("mainUnit") or it.get("unit") or "",
+                "price": it.get("price") or 0,
+                "sum": it.get("sum") or it.get("sumWithoutNds") or 0,
+            } for it in items[:40]]
             result_list.append({
                 "id": (inv.get("documentNumber", "") or (inv.get("id", "") or "")[:8])[:8],
                 "status": STATUS_MAP.get(inv.get("status", ""), inv.get("status", "")),
                 "supplier": supplier.get("name", "—"),
                 "date": _fmt_date(inv.get("dateIncoming", "")),
                 "items": len(items),
-                "amount": float(inv.get("sum", 0) or 0)
+                "amount": float(inv.get("sum", 0) or 0),
+                "positions": positions,
             })
     except Exception as e:
         print(f"[invoices] OLAP failed: {e}")
@@ -2127,6 +2981,15 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
             raw_status = b.get("status") or "draft"
             if raw_status == "pending":
                 continue  # ещё в работе бота
+            # Состав. Накладные из iiko отдавали positions, а свои — только
+            # ЧИСЛО позиций: в карточке у них было пусто, «состава нет».
+            # Состав всё это время лежал в базе, просто не доезжал до экрана.
+            try:
+                own_items = json.loads(b.get("items") or "[]")
+            except Exception as e:
+                logger.warning(f"[invoices] битый состав BOT-{b['id']}: {e!r}")
+                own_items = []
+            positions = [_own_position(it) for it in own_items[:40] if isinstance(it, dict)]
             result_list.append({
                 "id": f"BOT-{b['id']}",
                 "bot_id": b["id"],
@@ -2134,7 +2997,8 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
                 "raw_status": raw_status,
                 "supplier": b.get("supplier") or "—",
                 "date": (b.get("date") or "")[:10] or (b.get("created_at") or "")[:10],
-                "items": len(json.loads(b.get("items") or "[]")),
+                "items": len(own_items),
+                "positions": positions,
                 "amount": float(b.get("total_amount") or 0),
                 "vat_amount": float(b.get("vat_amount") or 0),
                 "iiko_doc_id": b.get("iiko_doc_id") or "",
@@ -3366,6 +4230,73 @@ async def invoice_edit_post(pending_id: str, payload: InvoiceEditPayload,
     return {"ok": True}
 
 
+class RecognizeImage(BaseModel):
+    data: str                       # base64 без префикса data:
+    mime: str = "image/jpeg"
+
+
+class RecognizePayload(BaseModel):
+    images: List[RecognizeImage] = Field(default_factory=list, max_length=10)
+
+
+@app.post("/api/invoice/recognize/{org_id}")
+async def invoice_recognize(org_id: str, payload: RecognizePayload,
+                            user: Dict = Depends(get_current_user)):
+    """Фото накладной → распознанные позиции, СРАЗУ сопоставленные с товарами iiko.
+
+    Тот же путь, что у бота, только по HTTP: сайт грузит снимки, Claude Vision
+    читает их как один документ, дальше работает наше сопоставление (память
+    исправлений → скоринг по словам) по локальной базе закупаемых товаров.
+    В iiko отсюда ничего не уходит: это разбор, отправку делает оператор.
+    """
+    # base64, а не multipart: python-multipart в зависимостях нет, а падать
+    # на импорте из-за одной ручки нельзя — это уронило бы весь сервис.
+    if not payload.images:
+        raise HTTPException(status_code=400, detail="Нет файлов")
+    images: List[Tuple[bytes, str]] = []
+    for im in payload.images:
+        b64 = (im.data or "").split(",", 1)[-1]     # терпим префикс data:image/...
+        try:
+            raw = base64.b64decode(b64, validate=False)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Файл не читается")
+        if not raw:
+            continue
+        if len(raw) > 12 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Файл больше 12 МБ")
+        images.append((raw, im.mime or "image/jpeg"))
+    if not images:
+        raise HTTPException(status_code=400, detail="Пустые файлы")
+
+    result = await analyze_invoice_photos(images)
+    if "error" in result:
+        return {"ok": False, "error": result["error"]}
+    items = result.get("items") or []
+
+    matched = unmatched = 0
+    if not _use_demo_data(user, org_id):
+        real_org = _get_org_id(org_id, user)
+        info = _get_restaurant_info(real_org, user)
+        client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+        try:
+            _s, miss, _w = await _auto_match_items(client, real_org, items)
+            unmatched = len(miss)
+        except Exception as e:
+            logger.warning(f"[invoice-recognize] сопоставление {org_id}: {e!r}")
+        matched = sum(1 for it in items if it.get("iiko_product_id"))
+    return {
+        "ok": True,
+        "supplier": result.get("supplier"),
+        "date": result.get("date"),
+        "total_amount": result.get("total_amount", 0),
+        "vat_amount": result.get("vat_amount", 0),
+        "items": items,
+        "matched": matched,
+        "unmatched": unmatched,
+        "needs_review": sum(1 for it in items if it.get("needs_review")),
+    }
+
+
 @app.get("/api/nomenclature/search/{org_id}")
 async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
                                limit: int = Query(30, le=50),
@@ -3505,6 +4436,54 @@ async def invoice_saved_get(invoice_id: int, user: Dict = Depends(get_current_us
         "search_org_id": inv.get("organization_id"),
         "status": inv.get("status"),
     }
+
+
+class DraftPayload(BaseModel):
+    items: List[Dict[str, Any]]
+    supplier: Optional[str] = None
+    supplier_id: Optional[str] = None
+    date: Optional[str] = None
+    total_amount: Optional[float] = None
+    vat_amount: Optional[float] = None
+
+
+@app.post("/api/invoice/draft/{org_id}")
+async def invoice_draft_create(org_id: str, payload: DraftPayload,
+                               user: Dict = Depends(get_current_user)):
+    """Сохранить разобранную накладную как локальный черновик и вернуть её id.
+
+    Нужен сайту: распознали фото → сопоставили → сохранили → дальше отправка
+    идёт существующей ручкой /api/invoice-saved/{id}/send. Раньше черновик мог
+    создать только бот, поэтому без телеграма накладную было не пробить.
+    В iiko здесь ничего не создаётся — это наш черновик.
+    """
+    if _use_demo_data(user, org_id):
+        raise HTTPException(status_code=400, detail="Демо-режим: накладные не сохраняются")
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Нет позиций")
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    date_str = (payload.date or local_now().strftime("%Y-%m-%d"))[:10]
+    total = float(payload.total_amount or sum(float(i.get("total") or 0) for i in payload.items))
+    unmatched = [i for i in payload.items if not i.get("iiko_product_id")]
+    inv_id = save_bot_invoice(
+        telegram_id=user.get("id", 0),
+        telegram_user=user.get("username") or "site",
+        raw_text="[САЙТ]",
+        supplier=payload.supplier or "",
+        branch=info.get("org_name", "") or "",
+        items_json=json.dumps(payload.items, ensure_ascii=False),
+        total_amount=total,
+        date=date_str,
+        vat_amount=float(payload.vat_amount or 0),
+        supplier_id=payload.supplier_id,
+        organization_id=real_org,
+        dedup_hash=_compute_dedup_hash(payload.supplier or "", date_str, total,
+                                       payload.items, real_org),
+        status="needs_mapping" if unmatched else "ready",
+    )
+    _invalidate_cache("invoices", real_org)
+    return {"ok": True, "invoice_id": inv_id, "unmatched": len(unmatched)}
 
 
 class SavedInvoicePayload(BaseModel):
@@ -3715,12 +4694,19 @@ DEMO_REG_PROMPTS = {
 }
 
 def _invoice_kb(pending_id: str) -> dict:
-    """Динамическая клавиатура превью — WebApp-кнопка редактирования с pending_id в URL."""
+    """Клавиатура превью накладной.
+
+    Кнопки «Редактировать» больше нет: она открывала мини-апп, а мини-аппа
+    больше нет — по «/» теперь сайт, и `?edit=` он не понимает. Открывать
+    вместо редактора главный экран хуже, чем не открывать вовсе. Правка
+    накладной переехала на сайт, вкладка «Склад · заявки».
+    Отправка и отмена работают как работали — поток бота цел.
+    """
+    del pending_id                      # больше не нужен: ссылки на мини-апп нет
     return {
         "inline_keyboard": [
             [{"text": "📤 Отправить в iiko", "callback_data": "act:send"}],
-            [{"text": "✏️ Редактировать",   "web_app": {"url": f"{MINIAPP_URL}/?edit={pending_id}"}},
-             {"text": "❌ Отменить",         "callback_data": "act:cancel"}],
+            [{"text": "❌ Отменить", "callback_data": "act:cancel"}],
         ]
     }
 
@@ -3757,7 +4743,7 @@ WELCOME_TEXT = (
 def _start_kb() -> dict:
     return {
         "inline_keyboard": [
-            [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "🚀 Открыть кабинет", "web_app": {"url": f"{MINIAPP_URL}/"}}],
             [{"text": "📦 Лимит накладных", "callback_data": "limit:show"}],
             [{"text": "📖 FAQ / Инструкция", "callback_data": "info:faq"}],
             [{"text": "🔧 Как настроить iiko Server", "callback_data": "info:setup"}],
@@ -3891,7 +4877,7 @@ def _faq_back_kb() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "← К списку вопросов", "callback_data": "info:faq"}],
-            [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "🚀 Открыть кабинет", "web_app": {"url": f"{MINIAPP_URL}/"}}],
         ]
     }
 
@@ -3940,7 +4926,7 @@ def _setup_back_kb() -> dict:
     return {
         "inline_keyboard": [
             [{"text": "← В начало", "callback_data": "info:start"}],
-            [{"text": "🚀 Открыть Mini App", "web_app": {"url": f"{MINIAPP_URL}/"}}],
+            [{"text": "🚀 Открыть кабинет", "web_app": {"url": f"{MINIAPP_URL}/"}}],
         ]
     }
 
@@ -6476,8 +7462,9 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
     интервалы (задвоенные роли на терминале) сливаются, чтобы часы не удваивались.
     Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours."""
     by_emp_day: Dict[Any, list] = {}
+    org_key = org_name.strip().lower()
     for a in attendance:
-        if org_name and a.get("departmentName") != org_name:
+        if org_key and (a.get("departmentName") or "").strip().lower() != org_key:
             continue
         try:
             df = datetime.fromisoformat(a["dateFrom"])
@@ -6507,6 +7494,1118 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
             })
     rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
     return rows
+
+
+def _last_completed_week() -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Последняя ПОЛНОСТЬЮ прошедшая неделя плана → (ym, {widx, from, to}).
+
+    Недели те же, что во вкладке «План» (7-дневные куски от 1-го числа), иначе
+    похвала «план недели выполнен» считалась бы не по той неделе, что видит
+    владелец. В начале месяца берём последнюю неделю прошлого месяца.
+    """
+    today = local_now().date()
+    for ym in (today.strftime("%Y-%m"),
+               (today.replace(day=1) - timedelta(days=1)).strftime("%Y-%m")):
+        done = [w for w in _month_weeks(ym) if date.fromisoformat(w["to"]) < today]
+        if done:
+            return ym, done[-1]
+    return None
+
+
+async def _weekplan_status(org: str, real_org: str, user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """План vs факт за последнюю завершённую неделю — основа похвалы «план выполнен».
+
+    Один запрос продаж на филиал (не пять, как в /api/weekplan): ассистент и так
+    делает 7 обращений к iiko на филиал, а филиалов бывает 13.
+    """
+    wk = _last_completed_week()
+    if not wk:
+        return None
+    ym, w = wk
+    plan = {t: 0 for t in PLAN_TYPES}
+    for r in get_weekly_plans(real_org, ym):
+        if r["widx"] == w["widx"] and r["ch_type"] in PLAN_TYPES:
+            plan[r["ch_type"]] = r["planned"]
+    if not any(plan.values()):
+        return None  # плана на неделю нет — хвалить не за что
+    fact = {t: 0 for t in PLAN_TYPES}
+    try:
+        s = await sales(org, "custom", w["from"], w["to"], None, user=user)
+        for c in s.get("channels", []):
+            fact[_classify_channel(c.get("name"))] += int(c.get("orders", 0) or 0)
+    except Exception as e:
+        logger.warning(f"[assistant] план недели {real_org}: {e!r}")
+        return None
+    TITLES = {"hall": "зал", "pickup": "вынос", "delivery": "доставка", "agg": "агрегаторы"}
+    return {
+        "week": f"{w['from'][5:]}–{w['to'][5:]}",
+        # единица подписана явно: без неё модель пересказывала план как «гостей»
+        "unit": "заказов",
+        "types": [{"type": TITLES[t], "plan_orders": plan[t], "fact_orders": fact[t],
+                   "done": fact[t] >= plan[t]}
+                  for t in PLAN_TYPES if plan[t] > 0],
+    }
+
+
+def _late_signal(ld: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Ответ /api/late-deliveries → сигнал «опоздавшие заказы» для оценки.
+
+    Отдельной функцией, потому что на форме этого ответа уже обожглись: late_pct
+    лежит ВЕРХНИМ полем, а оба вызывающих читали ld["summary"]["late_pct"].
+    Ключа summary там нет и не было — критерий молчал у всех девяти филиалов,
+    хотя данные приходили (Алиева: 429 доставок, 52 опоздали, 12%).
+    """
+    if not isinstance(ld, dict) or ld.get("error"):
+        return None
+    delivered = int(ld.get("delivered") or 0)
+    pct = ld.get("late_pct")
+    if pct is None or not delivered:
+        return None      # доставок нет — филиал не «идеальный», критерий выпадает
+    return {"late_pct": pct, "deliveries": delivered, "late": int(ld.get("late") or 0)}
+
+
+# Показатели недели для вкладки «План» — те же, что в листе «Неделя NN» у
+# владельца: время приготовления, курьер в дороге, опоздания, рейтинг.
+# Всё это сайт уже достаёт, просто лежало на разных вкладках.
+# ключ, подпись, единица, «меньше — лучше», порог сдвига, порог в процентах?
+# Порог заказов намеренно относительный: в штуках «плюс три заказа» проходило
+# у всех девяти филиалов разом, и открытку получала вся сеть просто за сезон.
+PLAN_METRICS = [
+    ("kitchen", "Время приготовления", "мин", True, 2.0, False),
+    ("road", "Курьер в дороге", "мин", True, 2.0, False),
+    ("idle", "Ожидание курьера", "мин", True, 2.0, False),
+    ("late_pct", "Опоздавших заказов", "%", True, 2.0, False),
+    ("rating", "Рейтинг агрегаторов", "", False, 0.1, False),
+    ("orders", "Заказов за неделю", "", False, 10.0, True),
+]
+
+
+def plan_wins(now: Dict[str, Any], prev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Что реально стало лучше неделя к неделе.
+
+    Поздравлять надо за движение, а не за «и так хорошо»: филиал с вечными
+    18 минутами не должен получать открытку каждую неделю. И порог обязателен —
+    минута дрожи или 0,02 рейтинга это шум, а поздравления за шум обесцениваются
+    быстрее, чем успевают кого-то порадовать.
+    """
+    out: List[Dict[str, Any]] = []
+    for key, label, unit, lower_better, eps, rel in PLAN_METRICS:
+        a, b = now.get(key), prev.get(key)
+        if a is None or b is None:
+            continue
+        diff = (float(b) - float(a)) if lower_better else (float(a) - float(b))
+        if diff <= 0:
+            continue
+        if diff < (abs(float(b)) * eps / 100 if rel else eps):
+            continue
+        out.append({"key": key, "label": label, "unit": unit,
+                    "from": round(float(b), 2), "to": round(float(a), 2),
+                    "better": round(diff, 2),
+                    "pct": round(diff / float(b) * 100) if float(b) else None})
+    out.sort(key=lambda w: -(w["pct"] or 0))
+    return out
+
+
+def _rating_signal(rv: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Отзывы филиала → средний балл для оценки, приведённый к пятибалльной шкале.
+
+    Приводить обязательно: Wolt отдаёт 8,8 из 10, 2ГИС — 4,6 из 5. Среднее
+    «сырых» чисел дало бы филиалу с Wolt фору в полтора балла из воздуха.
+    """
+    if not isinstance(rv, dict):
+        return None
+    vals = []
+    for p in rv.get("platforms") or []:
+        r, scale = p.get("rating"), float(p.get("scale") or 5)
+        if r is None or scale <= 0:
+            continue
+        vals.append(float(r) / scale * 5)
+    if not vals:
+        return None
+    return {"avg": round(sum(vals) / len(vals), 2), "platforms": len(vals)}
+
+
+def _shifts_signal(pending: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Непринятые кассовые смены → сигнал. Ноль непринятых — это результат,
+    а отсутствие ответа (облачный iiko) — молчание, а не сто баллов."""
+    if not isinstance(pending, dict) or pending.get("count") is None:
+        return None
+    return {"pending": int(pending["count"])}
+
+
+def _plan_days_and_total(plans: Dict[int, Dict[str, int]], upto_dow: int) -> int:
+    """Сумма плана по дням недели включительно до upto_dow (1..7).
+
+    Нужна для незавершённой недели: сравнивать факт трёх дней с планом семи —
+    значит выдать филиалу ноль просто за то, что сегодня среда.
+    """
+    return sum(sum(v.values()) for d, v in plans.items() if 1 <= int(d) <= upto_dow)
+
+
+async def _plan_exec_signal(org: str, user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Выполнение плана заказов.
+
+    Берём последнюю ЗАВЕРШЁННУЮ неделю — она честнее всего. Но если плана на неё
+    нет, а на текущую есть (владелец только что проставил план на всю сеть),
+    считаем текущую ПРОПОРЦИОНАЛЬНО прошедшим дням: план понедельника–среды
+    против факта понедельника–среды. Иначе критерий молчал бы до воскресенья,
+    хотя план уже введён — ровно на это и жаловались 25.08.
+    """
+    from database import get_day_plans
+    today = local_now().date()
+    mon_this = today - timedelta(days=today.isoweekday() - 1)
+    done_wk = _iso_week_of(mon_this - timedelta(days=1))
+    cur_wk = _iso_week_of(today)
+
+    plans_done = get_day_plans([org], done_wk).get(org) or {}
+    if _plan_days_and_total(plans_done, 7):
+        wk, plans, upto, partial = done_wk, plans_done, 7, False
+    else:
+        plans_cur = get_day_plans([org], cur_wk).get(org) or {}
+        # Считаем с первого же завершённого дня. Порог в два дня я поставил из
+        # осторожности — и во вторник критерий снова молчал, хотя план введён и
+        # понедельник закрыт. План на день берётся из средней за шесть недель,
+        # так что день против дня — сравнение честное, а не качели.
+        upto = today.isoweekday() - 1
+        if upto < 1 or not _plan_days_and_total(plans_cur, upto):
+            return None
+        wk, plans, partial = cur_wk, plans_cur, True
+
+    total_plan = _plan_days_and_total(plans, upto)
+    if not total_plan:
+        return None
+    d_from, d_to = _iso_week_bounds(wk)
+    if partial:
+        d_to = d_from + timedelta(days=upto - 1)
+    try:
+        fact = _fold_by_dow(await _orders_by_day(org, d_from, d_to, user))["dow"]
+    except Exception as e:
+        logger.warning(f"[score] план/факт {org}: {e!r}")
+        return None
+    total_fact = sum(sum(v.values()) for d, v in fact.items() if 1 <= int(d) <= upto)
+    return {"pct": round(total_fact / total_plan * 100, 1), "week": wk,
+            "plan": total_plan, "fact": total_fact,
+            "days": upto, "partial": partial}
+
+
+async def _week_over_week(org: str, user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Эта неделя против прошлой: выручка, средний чек, гости.
+
+    Считаем здесь, а не берём из /api/dashboard: там revenue_change/avg_check_change
+    захардкожены нулём, то есть дельт у нас до сих пор не было вообще.
+    """
+    from fastapi import Response as _Resp
+    today = local_now().date()
+    # Берём две ПОЛНЫЕ недели: в понедельник текущая неделя — это один день, и
+    # сравнение «1 день против 7» дало бы фальшивое падение на 85%.
+    cur_to = today - timedelta(days=today.weekday() + 1)     # воскресенье прошлой недели
+    cur_from = cur_to - timedelta(days=6)
+    prev_to, prev_from = cur_from - timedelta(days=1), cur_from - timedelta(days=7)
+
+    async def rev(d_from, d_to):
+        d = await dashboard(org, _Resp(), "custom", d_from.isoformat(), d_to.isoformat(), None, user=user)
+        return (float(d.get("revenue_today") or 0), float(d.get("avg_check") or 0),
+                float(d.get("guests") or 0), float(d.get("open_orders") or 0))
+
+    try:
+        cur, prev = await asyncio.gather(rev(cur_from, cur_to), rev(prev_from, prev_to))
+    except Exception as e:
+        logger.warning(f"[assistant] неделя к неделе {org}: {e!r}")
+        return None
+    if not prev[0]:
+        return None  # прошлой недели нет — сравнивать не с чем
+
+    def pct(a: float, b: float) -> Optional[float]:
+        return round((a - b) / b * 100, 1) if b else None
+
+    return {
+        "week": f"{cur_from.strftime('%d.%m')}–{cur_to.strftime('%d.%m')}",
+        "prev_week": f"{prev_from.strftime('%d.%m')}–{prev_to.strftime('%d.%m')}",
+        "revenue_pct": pct(cur[0], prev[0]),
+        "avg_check_pct": pct(cur[1], prev[1]),
+        "guests_pct": pct(cur[2], prev[2]),
+        # Рост КОЛИЧЕСТВА заказов — отдельный критерий оценки филиала: выручку
+        # можно поднять ценой, а заказы это гости. open_orders = OrdersCount из OLAP.
+        "orders_pct": pct(cur[3], prev[3]),
+        "orders_now": round(cur[3]), "orders_was": round(prev[3]),
+        "revenue_now": round(cur[0]), "revenue_was": round(prev[0]),
+    }
+
+
+async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
+    """Компактные сигналы по всем филиалам ЗАЛОГИНЕННОГО клиента (1..N) для ИИ-ассистента.
+    Сбой одного филиала не роняет остальные. Семафор ограничивает нагрузку на iiko
+    у больших сетей (десятки филиалов)."""
+    from fastapi import Response as _Resp
+    rests = get_restaurants(user.get("id", 0))
+    out_branches: List[Dict[str, Any]] = []
+    sem = asyncio.Semaphore(6)  # не более 6 филиалов одновременно → не хаммерим сервер клиента
+
+    async def one(r: Dict[str, Any]) -> Dict[str, Any]:
+        org = r.get("organization_id")
+        name = r.get("organization_name") or "Филиал"
+        b: Dict[str, Any] = {"name": name, "foodcost": None, "revenue": None,
+                             "cancels": None, "writeoffs": None, "reviews": [],
+                             "peak": None, "has_recipes": None, "has_socials": None,
+                             "stop_count": None, "stop_items": [],
+                             "changes": None, "weekplan": None, "prev": None}
+        try:
+            fc = await foodcost(org, "month", 1, user)
+            b["has_recipes"] = fc.get("fact_pct") is not None
+            if fc.get("fact_pct") is not None:
+                b["foodcost"] = {"fact_pct": fc["fact_pct"], "norm_pct": fc.get("norm_pct", 30),
+                                 "fact_sum": fc.get("fact_sum"), "coverage": fc.get("coverage_pct")}
+        except Exception as e:
+            logger.warning(f"[assistant] foodcost {name}: {e!r}")
+        try:
+            d = await dashboard(org, _Resp(), "month", None, None, None, user=user)
+            b["revenue"] = d.get("revenue_today")  # revenue_today = выручка периода
+        except Exception as e:
+            logger.warning(f"[assistant] dashboard {name}: {e!r}")
+        try:
+            # неделя к неделе — на этом стоит похвала «показатель вырос»
+            b["changes"] = await _week_over_week(org, user)
+        except Exception as e:
+            logger.warning(f"[assistant] дельты {name}: {e!r}")
+        try:
+            b["weekplan"] = await _weekplan_status(org, _get_org_id(org, user), user)
+        except Exception as e:
+            logger.warning(f"[assistant] weekplan {name}: {e!r}")
+        try:
+            cn = await cancels(org, "month", user)
+            b["cancels"] = cn.get("total_amount")
+        except Exception as e:
+            logger.warning(f"[assistant] cancels {name}: {e!r}")
+        try:
+            rv = await branch_reviews(org, user)
+            b["has_socials"] = bool(rv.get("platforms"))
+            b["reviews"] = [{"label": p.get("label"), "rating": p.get("rating"),
+                             "delta": p.get("delta")} for p in rv.get("platforms", [])]
+        except Exception as e:
+            logger.warning(f"[assistant] reviews {name}: {e!r}")
+        try:
+            b["late"] = _late_signal(await late_deliveries(org, "month", None, None, 1, user))
+        except Exception as e:
+            logger.warning(f"[assistant] опоздания {name}: {e!r}")
+        try:
+            hm = await load_heatmap(org, "month", None, user=user)
+            pk = hm.get("peak") if isinstance(hm, dict) else None
+            if pk and pk.get("orders"):
+                b["peak"] = {"day": assistant_ai.DOW_RU.get(pk.get("d")), "hour": pk.get("h")}
+        except Exception as e:
+            logger.warning(f"[assistant] heatmap {name}: {e!r}")
+        try:
+            # функция называется get_stoplist и не принимает период — вызов по
+            # старому имени молча падал в NameError, и сигнал стоп-листа терялся
+            st = await get_stoplist(org, user)
+            stops = [i.get("name") for i in st.get("items", []) if i.get("status") == "stop"]
+            b["stop_count"] = len(stops)
+            b["stop_items"] = stops[:5]
+        except Exception as e:
+            logger.warning(f"[assistant] stoplist {name}: {e!r}")
+        try:
+            wo = await writeoffs(org, "month", user)
+            if wo.get("total_written"):
+                b["writeoffs"] = {"total": wo.get("total_written"), "pct": wo.get("loss_pct")}
+        except Exception as e:
+            logger.warning(f"[assistant] writeoffs {name}: {e!r}")
+        return b
+
+    async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
+        async with sem:  # семафор ограничивает число одновременных обращений к iiko
+            return await one(r)
+
+    results = await asyncio.gather(*(throttled(r) for r in rests), return_exceptions=True)
+    tid = int(user.get("id", 0) or 0)
+    for r in results:
+        if isinstance(r, dict):
+            # прошлый снимок → «стало лучше, чем было»; затем кладём текущий.
+            # Снимок пишем ПОСЛЕ чтения, иначе сравнивали бы сами с собой.
+            snap = get_signal_snapshot(tid, r["name"]) if tid else None
+            if snap:
+                r["prev"] = {"taken_at": snap["taken_at"], **snap["payload"]}
+            if tid:
+                save_signal_snapshot(tid, r["name"], _snapshot_of(r))
+            out_branches.append(r)
+    return {"branches": out_branches}
+
+
+def _snapshot_of(b: Dict[str, Any]) -> Dict[str, Any]:
+    """Что запоминаем о филиале до следующего раза: показатели-результаты и
+    управляемые входы. По входам видно, ЧТО владелец сделал (заполнил техкарты,
+    закрыл стоп-лист), по результатам — что из этого вышло."""
+    fc = b.get("foodcost") or {}
+    wo = b.get("writeoffs") or {}
+    return {
+        "revenue": b.get("revenue"),
+        "foodcost_pct": fc.get("fact_pct"),
+        "coverage": fc.get("coverage"),
+        "cancels": b.get("cancels"),
+        "stop_count": b.get("stop_count"),
+        "writeoffs_pct": wo.get("pct"),
+        "ratings": {p.get("label"): p.get("rating")
+                    for p in (b.get("reviews") or []) if p.get("rating") is not None},
+    }
+
+
+_DEMO_ADVICE = [
+    {"id": "demo:fc", "branch": "Демо-ресторан", "severity": "high",
+     "title": "Фудкост выше нормы", "detail": "Фудкост 36% при норме 30% — теряешь ≈ 2,9 млн/мес. Начни с техкарт топ-блюд.",
+     "money": 2900000, "action": {"type": "navigate", "tab": "fc", "hint": None}},
+    {"id": "demo:cn", "branch": "Демо-ресторан", "severity": "med",
+     "title": "Отмены и возвраты", "detail": "Отмены на 52 тыс/мес — разбери топ-причину.",
+     "money": 52000, "action": {"type": "navigate", "tab": "supply", "hint": None}},
+]
+
+
+@app.get("/api/tasks/{org_id}")
+async def tasks_status(org_id: str, days: int = Query(14, ge=1, le=90),
+                       user: Dict = Depends(get_current_user)):
+    """Трекер задач из бота: какие филиалы отметились, какие нет.
+
+    Показываем СВОДКУ по филиалам, а не ленту сообщений: владельцу важно
+    «кто закрыл, кто молчит», а не хронология нажатий.
+    """
+    mine = {r.get("organization_name") for r in get_restaurants(user.get("id", 0))}
+    rows = [t for t in get_bot_tasks(days) if not mine or t.get("branch") in mine]
+
+    by_branch: Dict[str, Dict[str, Any]] = {}
+    for t in rows:
+        b = by_branch.setdefault(t.get("branch") or "—", {
+            "branch": t.get("branch") or "—", "done": 0, "later": 0, "open": 0,
+            "money_open": 0.0, "last": None, "tasks": []})
+        st = t.get("status") or "open"
+        b[st if st in ("done", "later", "open") else "open"] += 1
+        if st != "done":
+            b["money_open"] += float(t.get("money") or 0)
+        b["tasks"].append({
+            "id": t["id"], "title": t.get("title"), "status": st,
+            "money": round(float(t.get("money") or 0)),
+            "created_at": t.get("created_at"), "answered_at": t.get("answered_at"),
+            "answered_by": t.get("answered_by"),
+        })
+        if st == "done" and (not b["last"] or (t.get("answered_at") or "") > b["last"]):
+            b["last"] = t.get("answered_at")
+
+    out = sorted(by_branch.values(), key=lambda x: (-x["open"], -x["money_open"]))
+    total = sum(len(b["tasks"]) for b in out)
+    done = sum(b["done"] for b in out)
+    return {
+        "branches": out, "total": total, "done": done,
+        "open": sum(b["open"] for b in out), "later": sum(b["later"] for b in out),
+        "done_pct": round(done / total * 100) if total else 0,
+        "money_open": round(sum(b["money_open"] for b in out)),
+    }
+
+
+@app.get("/api/director/plan/{org_id}")
+async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
+    """План ИИ-директора: задачи, которые он нашёл сам, и прогресс по ним.
+
+    Задачи считаются из живых данных, но точка отсчёта (baseline) берётся из БД —
+    от неё и меряется движение. Дошли до цели → задача закрывается сама.
+    Сайт показывает прогресс, бот шлёт по этому же источнику уведомления.
+    """
+    real_org = _get_org_id(org_id, user)
+    from fastapi import Response as _Resp
+
+    async def safe(coro, label):
+        try:
+            return await coro
+        except Exception as e:
+            logger.warning(f"[director-plan] {label} {real_org}: {e!r}")
+            return None
+
+    fc, wo, cn, stk, rv = await asyncio.gather(
+        safe(foodcost(org_id, "month", 1, user), "foodcost"),
+        safe(writeoffs(org_id, "month", user), "writeoffs"),
+        safe(cancels(org_id, "month", user), "cancels"),
+        safe(stock(org_id, user), "stock"),
+        safe(branch_reviews(org_id, user), "reviews"),
+    )
+
+    # (key, метрика, текущее, цель, ₸ на кону, «меньше — лучше»)
+    found: List[Tuple[str, str, float, float, float, bool]] = []
+
+    if fc and fc.get("fact_pct") is not None and (fc.get("coverage_pct") or 0) >= 70:
+        fact, norm = float(fc["fact_pct"]), float(fc.get("norm_pct") or 30)
+        if fact > norm:
+            over = float(fc.get("fact_sum") or 0) * (fact - norm) / fact if fact else 0
+            found.append(("fc", "Фудкост", fact, norm, round(over), True))
+
+    if wo and (wo.get("loss_pct") or 0) > 5:
+        pct = float(wo["loss_pct"])
+        money = float(wo.get("total_written") or 0) * (pct - 5) / pct if pct else 0
+        found.append(("wo", "Списания", pct, 5.0, round(money), True))
+
+    if cn and (cn.get("total_amount") or 0) > 0:
+        amt = float(cn["total_amount"])
+        found.append(("cn", "Отмены и возвраты", amt, 0.0, round(amt), True))
+
+    if stk and (stk.get("total_discrepancy") or 0) > 0:
+        d = float(stk["total_discrepancy"])
+        found.append(("stock", "Недостача по складу", d, 0.0, round(d), True))
+
+    if rv and rv.get("platforms"):
+        worst = min(rv["platforms"], key=lambda p: (p.get("rating") or 0) / (p.get("scale") or 5))
+        if worst.get("rating") is not None:
+            scale = worst.get("scale") or 5
+            target = 9.0 if scale >= 10 else 4.7
+            if float(worst["rating"]) < target:
+                found.append(("rev", f"Рейтинг · {worst.get('label')}",
+                              float(worst["rating"]), target, 0, False))
+
+    out = []
+    for key, metric, value, target, money, lower_better in found:
+        row = upsert_director_task(real_org, key, metric, value, target, money)
+        base = float(row.get("baseline") if row.get("baseline") is not None else value)
+        span = (base - target) if lower_better else (target - base)
+        moved = (base - value) if lower_better else (value - base)
+        progress = 0.0 if span <= 0 else max(0.0, min(1.0, moved / span))
+        reached = (value <= target) if lower_better else (value >= target)
+        if reached and row.get("status") != "done":
+            close_director_task(real_org, key, value)
+            row["status"] = "done"
+        out.append({
+            "key": key, "metric": metric,
+            "baseline": round(base, 2), "current": round(value, 2), "target": round(target, 2),
+            "money": money, "progress": round(progress * 100),
+            "status": "done" if reached else row.get("status", "open"),
+            "created_at": row.get("created_at"),
+        })
+
+    # Задачи, которых больше нет в данных: показатель ушёл из проблемной зоны —
+    # считаем закрытыми, иначе план никогда не «выполнялся» бы полностью.
+    live = {k for k, *_ in found}
+    for row in get_director_tasks(real_org):
+        if row["task_key"] in live:
+            continue
+        if row.get("status") != "done":
+            close_director_task(real_org, row["task_key"], row.get("last_value") or 0)
+        out.append({
+            "key": row["task_key"], "metric": row.get("metric") or row["task_key"],
+            "baseline": row.get("baseline"), "current": row.get("last_value"),
+            "target": row.get("target"), "money": row.get("money") or 0,
+            "progress": 100, "status": "done", "created_at": row.get("created_at"),
+        })
+
+    done = [t for t in out if t["status"] == "done"]
+    out.sort(key=lambda t: (t["status"] == "done", -(t["money"] or 0)))
+    return {
+        "tasks": out,
+        "total": len(out),
+        "done": len(done),
+        "done_pct": round(len(done) / len(out) * 100) if out else 0,
+        "money_at_stake": sum(t["money"] or 0 for t in out if t["status"] != "done"),
+    }
+
+
+@app.get("/api/assistant")
+async def assistant(user: Dict = Depends(get_current_user)):
+    """Проактивные советы ИИ-ассистента по всем филиалам залогиненного клиента."""
+    # демо-режим: не зовём Claude, отдаём демо-советы
+    rests = get_restaurants(user.get("id", 0))
+    if not rests or _use_demo_data(user, (rests[0].get("organization_id") if rests else "demo-org-1")):
+        return {"advice": _DEMO_ADVICE, "count": len(_DEMO_ADVICE), "demo": True}
+    # Разбор ассистента — суточная вещь, а общий кэш живёт 3 минуты. С ним каждые
+    # три минуты работы с сайтом уходил новый платный вызов Claude на 13 филиалов:
+    # держим ответ 12 часов, чтобы он считался раз в день, а не при каждом заходе.
+    # Снимок готового разбора: путь в ASSISTANT_SNAPSHOT. Нужен, когда модель
+    # недоступна (кончился баланс), а показать живой разбор надо сейчас —
+    # отдаём последний удачный ответ вместо шаблонных правил.
+    snap = os.getenv("ASSISTANT_SNAPSHOT")
+    if snap:
+        try:
+            with open(snap, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"[assistant] снимок {snap}: {e!r}")
+
+    key = _cache_key(user.get("id", 0), "assistant", "all", "month")
+    cached = _get_cached(key, ttl=ASSISTANT_TTL)
+    if cached is not None:
+        return cached
+    signals = await _gather_assistant_signals(user)
+    advice = await assistant_ai.advise(signals)
+    res = {"advice": advice, "count": len(advice), "demo": False}
+    # TTL пишем и при записи: чистка кэша по размеру ориентируется на него, иначе
+    # 12-часовой разбор выметался как трёхминутный — и уходил новый платный вызов.
+    _set_cached(key, res, ttl=ASSISTANT_TTL)
+    return res
+
+
+# ── Вкладка «План»: недельный план по типам каналов (КОЛ-ВО заказов) + факт ──
+PLAN_TYPES = ["hall", "pickup", "delivery", "agg"]
+
+# Версия классификатора каналов. Снимок факта (plan_day_facts) считается ПО НЕЙ,
+# поэтому при её смене старые строки надо выбросить: до v2 вынос лежал внутри
+# зала, и сравнение «эта неделя против прошлой» смешивало бы два разных правила.
+PLAN_FACTS_VER = "2"
+
+
+def _classify_channel(name: str) -> str:
+    """Тип заказа iiko → канал плана.
+
+    Реальные значения OrderType.Name у сети: «Обычный заказ», «Самовывоз»,
+    «Сайт самовывоз», «Доставка», «Сайт доставка», «Wolt», «Яндекс Еда».
+    Самовывоз проверяем ДО доставки: «Сайт самовывоз» — это вынос, а не доставка.
+    """
+    s = (name or "").lower()
+    if any(k in s for k in ("wolt", "glovo", "яндекс", "yandex")):
+        return "agg"
+    if "самовывоз" in s or "вынос" in s:
+        return "pickup"
+    if "достав" in s:
+        return "delivery"
+    return "hall"  # «Обычный заказ» и всё, что съели в зале
+
+
+def _month_weeks(ym: str) -> List[Dict[str, Any]]:
+    """Месяц 'YYYY-MM' → недели 7-дневными кусками от 1-го числа (widx 1..5)."""
+    y, m = int(ym[:4]), int(ym[5:7])
+    last = calendar.monthrange(y, m)[1]
+    weeks, d, widx = [], 1, 1
+    while d <= last:
+        end = min(d + 6, last)
+        weeks.append({"widx": widx, "from": f"{y:04d}-{m:02d}-{d:02d}", "to": f"{y:04d}-{m:02d}-{end:02d}"})
+        d, widx = end + 1, widx + 1
+    return weeks
+
+
+def _empty_plan_grid(weeks: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    return {str(w["widx"]): {t: 0 for t in PLAN_TYPES} for w in weeks}
+
+
+@app.get("/api/weekplan/{org_id}")
+async def plan_get(org_id: str, month: Optional[str] = None, user: Dict = Depends(get_current_user)):
+    """План (из нашей БД) + факт (кол-во заказов по типам из /api/sales) по неделям месяца."""
+    ym = month or local_now().strftime("%Y-%m")
+    weeks = _month_weeks(ym)
+    if _use_demo_data(user, org_id):
+        plan = {str(w["widx"]): {"hall": 120, "pickup": 30, "delivery": 60, "agg": 40} for w in weeks}
+        fact = {str(w["widx"]): {"hall": 108, "pickup": 34, "delivery": 55, "agg": 47} for w in weeks}
+        return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": True}
+
+    real_org = _get_org_id(org_id, user)
+    plan = _empty_plan_grid(weeks)
+    for r in get_weekly_plans(real_org, ym):
+        wk = str(r["widx"])
+        if wk in plan and r["ch_type"] in PLAN_TYPES:
+            plan[wk][r["ch_type"]] = r["planned"]
+
+    fact = _empty_plan_grid(weeks)
+
+    async def _wk_fact(w):
+        f = {t: 0 for t in PLAN_TYPES}
+        try:
+            s = await sales(org_id, "custom", w["from"], w["to"], None, user=user)
+            for c in s.get("channels", []):
+                f[_classify_channel(c.get("name"))] += int(c.get("orders", 0) or 0)
+        except Exception as e:
+            logger.warning(f"[plan] факт неделя {w['widx']} {real_org}: {e!r}")
+        return w["widx"], f
+
+    for widx, f in await asyncio.gather(*(_wk_fact(w) for w in weeks)):
+        fact[str(widx)] = f
+    return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": False}
+
+
+# ============ ПЛАН ПО ДНЯМ НЕДЕЛИ (вкладка «План» = таблица владельца) ============
+# Маршрут /api/plan-week, а не /api/plan: последний с самого начала занят старым
+# разбором Google-таблицы владельца по ссылке (plan_comparison выше). Тот план
+# читался из чужого документа, этот хранится у нас — и заменяет его.
+# Таблица владельца устроена так: на каждый филиал карточка «Неделя NN», строки
+# Пн–Вс, столбцы Доставка / Зал+вынос / Агрегаторы, под каждым днём план и факт,
+# снизу «Итого план / Итого факт». Плюс сводка сети и «база плана» — средняя
+# неделя, из которой план и ставится. Повторяем это, а не неделю одной строкой.
+
+PLAN_BASE_WEEKS = 6       # сколько прошлых недель усредняем для «базы плана»
+
+
+def _iso_week_bounds(week: str) -> Tuple[date, date]:
+    """'2026-W35' → (понедельник, воскресенье). Нумерация ISO — та же, что
+    в «Неделя 35» у владельца, поэтому недели месяца тут ни при чём."""
+    y, w = int(week[:4]), int(week.split("W")[1])
+    mon = date.fromisocalendar(y, w, 1)
+    return mon, mon + timedelta(days=6)
+
+
+def _iso_week_of(d: date) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y:04d}-W{w:02d}"
+
+
+def _empty_days() -> Dict[str, Dict[str, int]]:
+    return {str(i): {t: 0 for t in PLAN_TYPES} for i in range(1, 8)}
+
+
+async def _orders_by_day(real_org: str, d_from: date, d_to: date,
+                         user: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """День × канал × число заказов одним запросом в OLAP. Семь запросов на
+    филиал (по одному на день) сеть бы не пережила: филиалов девять."""
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    res = await client.olap_report(
+        _olap_dept(real_org, info), d_from.isoformat(), d_to.isoformat(),
+        group_by=["OpenDate.Typed", "OrderType.Name"], aggregates=["OrdersCount"])
+    return res.get("data", [])
+
+
+_plan_facts_checked = False
+
+
+def _ensure_plan_facts_version():
+    """Сменился классификатор каналов — старый снимок выбрасываем. Раз за
+    запуск: проверка стоит запроса в базу, а меняется версия раз в год."""
+    global _plan_facts_checked
+    if _plan_facts_checked:
+        return
+    _plan_facts_checked = True
+    from database import drop_plan_day_facts, get_app_state, set_app_state
+    if get_app_state("plan_facts_ver") != PLAN_FACTS_VER:
+        drop_plan_day_facts()
+        set_app_state("plan_facts_ver", PLAN_FACTS_VER)
+        logger.info(f"[plan] снимок факта сброшен под классификатор v{PLAN_FACTS_VER}")
+
+
+async def _orders_cached(real_org: str, d_from: date, d_to: date,
+                        user: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
+    """Факт заказов по дням — {день: {канал: заказов}} — ТОЛЬКО за закрытые дни.
+
+    Закрытый день из iiko больше не меняется, поэтому держим его снимком в
+    своей базе: раньше каждое открытие вкладки «План» стреляло двумя OLAP-
+    запросами на филиал, девять филиалов на девяти серверах — десятки секунд.
+    Ночной сбор закрывает вчерашний день; чего в снимке нет (первый запуск,
+    пропущенная ночь) — доберём здесь одним запросом и положим.
+
+    Сегодняшний день не отдаём вообще: он ещё идёт, и сравнивать его с целым
+    днём прошлой недели нельзя.
+    """
+    from database import get_plan_day_facts, save_plan_day_facts
+    _ensure_plan_facts_version()
+    last_closed = local_now().date() - timedelta(days=1)
+    if d_to > last_closed:
+        d_to = last_closed
+    if d_from > d_to:
+        return {}
+
+    have = get_plan_day_facts(real_org, d_from.isoformat(), d_to.isoformat())
+    want = [d_from + timedelta(days=i) for i in range((d_to - d_from).days + 1)]
+    missing = [d for d in want if d.isoformat() not in have]
+    if missing:
+        # Одним запросом по всему пробелу: iiko-серверов девять, и дробить
+        # добор по дням дороже, чем взять диапазон с запасом.
+        a, z = min(missing), max(missing)
+        fetched = _fold_by_dow(await _orders_by_day(real_org, a, z, user))["date"]
+        # Пишем КАЖДЫЙ день диапазона, включая нулевые: иначе день без заказов
+        # навсегда остаётся «отсутствующим» и добирается при каждом открытии.
+        span = {(a + timedelta(days=i)).isoformat(): {t: 0 for t in PLAN_TYPES}
+                for i in range((z - a).days + 1)}
+        for ds, cells in fetched.items():
+            if ds in span:
+                span[ds] = {t: int(cells.get(t) or 0) for t in PLAN_TYPES}
+        save_plan_day_facts(real_org, span)
+        have.update(span)
+    return {ds: cells for ds, cells in have.items()
+            if d_from.isoformat() <= ds <= d_to.isoformat()}
+
+
+def _dow_from_days(days: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
+    """{день: {канал: n}} → {день-недели: {канал: n}}."""
+    grid = _empty_days()
+    for ds, cells in days.items():
+        try:
+            d = date.fromisoformat(ds)
+        except ValueError:
+            continue
+        for t in PLAN_TYPES:
+            grid[str(d.isoweekday())][t] += int(cells.get(t) or 0)
+    return grid
+
+
+def _fold_by_dow(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """Строки OLAP → {день-недели: {канал: заказов}} и то же по датам."""
+    by_dow: Dict[str, Dict[str, int]] = {str(i): {t: 0 for t in PLAN_TYPES} for i in range(1, 8)}
+    by_date: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        ds = str(r.get("OpenDate.Typed") or "")[:10]
+        if not ds:
+            continue
+        try:
+            d = date.fromisoformat(ds)
+        except ValueError:
+            continue
+        t = _classify_channel(r.get("OrderType.Name") or "")
+        n = int(float(r.get("OrdersCount") or 0))
+        by_dow[str(d.isoweekday())][t] = by_dow[str(d.isoweekday())][t] + n
+        by_date.setdefault(ds, {t2: 0 for t2 in PLAN_TYPES})[t] += n
+    return {"dow": by_dow, "date": by_date}
+
+
+def _plan_branches(org_id: str, network: bool, user: Dict[str, Any],
+                   token: Optional[str] = None) -> List[Dict[str, str]]:
+    """Чьи карточки показываем.
+
+    Сеть целиком видит ТОЛЬКО владелец. Раньше охват решал бы клиент параметром
+    network — но у управляющего своя подписанная ссылка, и её надо слушать:
+    подставил бы network=1 и увидел чужие филиалы. Токен здесь главнее флага.
+    """
+    import mountain_routes as _mr
+    if token:
+        sc = _mr._scope(_mr.uid_from_token(token) or 0)
+        if sc["role"] == "manager":
+            return [{"organization_id": b["organization_id"], "name": b["name"]}
+                    for b in sc["branches"]]
+    if not network:
+        return [{"organization_id": _get_org_id(org_id, user),
+                 "name": _branch_name(_get_org_id(org_id, user), user)}]
+    seen: Dict[str, str] = {}
+    for r in get_restaurants(user.get("id", 0)) or []:
+        org, name = r.get("organization_id"), r.get("organization_name") or "Филиал"
+        if org and org not in seen and _mr._is_branch(name):
+            seen[org] = name
+    return [{"organization_id": o, "name": n} for o, n in seen.items()]
+
+
+def _branch_name(real_org: str, user: Dict[str, Any]) -> str:
+    for r in get_restaurants(user.get("id", 0)) or []:
+        if r.get("organization_id") == real_org:
+            return r.get("organization_name") or "Филиал"
+    try:
+        return _get_restaurant_info(real_org, user).get("org_name") or "Филиал"
+    except Exception:
+        return "Филиал"
+
+
+@app.get("/api/plan-week/{org_id}")
+async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
+                    token: Optional[str] = None,
+                    user: Dict = Depends(get_current_user)):
+    """План и факт недели по дням и каналам — карточка на филиал плюс сводка.
+
+    База плана — средняя неделя за последние PLAN_BASE_WEEKS завершённых недель:
+    именно из неё владелец и ставит план в таблице, поэтому она приходит рядом,
+    а не считается на глаз.
+    """
+    wk = week or _iso_week_of(local_now().date())
+    try:
+        d_from, d_to = _iso_week_bounds(wk)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad week, ожидается YYYY-Www")
+    branches = _plan_branches(org_id, bool(network), user, token)
+    if not branches:
+        return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
+                "types": PLAN_TYPES, "branches": [], "demo": False}
+
+    from database import get_day_plans
+    plans = get_day_plans([b["organization_id"] for b in branches], wk)
+
+    if _use_demo_data(user, org_id):
+        demo_p = {"hall": 90, "pickup": 21, "delivery": 12, "agg": 7}
+        out = []
+        for b in branches:
+            plan = {str(i): dict(demo_p) for i in range(1, 8)}
+            fact = {str(i): {t: max(0, v - (i % 4) * 2) for t, v in demo_p.items()} for i in range(1, 8)}
+            prev = {str(i): {t: max(0, v - (i % 3) * 3) for t, v in demo_p.items()} for i in range(1, 8)}
+            out.append({**b, "plan": plan, "fact": fact, "base": plan, "prev": prev})
+        return _plan_response(wk, d_from, d_to, out, demo=True)
+
+    base_from = d_from - timedelta(weeks=PLAN_BASE_WEEKS)
+    base_to = d_from - timedelta(days=1)
+    prev_from, prev_to = d_from - timedelta(days=7), d_from - timedelta(days=1)
+    solo, today_d = len(branches) == 1, local_now().date()
+
+    async def one(b: Dict[str, str]):
+        org = b["organization_id"]
+        cur_days: Dict[str, Dict[str, int]] = {}
+        base_days: Dict[str, Dict[str, int]] = {}
+        try:
+            cur_days = await _orders_cached(org, d_from, d_to, user)
+        except Exception as e:
+            logger.warning(f"[plan] факт {b['name']} {wk}: {e!r}")
+        try:
+            base_days = await _orders_cached(org, base_from, base_to, user)
+        except Exception as e:
+            logger.warning(f"[plan] база {b['name']}: {e!r}")
+        # Один филиал в ответе — это управляющий у себя (или владелец с одной
+        # точкой). Ему нужен СЕГОДНЯШНИЙ день: он по этой карточке работает
+        # прямо сейчас, а «факт 0» до полуночи выглядел бы поломкой. Один
+        # лишний запрос на один филиал — не девять на девять серверов, поэтому
+        # владельцу сети сегодняшний день по-прежнему не тянем.
+        if solo and d_from <= today_d <= d_to:
+            try:
+                live = _fold_by_dow(await _orders_by_day(org, today_d, today_d, user))["date"]
+                cur_days = {**cur_days, **{ds: {t: int(c.get(t) or 0) for t in PLAN_TYPES}
+                                           for ds, c in live.items()}}
+            except Exception as e:
+                logger.warning(f"[plan] сегодня {b['name']}: {e!r}")
+        base_dow = _dow_from_days(base_days)
+        # Средняя неделя: сумма по дню недели / число таких дней в окне.
+        avg = {str(i): {t: round(base_dow[str(i)][t] / PLAN_BASE_WEEKS)
+                        for t in PLAN_TYPES} for i in range(1, 8)}
+        # Прошлая неделя — БЕЗ отдельного запроса в iiko: она уже внутри окна,
+        # по которому считается средняя. Девять филиалов на девяти серверах:
+        # лишний круг запросов стоил бы ещё полминуты на открытие вкладки.
+        prev = _dow_from_days({ds: cells for ds, cells in base_days.items()
+                               if prev_from.isoformat() <= ds <= prev_to.isoformat()})
+        saved = plans.get(org, {})
+        plan = {str(i): {t: int(saved.get(i, {}).get(t, 0)) for t in PLAN_TYPES}
+                for i in range(1, 8)}
+        return {**b, "plan": plan, "fact": _dow_from_days(cur_days),
+                "base": avg, "prev": prev}
+
+    rows = await asyncio.gather(*(one(b) for b in branches))
+    return _plan_response(wk, d_from, d_to, list(rows), demo=False,
+                          live_today=solo and d_from <= today_d <= d_to)
+
+
+def _plan_response(wk: str, d_from: date, d_to: date,
+                   rows: List[Dict[str, Any]], demo: bool,
+                   live_today: bool = False) -> Dict[str, Any]:
+    """Считает итоги филиалов и строку сети. Суммы считаем здесь, а не на
+    фронте: та же арифметика на двух сторонах расходится молча."""
+    def _totals(grid: Dict[str, Dict[str, int]]) -> Dict[str, int]:
+        return {t: sum(grid[str(i)][t] for i in range(1, 8)) for t in PLAN_TYPES}
+
+    net_plan, net_fact = _empty_days(), _empty_days()
+    net_base, net_prev = _empty_days(), _empty_days()
+    for r in rows:
+        r.setdefault("prev", _empty_days())
+        r["total_plan"], r["total_fact"] = _totals(r["plan"]), _totals(r["fact"])
+        r["total_base"], r["total_prev"] = _totals(r["base"]), _totals(r["prev"])
+        for i in range(1, 8):
+            for t in PLAN_TYPES:
+                net_plan[str(i)][t] += r["plan"][str(i)][t]
+                net_fact[str(i)][t] += r["fact"][str(i)][t]
+                net_base[str(i)][t] += r["base"][str(i)][t]
+                net_prev[str(i)][t] += r["prev"][str(i)][t]
+    network_row = {"organization_id": "", "name": "Итого сеть",
+                   "plan": net_plan, "fact": net_fact, "base": net_base, "prev": net_prev,
+                   "total_plan": _totals(net_plan), "total_fact": _totals(net_fact),
+                   "total_base": _totals(net_base), "total_prev": _totals(net_prev)}
+    # Сколько дней недели уже ЗАКРЫТО. Считаем на сервере: сравнение с прошлой
+    # неделей идёт день в день, и если фронт и бэк разойдутся в этом числе хоть
+    # на день, динамика во вторник соврёт. Сегодняшний день не закрыт.
+    today = local_now().date()
+    done_days = 7 if d_to < today else (0 if d_from > today else (today - d_from).days)
+    return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
+            "types": PLAN_TYPES, "branches": rows, "network": network_row,
+            "base_weeks": PLAN_BASE_WEEKS, "done_days": done_days,
+            "running": d_from <= today <= d_to, "live_today": live_today, "demo": demo}
+
+
+@app.get("/api/plan-week/{org_id}/metrics")
+async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: int = 0,
+                            token: Optional[str] = None,
+                            user: Dict = Depends(get_current_user)):
+    """Показатели недели по филиалам + что улучшилось к прошлой неделе.
+
+    Отдельным запросом от сетки плана намеренно: сетку владелец заполняет
+    сразу, а эти цифры требуют ещё двух обращений в iiko на филиал. Пусть
+    таблица открывается мгновенно, а показатели догружаются рядом.
+    """
+    wk = week or _iso_week_of(local_now().date())
+    try:
+        d_from, d_to = _iso_week_bounds(wk)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad week")
+    # Сравниваем ДЕНЬ В ДЕНЬ, как и вся вкладка: сколько дней текущей недели
+    # закрыто, столько же берём у прошлой. Иначе во вторник «заказов за неделю»
+    # сравнивалось два дня против семи — и в улучшения они не попадали НИКОГДА,
+    # сколько бы филиал ни прибавил.
+    today = local_now().date()
+    done = 7 if d_to < today else (0 if d_from > today else (today - d_from).days)
+    now_to = d_from + timedelta(days=done - 1) if done else d_from
+    prev_from = d_from - timedelta(days=7)
+    prev_to = prev_from + timedelta(days=done - 1) if done else prev_from
+    branches = _plan_branches(org_id, bool(network), user, token)
+    if not done:
+        # Неделя только началась: сравнивать нечего, и врать нулями не будем.
+        return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
+                "done_days": 0,
+                "metrics": [{"key": k, "label": lb, "unit": u, "lower_better": low}
+                            for k, lb, u, low, _e, _r in PLAN_METRICS],
+                "branches": [{**b, "now": {}, "prev": {}, "wins": []} for b in branches]}
+
+    async def one(b: Dict[str, str]):
+        org = b["organization_id"]
+
+        async def week_metrics(a: date, z: date) -> Dict[str, Any]:
+            m: Dict[str, Any] = {}
+            try:
+                ld = await late_deliveries(org, "custom", a.isoformat(), z.isoformat(), 1, user)
+                if isinstance(ld, dict) and not ld.get("error"):
+                    courier = (ld.get("by_type") or {}).get("courier") or {}
+                    # median-этапы курьерских заказов: ровно то, что в таблице
+                    # владельца названо «сред. время подачи» и «курьер в дороге»
+                    for k in ("kitchen", "road", "idle"):
+                        if courier.get(k) is not None:
+                            m[k] = courier[k]
+                    if ld.get("late_pct") is not None:
+                        m["late_pct"] = ld["late_pct"]
+                    m["deliveries"] = ld.get("delivered")
+            except Exception as e:
+                logger.warning(f"[plan-metrics] опоздания {b['name']}: {e!r}")
+            try:
+                # Через снимок: те же цифры, что и в сетке плана, и без похода
+                # в iiko за уже закрытыми днями.
+                m["orders"] = sum(sum(c.values()) for c in
+                                  (await _orders_cached(org, a, z, user)).values())
+            except Exception as e:
+                logger.warning(f"[plan-metrics] заказы {b['name']}: {e!r}")
+            return m
+
+        now, prev = await asyncio.gather(week_metrics(d_from, now_to),
+                                         week_metrics(prev_from, prev_to))
+        try:
+            # Рейтинг агрегаторов — снимок «сейчас», истории по неделям у нас нет,
+            # поэтому в сравнение он попадает только когда обе цифры есть.
+            rt = _rating_signal(await branch_reviews(org, user))
+            if rt:
+                now["rating"] = rt["avg"]
+        except Exception as e:
+            logger.warning(f"[plan-metrics] рейтинг {b['name']}: {e!r}")
+        return {**b, "now": now, "prev": prev, "wins": plan_wins(now, prev)}
+
+    rows = list(await asyncio.gather(*(one(b) for b in branches)))
+    return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
+            "done_days": done,
+            "metrics": [{"key": k, "label": lb, "unit": u, "lower_better": low}
+                        for k, lb, u, low, _e, _r in PLAN_METRICS],
+            "branches": rows}
+
+
+class PlanCellsIn(BaseModel):
+    week: str
+    cells: List[Dict[str, Any]]     # [{"org":…, "dow":1, "ch_type":"hall", "planned":90}]
+    token: Optional[str] = None     # ссылка управляющего: правит только свой филиал
+
+
+@app.post("/api/plan-week/{org_id}")
+async def plan_week_set(org_id: str, payload: PlanCellsIn,
+                        user: Dict = Depends(get_current_user)):
+    """Сохранить ячейки плана. Одним эндпоинтом и правка одной клетки, и
+    «поставить всю неделю по средней» — на фронте это одно и то же действие."""
+    from database import set_day_plans
+    # Куда вообще можно писать: у владельца — вся сеть, у управляющего — его
+    # филиал и только он (токен перебивает всё, см. _plan_branches).
+    mine = {b["organization_id"] for b in _plan_branches(org_id, True, user, payload.token)}
+    if not payload.token:
+        mine.add(_get_org_id(org_id, user))
+    cells = []
+    for c in payload.cells:
+        org = c.get("org") or _get_org_id(org_id, user)
+        if org not in mine:
+            raise HTTPException(status_code=403, detail="чужой филиал")
+        if c.get("ch_type") not in PLAN_TYPES or not (1 <= int(c.get("dow", 0)) <= 7):
+            raise HTTPException(status_code=400, detail="bad cell")
+        cells.append({"org": org, "week": payload.week, "dow": int(c["dow"]),
+                      "ch_type": c["ch_type"], "planned": max(0, int(c.get("planned") or 0))})
+    if cells:
+        set_day_plans(cells)
+    return {"ok": True, "saved": len(cells)}
+
+
+class PlanSetIn(BaseModel):
+    month: str
+    ch_type: str
+    planned: int
+    widx: Optional[int] = None
+    all_weeks: bool = False
+
+
+@app.post("/api/weekplan/{org_id}")
+async def plan_set(org_id: str, payload: PlanSetIn, user: Dict = Depends(get_current_user)):
+    """Сохранить план: одну неделю (widx) или все недели месяца (all_weeks)."""
+    if payload.ch_type not in PLAN_TYPES:
+        raise HTTPException(status_code=400, detail="bad ch_type")
+    real_org = _get_org_id(org_id, user)
+    planned = max(0, int(payload.planned))
+    if payload.all_weeks:
+        for w in _month_weeks(payload.month):
+            set_weekly_plan(real_org, payload.month, w["widx"], payload.ch_type, planned)
+    elif payload.widx is not None:
+        set_weekly_plan(real_org, payload.month, int(payload.widx), payload.ch_type, planned)
+    else:
+        raise HTTPException(status_code=400, detail="widx or all_weeks required")
+    return {"ok": True}
+
+
+# ==== Соцсети: Instagram Business через Meta OAuth ====
+# Каркас. Заработает, когда в окружении появятся META_APP_ID/META_APP_SECRET
+# (приложение Meta) и Instagram-аккаунт клиента будет Business + привязан к FB-странице.
+
+def _ig_close_html(msg: str, ok: bool = False) -> str:
+    """Крошечная страница для popup: сообщает опенеру результат и закрывается."""
+    return (
+        "<!doctype html><meta charset='utf-8'>"
+        "<body style='font:15px system-ui;padding:40px;text-align:center;color:#111'>"
+        f"<p>{msg}</p>"
+        "<script>try{window.opener&&window.opener.postMessage("
+        f"{{source:'ig-oauth',ok:{'true' if ok else 'false'}}},'*');}}catch(e){{}}"
+        "setTimeout(function(){window.close();},1200);</script></body>"
+    )
+
+
+@app.get("/api/social/instagram/connect/{org_id}")
+async def ig_connect(org_id: str, request: Request, user: Dict = Depends(get_current_user)):
+    """Ссылка на вход через Facebook. Если приложение Meta не настроено — configured:false."""
+    if not social_ig.is_configured():
+        return {"configured": False,
+                "reason": "Нет META_APP_ID/META_APP_SECRET. Зарегистрируй приложение на "
+                          "developers.facebook.com (тип Business) и добавь ключи в окружение."}
+    real_org = _get_org_id(org_id, user)
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/social/instagram/callback"
+    return {"configured": True, "url": social_ig.authorize_url(redirect_uri, real_org)}
+
+
+@app.get("/api/social/instagram/callback")
+async def ig_callback(request: Request, code: Optional[str] = None,
+                      state: Optional[str] = None, error: Optional[str] = None):
+    """Facebook редиректит сюда после согласия. state = real_org (без auth-заголовка)."""
+    from database import set_social_account, save_social_snapshot
+    if error or not code or not state:
+        return HTMLResponse(_ig_close_html(f"Не удалось подключить Instagram: {error or 'нет кода'}"))
+    redirect_uri = str(request.base_url).rstrip("/") + "/api/social/instagram/callback"
+    try:
+        token = await social_ig.exchange_code(code, redirect_uri)
+        acc = await social_ig.get_ig_account(token)
+        if not acc:
+            return HTMLResponse(_ig_close_html(
+                "Instagram Business-аккаунт не найден. Переведи профиль в Business "
+                "и привяжи к Facebook-странице."))
+        prof = await social_ig.fetch_profile(acc["id"], token)
+        set_social_account(state, "instagram", acc["id"], token,
+                           prof.get("username") or acc.get("username", ""))
+        if prof.get("followers") is not None:
+            save_social_snapshot(state, "instagram", local_now().strftime("%Y-%m-%d"), prof["followers"])
+        return HTMLResponse(_ig_close_html("Instagram подключён ✓", ok=True))
+    except Exception as e:
+        logger.warning(f"[social] ig callback: {e!r}")
+        return HTMLResponse(_ig_close_html("Ошибка подключения Instagram."))
+
+
+@app.get("/api/social/instagram/{org_id}")
+async def ig_data(org_id: str, user: Dict = Depends(get_current_user)):
+    """Данные подключённого Instagram: подписчики, рост за 30 дней, последние посты."""
+    from database import get_social_account, save_social_snapshot, get_social_growth
+    real_org = _get_org_id(org_id, user)
+    acc = get_social_account(real_org, "instagram")
+    if not acc:
+        return {"connected": False, "configured": social_ig.is_configured()}
+    try:
+        prof = await social_ig.fetch_profile(acc["account_id"], acc["token"])
+    except Exception as e:
+        logger.warning(f"[social] ig data: {e!r}")
+        return {"connected": True, "stale": True, "username": acc.get("username")}
+    if prof.get("followers") is not None:
+        save_social_snapshot(real_org, "instagram", local_now().strftime("%Y-%m-%d"), prof["followers"])
+    growth = get_social_growth(real_org, "instagram", days=30)
+    start = growth[0]["followers"] if growth else None
+    delta = (prof["followers"] - start) if (start is not None and prof.get("followers") is not None) else None
+    return {"connected": True, "username": prof.get("username"),
+            "followers": prof.get("followers"), "media_count": prof.get("media_count"),
+            "delta_30d": delta, "growth": growth, "posts": prof.get("posts", [])}
 
 
 # Демо-бригада для мини-аппа: те же люди, что в демо-зарплате, + плановая смена.
@@ -6554,7 +8653,7 @@ async def attendance(org_id: str,
                      from_: str = Query(..., alias="from"), to: str = Query(...),
                      user: Dict = Depends(get_current_user)):
     """Журнал явок (факт из iiko) + список сотрудников для расписания.
-    План (расписание) хранится на стороне клиента — здесь только факт."""
+    План (расписание) хранится на стороне клиента/нашей БД — здесь только факт."""
     if _use_demo_data(user, org_id):
         return _demo_attendance(from_, to)
     real_org = _get_org_id(org_id, user)
@@ -6583,6 +8682,345 @@ async def attendance(org_id: str,
     emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
     emp_list.sort(key=lambda x: x["name"])
     return {"employees": emp_list, "rows": rows}
+
+
+
+# ============ ОПОЗДАНИЯ СОТРУДНИКОВ ============
+# Факт прихода берём из явок iiko (терминал), эталон — гибридный: время старта
+# смены филиала, а если на сотрудника стоит график — график. Решение владельца
+# 25.08: сотрудника ни о чём не спрашиваем, отметку он не ставит.
+
+async def _attendance_rows(org_id: str, real_org: str, day_from: str, day_to: str,
+                           user: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Явки филиала за период. None — явок у этого филиала нет вообще
+    (облачный iiko или сервер не ответил): это не «все пришли вовремя»."""
+    if _use_demo_data(user, org_id):
+        return _demo_attendance(day_from, day_to)["rows"]
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_attendance"):
+        return None
+    try:
+        att, employees = await asyncio.gather(
+            client.get_attendance(day_from, day_to),
+            client.get_employees_map(),
+        )
+    except Exception as e:
+        logger.warning(f"[staff-late] явки {real_org}: {e!r}")
+        return None
+    return _attendance_journal(att, employees, info.get("org_name", ""))
+
+
+def _late_reference(real_org: str) -> Dict[str, Any]:
+    """С чем сравнивать приход в этом филиале: свои старты и допуск, иначе общие."""
+    from database import get_shift_starts
+    cfg = get_shift_starts(real_org)
+    starts = [s["time"] for s in cfg["starts"]] or list(SL.DEFAULT_STARTS)
+    grace = cfg["grace_min"] if cfg["grace_min"] is not None else SL.DEFAULT_GRACE_MIN
+    return {"starts": starts, "grace_min": int(grace), "configured": bool(cfg["starts"])}
+
+
+async def _staff_late_for(org_id: str, real_org: str, day_from: str, day_to: str,
+                          user: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Приходы и опоздания филиала за период. Результат кладём в БД: оценка
+    филиала считается по нему и в iiko повторно не ходит."""
+    from database import get_staff_schedule, save_staff_late
+    rows = await _attendance_rows(org_id, real_org, day_from, day_to, user)
+    if rows is None:
+        return None
+    sched = {(r["employee_id"], r["day"]): r["start_time"]
+             for r in get_staff_schedule(real_org, day_from, day_to)}
+    ref = _late_reference(real_org)
+    calc = SL.late_rows(rows, sched, ref["starts"], ref["grace_min"])
+    save_staff_late(real_org, calc)
+    return {"rows": calc, "summary": SL.summarize(calc), **ref}
+
+
+@app.get("/api/staff-late/{org_id}")
+async def staff_late_day(org_id: str, date: Optional[str] = None,
+                         to: Optional[str] = None,
+                         user: Dict = Depends(get_current_user)):
+    """Кто пришёл на смену, во сколько и кто опоздал. По умолчанию — сегодня."""
+    day_from = date or local_now().date().isoformat()
+    day_to = to or day_from
+    real_org = _get_org_id(org_id, user)
+    res = await _staff_late_for(org_id, real_org, day_from, day_to, user)
+    if res is None:
+        return {"available": False,
+                "reason": "Явки доступны только на самохостед iiko",
+                "rows": [], "summary": SL.summarize([])}
+    return {"available": True, "date": day_from, **res}
+
+
+class ShiftStartsIn(BaseModel):
+    starts: List[Dict[str, str]]          # [{"kind": "morning", "time": "09:00"}, ...]
+    grace_min: Optional[int] = None
+    all_branches: bool = False            # применить ко всей сети одним действием
+
+
+@app.get("/api/shift-starts/{org_id}")
+async def shift_starts_get(org_id: str, user: Dict = Depends(get_current_user)):
+    """Эталон старта смен филиала. configured=false — показываем значения по
+    умолчанию и честно говорим, что филиал ещё не настроен."""
+    return _late_reference(_get_org_id(org_id, user))
+
+
+@app.post("/api/shift-starts/{org_id}")
+async def shift_starts_set(org_id: str, payload: ShiftStartsIn,
+                           user: Dict = Depends(get_current_user)):
+    from database import set_shift_starts
+    real_org = _get_org_id(org_id, user)
+    clean = [{"kind": s.get("kind") or "shift", "time": s["time"]}
+             for s in payload.starts if SL.to_min(s.get("time", "")) is not None]
+    if not clean:
+        raise HTTPException(status_code=400, detail="нужно хотя бы одно время старта")
+    # Пока филиал не задал старт смены, критерий «опоздания сотрудников» молчит —
+    # и восемь филиалов из девяти висели с «нет данных». Настраивать каждый
+    # руками владелец не станет: даём применить на всю сеть одним действием.
+    targets = [real_org]
+    if payload.all_branches:
+        targets = [b["organization_id"] for b in _plan_branches(org_id, True, user)] or targets
+    for org in targets:
+        set_shift_starts(org, clean, payload.grace_min)
+    return {"ok": True, "applied": len(targets), **_late_reference(real_org)}
+
+
+class ShiftPlanIn(BaseModel):
+    employee_id: str
+    date: str
+    start: Optional[str] = None           # None → снять смену с этого дня
+    end: Optional[str] = None
+
+
+@app.get("/api/schedule/{org_id}")
+async def schedule_get(org_id: str, from_: str = Query(..., alias="from"),
+                       to: str = Query(...), user: Dict = Depends(get_current_user)):
+    """График смен филиала. Раньше жил в localStorage браузера — то есть у
+    каждого свой; теперь общий, и по нему считаются опоздания."""
+    from database import get_staff_schedule
+    rows = get_staff_schedule(_get_org_id(org_id, user), from_, to)
+    return {"shifts": [{"employeeId": r["employee_id"], "date": r["day"],
+                        "start": r["start_time"], "end": r["end_time"] or ""} for r in rows]}
+
+
+@app.post("/api/schedule/{org_id}")
+async def schedule_set(org_id: str, payload: ShiftPlanIn,
+                       user: Dict = Depends(get_current_user)):
+    from database import set_staff_shift, remove_staff_shift
+    real_org = _get_org_id(org_id, user)
+    if not payload.start:
+        remove_staff_shift(real_org, payload.employee_id, payload.date)
+        return {"ok": True, "removed": True}
+    if SL.to_min(payload.start) is None:
+        raise HTTPException(status_code=400, detail="bad start time")
+    set_staff_shift(real_org, payload.employee_id, payload.date, payload.start, payload.end or "")
+    return {"ok": True}
+
+
+async def _late_alerts_round() -> int:
+    """Один проход: по каждому филиалу считаем сегодняшние опоздания и шлём
+    управляющему то, о чём ещё не писали. Возвращает число отправленных."""
+    from database import get_branch_managers, mark_late_notified
+    managers = {m["organization_id"]: m for m in get_branch_managers()}
+    if not managers:
+        return 0
+    today = local_now().date().isoformat()
+    sent = 0
+    for org, mgr in managers.items():
+        chat = int(mgr.get("telegram_id") or 0)
+        if not chat:
+            continue
+        owner = _owner_user_of(org)
+        if not owner:
+            continue
+        try:
+            res = await _staff_late_for(org, org, today, today, owner)
+        except Exception as e:
+            logger.warning(f"[late-alerts] {org}: {e!r}")
+            continue
+        if not res:
+            continue
+        for r in res["rows"]:
+            if r["status"] != "late":
+                continue
+            if not mark_late_notified(org, today, r["employee_id"]):
+                continue      # уже писали об этом человеке сегодня
+            await _tg_send(chat, f"⏰ <b>{html.escape(r['name'])}</b> пришёл(ла) в "
+                                 f"{r['arrival']} — опоздание {r['late_min']} мин "
+                                 f"(старт {r['planned']})")
+            sent += 1
+    return sent
+
+
+async def _late_alerts_digest() -> bool:
+    """Вечерняя сводка владельцу: по каждому филиалу — кто и на сколько опоздал.
+    Владельцу не сыплем по одному сообщению на человека: девять филиалов — это
+    десятки сообщений в день, их перестают читать."""
+    from database import get_branch_managers, get_db
+    today = local_now().date().isoformat()
+    by_owner: Dict[int, List[str]] = {}
+    conn = get_db()
+    rows = conn.execute("SELECT organization_id, organization_name, telegram_id "
+                        "FROM restaurants WHERE telegram_id IS NOT NULL").fetchall()
+    conn.close()
+    seen: set = set()
+    for r in rows:
+        org, name, owner_uid = r[0], r[1] or "Филиал", int(r[2] or 0)
+        if not org or not owner_uid or org in seen:
+            continue
+        seen.add(org)
+        owner = _owner_user_of(org)
+        if not owner:
+            continue
+        try:
+            res = await _staff_late_for(org, org, today, today, owner)
+        except Exception as e:
+            logger.warning(f"[late-digest] {org}: {e!r}")
+            continue
+        if not res or not res["summary"]["total"]:
+            continue
+        late = [x for x in res["rows"] if x["status"] == "late"]
+        if not late:
+            continue
+        who = ", ".join(f"{html.escape(x['name'])} +{x['late_min']}" for x in late[:6])
+        by_owner.setdefault(owner_uid, []).append(
+            f"• <b>{html.escape(name)}</b>: {len(late)} из {res['summary']['total']} — {who}")
+    for uid, lines in by_owner.items():
+        await _tg_send(uid, "⏰ <b>Опоздания за сегодня</b>\n\n" + "\n".join(lines))
+    return bool(by_owner)
+
+
+def _owner_user_of(org_id: str) -> Optional[Dict[str, Any]]:
+    """Владелец филиала как «пользователь» для запросов в iiko. Креды берутся
+    ПО ФИЛИАЛУ, но get_current_user-подобный dict всё равно нужен: без него
+    _get_restaurant_info подставит демо-клиента (грабли из 234.md)."""
+    from database import get_db
+    conn = get_db()
+    row = conn.execute("SELECT telegram_id FROM restaurants WHERE organization_id = ? LIMIT 1",
+                       (org_id,)).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return None
+    # Ровно та форма, что отдаёт get_current_user: запросы к iiko читают
+    # user["id"]. Строка из БД тут не годится — там ключ telegram_id, и
+    # _get_restaurant_info искал бы филиалы владельца с id=0 → 404.
+    return {"id": int(row[0]), "username": "system", "first_name": "Owner"}
+
+
+async def _late_alerts_scheduler():
+    """Раз в 15 минут в рабочем окне — опоздания управляющим, вечером — сводка
+    владельцу. Выключено, пока не задан LATE_ALERTS=1: без реальных telegram id
+    управляющих слать некому (хвост из 234.md, п.3)."""
+    while True:
+        try:
+            now = local_now()
+            if 6 <= now.hour < 23:
+                await _late_alerts_round()
+            if now.hour == 21 and get_app_state("late_digest_last_sent") != now.date().isoformat():
+                if await _late_alerts_digest():
+                    set_app_state("late_digest_last_sent", now.date().isoformat())
+        except Exception as e:
+            logger.warning(f"[late-alerts] цикл: {e!r}")
+        await asyncio.sleep(900)
+
+
+# ============ ЕЖЕДНЕВНАЯ ОЦЕНКА И ВТОРНИЧНАЯ СРЕДНЯЯ ============
+
+async def _send_weekly_scores() -> bool:
+    """Вторник: владельцу — таблица по всей сети, каждому управляющему — его
+    средняя и место. Управляющему чужие цифры не шлём: сравнение он и так
+    видит на «Горе», а в личном сообщении это выглядит как разнос при всех."""
+    import mountain_routes as _mr
+    from database import get_branch_managers, branch_score_average, get_db
+    conn = get_db()
+    uids = [int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT telegram_id FROM restaurants WHERE telegram_id IS NOT NULL").fetchall()]
+    conn.close()
+    managers = {m["organization_id"]: m for m in get_branch_managers()}
+    sent = False
+    for uid in uids:
+        sc = _mr._scope(uid)
+        if sc["role"] != "owner" or not sc["branches"]:
+            continue
+        lines = _mr.weekly_score_lines(sc["branches"])
+        if not lines:
+            continue
+        await _tg_send(uid, "📊 <b>Средняя оценка филиалов за неделю</b>\n\n" + "\n".join(lines))
+        sent = True
+        # Управляющим — своё место и своя средняя
+        ids = [b["organization_id"] for b in sc["branches"]]
+        today = local_now().date()
+        avg = branch_score_average(ids, (today - timedelta(days=7)).isoformat(), today.isoformat())
+        order = sorted(avg.items(), key=lambda kv: -kv[1]["avg"])
+        place = {org: i + 1 for i, (org, _v) in enumerate(order)}
+        for b in sc["branches"]:
+            org = b["organization_id"]
+            mgr, a = managers.get(org), avg.get(org)
+            if not mgr or not a or not mgr.get("telegram_id"):
+                continue
+            await _tg_send(int(mgr["telegram_id"]),
+                           f"📊 <b>{html.escape(b['name'])}</b> за неделю: "
+                           f"<b>{a['avg']} из 100</b>\n"
+                           f"Место в сети: {place.get(org, '—')} из {len(order)}.")
+    return sent
+
+
+async def _close_plan_day() -> int:
+    """Закрываем вчерашний день: снимаем факт заказов по каждому филиалу и
+    кладём в базу. После этого вкладка «План» открывается из своей базы, а не
+    из девяти iiko-серверов.
+
+    Строго говоря, это оптимизация: чего в снимке нет, `_orders_cached` доберёт
+    на лету. Ночной проход нужен, чтобы утром никто этого добора не ждал.
+    Возвращает число филиалов, по которым день закрылся."""
+    from database import get_db
+    conn = get_db()
+    orgs = [r[0] for r in conn.execute(
+        "SELECT DISTINCT organization_id FROM restaurants WHERE organization_id IS NOT NULL").fetchall()]
+    conn.close()
+    day = local_now().date() - timedelta(days=1)
+    done = 0
+    for org in orgs:
+        owner = _owner_user_of(org)
+        if not owner:
+            continue
+        try:
+            # Один филиал не должен ронять проход: у части клиентов iiko-сервер
+            # может лежать, а остальные восемь закрыться обязаны.
+            if await _orders_cached(org, day, day, owner):
+                done += 1
+        except Exception as e:
+            logger.warning(f"[plan] не закрыл день {day} по {org}: {e!r}")
+    return done
+
+
+async def _daily_scores_scheduler():
+    """Ночью считаем оценку каждого филиала и кладём снимок в базу, во вторник
+    утром рассылаем среднюю за неделю. Раньше оценка была мгновенной: понять,
+    стало лучше или хуже, было не по чему."""
+    import mountain_routes as _mr
+    while True:
+        try:
+            now = local_now()
+            today = now.date().isoformat()
+            if now.hour >= 3 and get_app_state("daily_scores_last") != today:
+                n = await _mr.recompute_all_scores()
+                set_app_state("daily_scores_last", today)
+                logger.info(f"[scores] пересчитано филиалов: {n}")
+            # Снимок факта заказов — своим ключом состояния: упади он, оценки
+            # всё равно должны посчитаться, и наоборот.
+            if now.hour >= 3 and get_app_state("plan_day_closed") != today:
+                closed = await _close_plan_day()
+                set_app_state("plan_day_closed", today)
+                logger.info(f"[plan] закрыт вчерашний день по филиалам: {closed}")
+            # вторник = weekday 1
+            if now.weekday() == 1 and now.hour >= 10 and get_app_state("weekly_scores_last") != today:
+                if await _send_weekly_scores():
+                    set_app_state("weekly_scores_last", today)
+                    logger.info("[scores] вторничная средняя отправлена")
+        except Exception as e:
+            logger.warning(f"[scores] цикл: {e!r}")
+        await asyncio.sleep(1800)
 
 
 @app.get("/api/salary/{org_id}")

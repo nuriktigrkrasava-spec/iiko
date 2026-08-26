@@ -131,6 +131,69 @@ class IikoClient:
             resp.raise_for_status()
             return resp.json().get("organizations", [])
 
+    async def terminal_groups(self, org_ids: List[str]) -> List[str]:
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/terminal_groups",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationIds": org_ids})
+            resp.raise_for_status()
+            data = resp.json()
+            return [i["id"] for grp in data.get("terminalGroups", []) for i in grp.get("items", [])]
+
+    async def restaurant_sections(self, tg_ids: List[str]) -> List[Dict[str, Any]]:
+        """Секции зала со схемой (координаты столов): available_restaurant_sections."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/available_restaurant_sections",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"terminalGroupIds": tg_ids, "returnSchema": True})
+            resp.raise_for_status()
+            return resp.json().get("restaurantSections", [])
+
+    async def reserve_available_orgs(self, org_ids: List[str]) -> List[str]:
+        """id организаций, где включён модуль броней (reserve/available_organizations)."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/available_organizations",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"organizationIds": org_ids})
+            resp.raise_for_status()
+            return [o.get("id") for o in resp.json().get("organizations", []) if o.get("id")]
+
+    async def reserve_workload(self, section_ids: List[str], date_from: str, date_to: str) -> List[Dict[str, Any]]:
+        """Брони по секциям за окно (reserve/restaurant_sections_workload).
+        Даты в формате 'yyyy-MM-dd HH:mm:ss.fff'."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{IIKO_CLOUD_BASE}/api/1/reserve/restaurant_sections_workload",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"restaurantSectionIds": section_ids, "dateFrom": date_from, "dateTo": date_to})
+            resp.raise_for_status()
+            return resp.json().get("reserves", [])
+
+    async def hall_orders(self, org_id: str, table_ids: List[str], tg_id: str = None) -> List[Dict[str, Any]]:
+        """Открытые заказы зала (New/Bill). init_by_table проталкивает их в Cloud."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            H = {"Authorization": f"Bearer {token}"}
+            if tg_id and table_ids:
+                try:
+                    await client.post(f"{IIKO_CLOUD_BASE}/api/1/order/init_by_table",
+                                      headers=H, json={"organizationId": org_id, "terminalGroupId": tg_id, "tableIds": table_ids})
+                except Exception:
+                    pass
+            if not table_ids:
+                return []
+            resp = await client.post(f"{IIKO_CLOUD_BASE}/api/1/order/by_table",
+                                     headers=H, json={"organizationIds": [org_id], "tableIds": table_ids, "statuses": ["New", "Bill"]})
+            resp.raise_for_status()
+            return resp.json().get("orders", [])
+
     def catalog_key(self, org_id: str) -> str:
         """Ключ справочника номенклатуры: в облаке он свой на организацию."""
         return f"cloud:{org_id}"
@@ -649,6 +712,57 @@ class IikoWebClient:
                 return raw if isinstance(raw, list) else raw.get("data", [])
         return []
 
+    async def olap_deliveries_detail(self, org_id: str, date_from: str,
+                                     date_to: str) -> List[Dict[str, Any]]:
+        """DELIVERIES OLAP ПОКАЗАКАЗНО — «Отчёт заказы-доставка».
+
+        В отличие от olap_couriers (группировка курьер×опоздание, то есть только
+        сводка) здесь строка = один заказ: номер, дата, курьер, адрес, обещанное и
+        фактическое время, опоздание. Нужно, чтобы показать не только «сколько
+        опоздали», но и каждое опоздание поимённо.
+        Delivery.Delay — минуты (та же единица, что в olap_couriers).
+        """
+        filters: Dict[str, Any] = {"OpenDate.Typed": self._date_filter(date_from, date_to)}
+        if org_id and org_id != "demo":
+            filters["Department"] = {"filterType": "IncludeValues", "values": [org_id]}
+        payload = {
+            "reportType": "DELIVERIES",
+            "buildSummary": "false",
+            # Line1 обязателен: у заказов с сайта и приложения (SourceKey WEB/IOS/
+            # ANDROID) улица приходит заглушкой «----------», дом «0», а настоящий
+            # адрес лежит именно в Line1. Проверено: 145 из 145 таких строк.
+            "groupByRowFields": [
+                "Delivery.Number", "OpenDate.Typed", "Delivery.Courier",
+                "Delivery.Address", "Delivery.Line1", "Delivery.SourceKey",
+                "Delivery.ExpectedTime", "Delivery.ActualTime", "Delivery.Delay",
+                # Цепочка времени заказа: принят → приготовлен → отдан курьеру →
+                # доставлен. По ней опоздание раскладывается на кухню, простой и
+                # дорогу, то есть причина считается, а не угадывается.
+                "OpenTime", "Delivery.CookingFinishTime", "Delivery.SendTime",
+                "Delivery.WayDuration",
+            ],
+            "aggregateFields": ["UniqOrderId.OrdersCount", "DishDiscountSumInt"],
+            "filters": filters,
+        }
+        for attempt in range(2):
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/v2/reports/olap",
+                    params={"key": token}, json=payload
+                )
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                if not resp.is_success:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"iikoWeb DELIVERIES detail {resp.status_code}: {resp.text[:200]}")
+                    return []
+                raw = resp.json()
+                return raw if isinstance(raw, list) else raw.get("data", [])
+        return []
+
     async def olap_clients(self, org_id: str, date_from: str, date_to: str) -> List[Dict[str, Any]]:
         """DELIVERIES OLAP по телефону клиента: заказов + выручка на номер.
         Для вкладки «Клиенты» (лояльность напрямую из iiko, без ручной таблицы)."""
@@ -803,6 +917,23 @@ class IikoWebClient:
                         for it in items if it.get("productId")]
         return []
 
+    async def get_balance_rows(self, timestamp: str) -> List[Dict[str, Any]]:
+        """Сырые остатки складов на дату: [{store, product, amount, sum}]. timestamp — 'YYYY-MM-DDTHH:MM:SS.000'."""
+        for attempt in range(2):
+            token = await self._ensure_token()
+            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+                resp = await client.get(
+                    f"{self.base_url}/api/v2/reports/balance/stores",
+                    params={"key": token, "timestamp": timestamp}
+                )
+                if resp.status_code == 401 and attempt == 0:
+                    await self._invalidate_token()
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                return data if isinstance(data, list) else data.get("data", [])
+        return []
+
     async def get_stock_prices(self) -> Dict[str, float]:
         """Учётная себестоимость по ингредиентам из остатков складов."""
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
@@ -849,10 +980,16 @@ class IikoWebClient:
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
             # Формат для api.py: {"expenses": [{"items": [{"comment": name, "sum": amount, "category": {"name": cat}}], "dateIncoming": date, "paymentType": {"name": dept}}]}
+            # Группа INCOME_EXPENSES смешивает доходы И расходы — доходные счета
+            # («Торговая выручка…») это НЕ расход, выкидываем, иначе структура расходов врёт.
+            _income_hints = ("выручка", "доход")
             expenses = []
             for r in rows:
                 amount = float(r.get("Sum.ResignedSum") or 0)
                 if amount <= 0:
+                    continue
+                acc_name = (r.get("Account.Name") or "")
+                if any(h in acc_name.lower() for h in _income_hints):
                     continue
                 expenses.append({
                     "id": "",
@@ -1094,11 +1231,12 @@ class IikoWebClient:
         if org_ids and org_ids[0] and org_ids[0] != "demo":
             filters["Department"] = {"filterType": "IncludeValues", "values": org_ids}
 
+        # Группируем сразу по товару — иначе позиции накладной взять неоткуда (были пустые).
         payload = {
             "reportType": "TRANSACTIONS",
             "buildSummary": "false",
-            "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id"],
-            "aggregateFields": ["Sum.Incoming"],
+            "groupByRowFields": ["DateTime.DateTyped", "Counteragent.Id", "Product.Id", "Product.MeasureUnit"],
+            "aggregateFields": ["Sum.Incoming", "Amount.In"],
             "filters": filters,
         }
         token = await self._ensure_token()
@@ -1116,8 +1254,10 @@ class IikoWebClient:
             raw = resp.json()
             rows = raw if isinstance(raw, list) else raw.get("data", [])
 
-        # Резолв имён поставщиков по Counteragent.Id (как в get_invoice_items_olap)
+        # Резолв имён поставщиков и товаров (как в get_invoice_items_olap)
         suppliers_by_id: Dict[str, str] = {}
+        names_by_id: Dict[str, str] = {}
+        units_by_id: Dict[str, str] = {}
         if rows and org_ids and org_ids[0] and org_ids[0] != "demo":
             try:
                 for s in await self.get_suppliers(org_ids[0]):
@@ -1125,23 +1265,44 @@ class IikoWebClient:
                         suppliers_by_id[s["id"]] = s.get("name") or s["id"]
             except Exception:
                 pass
+            try:
+                for p in await self.search_nomenclature(org_ids[0], "", limit=10000):
+                    pid = p.get("id")
+                    if pid:
+                        names_by_id[pid] = p.get("name") or ""
+                        units_by_id[pid] = p.get("unit") or ""
+            except Exception:
+                pass
 
-        result = []
+        # Собираем накладные по (день, контрагент); товарные строки идут в items.
+        grouped: Dict[tuple, Dict[str, Any]] = {}
         for r in rows:
-            amount = float(r.get("Sum.Incoming") or 0)
-            if amount <= 0:
+            total = float(r.get("Sum.Incoming") or 0)
+            if total <= 0:
                 continue
             day = str(r.get("DateTime.DateTyped") or "")[:10]
             cid = r.get("Counteragent.Id") or ""
-            result.append({
+            key = (day, cid)
+            inv = grouped.setdefault(key, {
                 "documentNumber": "",
                 "status": "Processed",
                 "supplier": {"name": suppliers_by_id.get(cid) or "—"},
                 "dateIncoming": f"{day}T00:00:00" if day else f"{date_to}T00:00:00",
                 "items": [],
-                "sum": amount,
+                "sum": 0.0,
             })
-        return {"invoiceIncomings": result}
+            inv["sum"] += total
+            pid = r.get("Product.Id") or ""
+            if pid:
+                amount = float(r.get("Amount.In") or 0)
+                inv["items"].append({
+                    "name": names_by_id.get(pid) or "—",
+                    "amount": amount,
+                    "unit": r.get("Product.MeasureUnit") or units_by_id.get(pid, "") or "",
+                    "price": (total / amount) if amount else 0,
+                    "sum": total,
+                })
+        return {"invoiceIncomings": list(grouped.values())}
 
     async def get_olap_columns(self, report_type: str = "TRANSACTIONS") -> List[Dict[str, Any]]:
         """Список доступных OLAP-полей для report_type на этом iikoServer.
@@ -1454,7 +1615,8 @@ class IikoWebClient:
                                     })
                         except Exception:
                             pass
-                    # Fallback: XML на /api/products
+                    # Fallback: XML на /api/products (фильтра по типам там нет —
+                    # типы приезжают в ответе, отсеиваем уже у себя)
                     if not products:
                         resp = await client.get(
                             f"{self.base_url}/api/products",
@@ -1489,6 +1651,65 @@ class IikoWebClient:
                 if len(out) >= limit:
                     break
         return out
+
+    async def create_production_act(self, store_from: str, store_to: str, account_to: str,
+                                    consumed: List[Dict[str, Any]],
+                                    produced: List[Dict[str, Any]],
+                                    date: Optional[str] = None,
+                                    status: str = "PROCESSED") -> Dict[str, Any]:
+        """Акт приготовления (он же разбор): что израсходовали → что получили.
+
+        Схема выяснена запросами к живому серверу (2026-08-24): корень
+        <document>, склады <storeFrom>/<storeTo>, счёт <accountTo>, расход в
+        <products>, выход в <preparedProducts>, позиция — <productId>+<amount>.
+        Варианты с <items>/<amountIn> сервер отвергает: «Product is not found
+        neither by id=null nor by article=null».
+        """
+        token = await self._ensure_token()
+        d = (date or datetime.now().strftime("%Y-%m-%d"))[:10]
+        root = ET.Element("document")
+        ET.SubElement(root, "dateIncoming").text = f"{d}T12:00:00"
+        # <status> шлём, но проверено (2026-08-24, акт №0003 на Бейбітшілік):
+        # свежий импорт всё равно ложится ЧЕРНОВИКОМ, остатки не двигаются.
+        # У накладных проводка делается ре-импортом с <id> существующего
+        # документа, а для актов id взять неоткуда: экспорта по этому типу
+        # у сборки нет (все documents/export/* → 404). Проводить — в iikoOffice.
+        ET.SubElement(root, "status").text = status
+        ET.SubElement(root, "storeFrom").text = store_from
+        ET.SubElement(root, "storeTo").text = store_to or store_from
+        ET.SubElement(root, "accountTo").text = account_to
+        for tag, rows in (("products", consumed), ("preparedProducts", produced)):
+            block = ET.SubElement(root, tag)
+            for it in rows or []:
+                el = ET.SubElement(block, "item")
+                ET.SubElement(el, "productId").text = str(it.get("productId") or "")
+                ET.SubElement(el, "amount").text = str(it.get("amount") or 0)
+        body = ET.tostring(root, encoding="utf-8")
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.post(f"{self.base_url}/api/documents/import/productionDocument",
+                                     params={"key": token}, content=body,
+                                     headers={"Content-Type": "application/xml"})
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"HTTP {resp.status_code}", "body": resp.text[:300]}
+        valid = "<valid>true</valid>" in resp.text
+        num = ""
+        if "<documentNumber>" in resp.text:
+            num = resp.text.split("<documentNumber>")[1].split("<")[0]
+        return {"ok": valid, "number": num,
+                "error": "" if valid else resp.text[:300]}
+
+    async def get_account_for_production(self) -> str:
+        """Счёт для акта: берём «производство», иначе первый доступный."""
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/v2/entities/list",
+                                    params={"key": token, "rootType": "Account",
+                                            "includeDeleted": "false"})
+        if resp.status_code != 200:
+            return ""
+        accs = resp.json()
+        pick = next((a for a in accs if "производ" in (a.get("name") or "").lower()), None)
+        return (pick or (accs[0] if accs else {})).get("id", "")
 
     async def create_incoming_invoice(self, org_id: str, supplier_id: str,
                                        items: List[Dict[str, Any]], date: str,

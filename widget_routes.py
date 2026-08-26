@@ -25,7 +25,6 @@ def _read_site(name: str) -> str:
     задеть логику роутера."""
     with open(os.path.join(_SITES_DIR, name), encoding="utf-8") as f:
         return f.read()
-
 _WIDGET_BOT_URL = os.getenv("BOT_DEEPLINK", "https://t.me/iikoanalytics_bot")
 _RU_MON = {1: "янв", 2: "фев", 3: "мар", 4: "апр", 5: "мая", 6: "июн",
            7: "июл", 8: "авг", 9: "сен", 10: "окт", 11: "ноя", 12: "дек"}

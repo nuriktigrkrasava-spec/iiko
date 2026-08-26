@@ -293,9 +293,32 @@ def test_unmatched_never_leaks_empty_productid():
     print("  [OK] ненайденное → unmatched, пустых productId нет")
 
 
+def test_own_invoice_shows_its_composition():
+    """Накладные из iiko отдавали состав в positions, а свои — только ЧИСЛО
+    позиций: в карточке у них было пусто, «состава нет». Ключи у своих другие
+    (quantity / price_per_unit), поэтому читаем оба набора."""
+    own = api._own_position({"name": "Лосось с/м", "quantity": 10, "unit": "кг",
+                             "price_per_unit": 9300, "total": 93000})
+    assert own == {"name": "Лосось с/м", "qty": 10, "unit": "кг",
+                   "price": 9300, "sum": 93000}, own
+    iiko_like = api._own_position({"name": "Рис", "amount": 5, "unit": "кг",
+                                   "price": 800, "sum": 4000})
+    assert iiko_like["qty"] == 5 and iiko_like["price"] == 800, iiko_like
+    print("  [OK] состав своей накладной читается и в своих ключах, и в ключах iiko")
+
+
+def test_position_without_name_does_not_break_the_card():
+    p = api._own_position({"iiko_product_name": "Сопоставленный товар", "quantity": 2})
+    assert p["name"] == "Сопоставленный товар" and p["price"] == 0, p
+    assert api._own_position({})["name"] == "Позиция"
+    print("  [OK] позиция без имени и цены не роняет карточку")
+
+
 if __name__ == "__main__":
     failed = 0
-    for t in (test_score_picks_right_product,
+    for t in (test_own_invoice_shows_its_composition,
+              test_position_without_name_does_not_break_the_card,
+              test_score_picks_right_product,
               test_brand_breaks_the_tie,
               test_dishes_are_filtered_out,
               test_asks_iiko_only_for_goods,
