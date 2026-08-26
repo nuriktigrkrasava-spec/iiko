@@ -43,6 +43,9 @@ type Board = {
 }
 type Note = { branch: string; note: string }
 
+// «Все филиалы» в выпадающем списке — не филиал, а команда развернуть задачу на всю сеть
+const ALL = '__all__'
+
 const EFFORT_COLOR: Record<string, string> = { 'быстро': 'var(--grn)', 'средне': 'var(--amb)', 'долго': 'var(--red)' }
 
 function Eyebrow({ t, hint }: { t: string; hint?: string }) {
@@ -402,18 +405,42 @@ export default function Mountain() {
       .then((d: { notices?: Notice[] }) => setNotices(d.notices || [])).catch(() => {})
   }, [])
 
-  const loadDigest = useCallback((t: string, refresh = false) => {
-    setBusy(refresh)
+  /* Дайджест теперь СПРАШИВАЮТ, а не ждут.
+
+     Раньше «Обновить» держал запрос до конца сбора — полторы-две минуты, и
+     владелец сидел над кнопкой «Считаю…», не понимая, жив ли запрос. Сервер
+     отвечает сразу с pending, а мы перезапрашиваем, пока не приедет результат.
+     Опрос ограничен по числу попыток: молчание не должно превращаться в
+     бесконечный цикл запросов. */
+  const digestTimer = useRef<number | null>(null)
+  const loadDigest = useCallback((t: string, refresh = false, tries = 0) => {
+    if (digestTimer.current) { clearTimeout(digestTimer.current); digestTimer.current = null }
+    setBusy(refresh || tries > 0)
     fetch(`/api/mountain/digest/${t}${refresh ? '?refresh=1' : ''}`)
       .then((r) => r.json())
-      .then((d: { notes?: Note[]; hint?: string; detail?: string }) => {
-        if (d.detail) { setDigestHint(d.detail); setNotes([]); return }
+      .then((d: { notes?: Note[]; hint?: string; detail?: string; pending?: boolean }) => {
+        if (d.detail) { setDigestHint(d.detail); setNotes([]); setBusy(false); return }
+        if (d.pending) {
+          setDigestHint(d.hint || 'Считаю…')
+          if (tries < 12) {          // ~12 x 15 c = три минуты, дальше не мучаем сервер
+            digestTimer.current = window.setTimeout(() => loadDigest(t, false, tries + 1), 15000)
+          } else {
+            setBusy(false)
+            setDigestHint('Считается дольше обычного — загляни сюда через пару минут.')
+          }
+          return
+        }
         setNotes(d.notes || [])
         setDigestHint(d.hint || (d.notes?.length ? '' : 'Наблюдений пока нет'))
+        setBusy(false)
       })
-      .catch((e) => setDigestHint(`Не удалось посчитать: ${String((e as Error).message || e)}`))
-      .finally(() => setBusy(false))
+      .catch((e) => {
+        setDigestHint(`Не удалось посчитать: ${String((e as Error).message || e)}`)
+        setBusy(false)
+      })
   }, [])
+  // таймер опроса не должен пережить экран
+  useEffect(() => () => { if (digestTimer.current) clearTimeout(digestTimer.current) }, [])
 
   useEffect(() => { if (token) load(token) }, [token, load])
   // «Что изменилось» — блок владельца, и на сервере он owner-only. Управляющему
@@ -427,10 +454,15 @@ export default function Mountain() {
     if (!token || !tOrg || !tTitle.trim()) { setFormErr('Выбери филиал и напиши задачу'); return }
     setBusy(true); setFormErr('')
     try {
+      /* «Все филиалы» — одна задача на каждый, одним запросом: сервер принимает
+         список и сам сверяет каждый филиал с правами владельца. Раньше
+         одинаковую задачу приходилось заводить девять раз руками. */
+      const targets = tOrg === ALL ? rows.map((r) => r.organization_id) : [tOrg]
       const r = await fetch(`/api/mountain/assign/${token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tasks: [{ organization_id: tOrg, title: tTitle.trim(),
-                                         detail: tDetail.trim(), effort: tEffort }] }),
+        body: JSON.stringify({ tasks: targets.map((org) => ({
+          organization_id: org, title: tTitle.trim(),
+          detail: tDetail.trim(), effort: tEffort })) }),
       })
       const d = await r.json()
       if (!r.ok || d.error) { setFormErr(d.error || `HTTP ${r.status}`); return }
@@ -592,6 +624,7 @@ export default function Mountain() {
               <select value={tOrg} onChange={(e) => setTOrg(e.target.value)}
                 style={{ padding: '9px 11px', fontSize: 13, fontFamily: 'inherit', background: 'var(--glass-2)', color: 'var(--hi)', border: '1px solid var(--hair)', borderRadius: 11 }}>
                 <option value="">Филиал</option>
+                {rows.length > 1 && <option value={ALL}>Все филиалы ({rows.length})</option>}
                 {rows.map((r) => <option key={r.organization_id} value={r.organization_id}>{shortName(r.name)}</option>)}
               </select>
               <input value={tTitle} onChange={(e) => setTTitle(e.target.value)} placeholder="Задача"
@@ -606,7 +639,7 @@ export default function Mountain() {
               </select>
               <button onClick={addTask} disabled={busy}
                 style={{ padding: '10px 16px', borderRadius: 12, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
-                Поставить задачу
+                {tOrg === ALL ? `Поставить всем (${rows.length})` : 'Поставить задачу'}
               </button>
             </div>
             {formErr && (

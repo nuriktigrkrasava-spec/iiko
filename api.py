@@ -1710,6 +1710,48 @@ async def mountain_links(user: Dict = Depends(get_current_user)):
             "branches": branches}
 
 
+# uid'ы, по которым сбор уже идёт: второе нажатие «Обновить» не должно
+# запускать второй проход по всем филиалам. Рядом — ССЫЛКИ на сами задачи:
+# asyncio держит их слабо, и задача без ссылки может быть собрана сборщиком
+# мусора прямо посреди сбора, молча и без следа в логах.
+_digest_running: set = set()
+_digest_tasks: set = set()
+
+
+def _spawn_digest(uid: int, sig_key: str, key: str,
+                  signals: Optional[Dict[str, Any]] = None) -> None:
+    _digest_running.add(uid)
+    task = asyncio.create_task(_build_digest(uid, sig_key, key, signals=signals))
+    _digest_tasks.add(task)
+    task.add_done_callback(_digest_tasks.discard)
+
+
+async def _build_digest(uid: int, sig_key: str, key: str,
+                        signals: Optional[Dict[str, Any]] = None) -> None:
+    """Сбор показателей и наблюдений в фоне. Результат кладётся в кэш, откуда
+    его заберёт следующий запрос экрана."""
+    try:
+        if signals is None:
+            signals = await _gather_assistant_signals({"id": uid})
+            _set_cached(sig_key, signals, ttl=ASSISTANT_TTL)
+        # Считаем только по филиалам «Горы»: регионы и служебные организации
+        # владельцу в этой сводке не нужны, а каждая лишняя строка — токены.
+        names = {b["name"] for b in mountain_routes._scope(uid)["branches"]}
+        slim = {"branches": [b for b in (signals.get("branches") or []) if b.get("name") in names]}
+        # Проверяем СПИСОК, а не словарь: {"branches": []} истинен, и клиент без
+        # подходящих филиалов получал пустой дайджест, закэшированный на 12 часов.
+        notes = await assistant_ai.digest(slim if slim["branches"] else signals)
+        _set_cached(key, {"notes": notes, "stale": False}, ttl=ASSISTANT_TTL)
+    except Exception as e:
+        logger.warning(f"[digest] фоновый сбор для {uid}: {e!r}")
+        # Ошибку кладём в кэш ненадолго: экран должен УВИДЕТЬ провал, а не
+        # опрашивать вечно. Через минуту можно пробовать снова.
+        _set_cached(key, {"notes": [], "stale": True,
+                          "hint": f"Не удалось посчитать: {str(e)[:120]}"}, ttl=timedelta(minutes=1))
+    finally:
+        _digest_running.discard(uid)
+
+
 @app.get("/api/mountain/digest/{token}")
 async def mountain_digest(token: str, refresh: bool = Query(False)):
     """«Что изменилось» по каждому филиалу — наблюдение, а не задачи.
@@ -1724,27 +1766,30 @@ async def mountain_digest(token: str, refresh: bool = Query(False)):
     if not (get_restaurants(uid) or []):
         raise HTTPException(status_code=403, detail="только владельцу")
     sig_key = _cache_key(uid, "mountain-signals", "all", "month")
+    key = _cache_key(uid, "mountain-digest", "all", "month")
     signals = None if refresh else _get_cached(sig_key, ttl=ASSISTANT_TTL)
     if signals is None:
         if not refresh:
             return {"notes": [], "stale": True,
-                    "hint": "Показатели ещё не собраны — нажми «Обновить», это займёт до двух минут."}
-        signals = await _gather_assistant_signals({"id": uid})
-        _set_cached(sig_key, signals, ttl=ASSISTANT_TTL)
-    key = _cache_key(uid, "mountain-digest", "all", "month")
+                    "hint": "Показатели ещё не собраны — нажми «Обновить»."}
+        # Сбор уходит В ФОН, ручка отвечает сразу.
+        #
+        # Раньше «Обновить» держал запрос до конца сбора — полторы-две минуты, и
+        # владелец сидел над кнопкой «Считаю…», не зная, жив ли запрос вообще.
+        # Тот же приём уже работает у оценки филиалов на «Горе» (score_pending):
+        # ответить сразу, результат подтянуть следующим запросом.
+        if uid not in _digest_running:
+            _spawn_digest(uid, sig_key, key)
+        return {"notes": [], "pending": True,
+                "hint": "Считаю показатели по всем филиалам — это до двух минут. "
+                        "Страницу можно не держать открытой."}
     cached = _get_cached(key, ttl=ASSISTANT_TTL)
     if cached is not None and not refresh:
         return cached
-    # Считаем только по филиалам «Горы»: регионы и служебные организации
-    # владельцу в этой сводке не нужны, а каждая лишняя строка — токены.
-    names = {b["name"] for b in mountain_routes._scope(uid)["branches"]}
-    slim = {"branches": [b for b in (signals.get("branches") or []) if b.get("name") in names]}
-    # Проверяем СПИСОК, а не словарь: {"branches": []} истинен, и клиент без
-    # подходящих филиалов получал пустой дайджест, закэшированный на 12 часов.
-    notes = await assistant_ai.digest(slim if slim["branches"] else signals)
-    res = {"notes": notes, "stale": False}
-    _set_cached(key, res, ttl=ASSISTANT_TTL)
-    return res
+    if uid in _digest_running:
+        return {"notes": [], "pending": True, "hint": "Считаю показатели по всем филиалам…"}
+    _spawn_digest(uid, sig_key, key, signals=signals)
+    return {"notes": [], "pending": True, "hint": "Считаю наблюдения…"}
 
 
 @app.post("/api/mountain/propose/{token}")
@@ -7786,6 +7831,13 @@ async def _week_over_week(org: str, user: Dict[str, Any]) -> Optional[Dict[str, 
     }
 
 
+# Фудкост в наблюдениях «Что изменилось». ВЫКЛЮЧЕН: у самохостед-iikoWeb он
+# считается из техкарт × цен по всему меню — самый тяжёлый показатель сбора, а
+# в оценку филиала на «Горе» он не входит вовсе (см. scoring.py — там его нет).
+# Владелец попросил не считать. Вернуть: ASSISTANT_FOODCOST=1.
+ASSISTANT_FOODCOST = os.getenv("ASSISTANT_FOODCOST", "0") == "1"
+
+
 async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
     """Компактные сигналы по всем филиалам ЗАЛОГИНЕННОГО клиента (1..N) для ИИ-ассистента.
     Сбой одного филиала не роняет остальные. Семафор ограничивает нагрузку на iiko
@@ -7793,7 +7845,11 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
     from fastapi import Response as _Resp
     rests = get_restaurants(user.get("id", 0))
     out_branches: List[Dict[str, Any]] = []
-    sem = asyncio.Semaphore(6)  # не более 6 филиалов одновременно → не хаммерим сервер клиента
+    sem = asyncio.Semaphore(6)   # не более 6 филиалов одновременно
+    # Показатели внутри филиала теперь идут параллельно, поэтому потолок держим
+    # на самих запросах, а не на филиалах: без него шесть филиалов × девять
+    # показателей дали бы полсотни одновременных обращений к серверу клиента.
+    call_sem = asyncio.Semaphore(int(os.getenv("ASSISTANT_MAX_CALLS", "12")))
 
     async def one(r: Dict[str, Any]) -> Dict[str, Any]:
         org = r.get("organization_id")
@@ -7803,66 +7859,69 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
                              "peak": None, "has_recipes": None, "has_socials": None,
                              "stop_count": None, "stop_items": [],
                              "changes": None, "weekplan": None, "prev": None}
-        try:
-            fc = await foodcost(org, "month", 1, user)
+
+        async def safe(label: str, coro):
+            """Один показатель. Падение одного не должно ронять остальные —
+            поэтому не gather(return_exceptions=True) снаружи, а try здесь:
+            так в лог попадает ИМЯ показателя, а не безымянное исключение."""
+            async with call_sem:
+                try:
+                    return await coro
+                except Exception as e:
+                    logger.warning(f"[assistant] {label} {name}: {e!r}")
+                    return None
+
+        # Девять показателей независимы друг от друга, а шли строго по очереди:
+        # время филиала было СУММОЙ девяти походов в iiko, и сбор по сети занимал
+        # полторы-две минуты. Теперь они идут разом — время филиала равно самому
+        # медленному запросу. Общий семафор call_sem держит нагрузку на сервер
+        # клиента в узде: параллелизм вырос не в девять раз, а до потолка.
+        jobs = {
+            "dashboard": safe("dashboard", dashboard(org, _Resp(), "month", None, None, None, user=user)),
+            "changes": safe("дельты", _week_over_week(org, user)),
+            "weekplan": safe("weekplan", _weekplan_status(org, _get_org_id(org, user), user)),
+            "cancels": safe("cancels", cancels(org, "month", user)),
+            "reviews": safe("reviews", branch_reviews(org, user)),
+            "late": safe("опоздания", late_deliveries(org, "month", None, None, 1, user)),
+            "heatmap": safe("heatmap", load_heatmap(org, "month", None, user=user)),
+            "stoplist": safe("stoplist", get_stoplist(org, user)),
+            "writeoffs": safe("writeoffs", writeoffs(org, "month", user)),
+        }
+        if ASSISTANT_FOODCOST:
+            jobs["foodcost"] = safe("foodcost", foodcost(org, "month", 1, user))
+        done = dict(zip(jobs.keys(), await asyncio.gather(*jobs.values())))
+
+        fc = done.get("foodcost")
+        if fc:
             b["has_recipes"] = fc.get("fact_pct") is not None
             if fc.get("fact_pct") is not None:
                 b["foodcost"] = {"fact_pct": fc["fact_pct"], "norm_pct": fc.get("norm_pct", 30),
                                  "fact_sum": fc.get("fact_sum"), "coverage": fc.get("coverage_pct")}
-        except Exception as e:
-            logger.warning(f"[assistant] foodcost {name}: {e!r}")
-        try:
-            d = await dashboard(org, _Resp(), "month", None, None, None, user=user)
-            b["revenue"] = d.get("revenue_today")  # revenue_today = выручка периода
-        except Exception as e:
-            logger.warning(f"[assistant] dashboard {name}: {e!r}")
-        try:
-            # неделя к неделе — на этом стоит похвала «показатель вырос»
-            b["changes"] = await _week_over_week(org, user)
-        except Exception as e:
-            logger.warning(f"[assistant] дельты {name}: {e!r}")
-        try:
-            b["weekplan"] = await _weekplan_status(org, _get_org_id(org, user), user)
-        except Exception as e:
-            logger.warning(f"[assistant] weekplan {name}: {e!r}")
-        try:
-            cn = await cancels(org, "month", user)
-            b["cancels"] = cn.get("total_amount")
-        except Exception as e:
-            logger.warning(f"[assistant] cancels {name}: {e!r}")
-        try:
-            rv = await branch_reviews(org, user)
+        if done.get("dashboard"):
+            b["revenue"] = done["dashboard"].get("revenue_today")  # revenue_today = выручка периода
+        b["changes"] = done.get("changes")
+        b["weekplan"] = done.get("weekplan")
+        if done.get("cancels"):
+            b["cancels"] = done["cancels"].get("total_amount")
+        rv = done.get("reviews")
+        if rv:
             b["has_socials"] = bool(rv.get("platforms"))
             b["reviews"] = [{"label": p.get("label"), "rating": p.get("rating"),
                              "delta": p.get("delta")} for p in rv.get("platforms", [])]
-        except Exception as e:
-            logger.warning(f"[assistant] reviews {name}: {e!r}")
-        try:
-            b["late"] = _late_signal(await late_deliveries(org, "month", None, None, 1, user))
-        except Exception as e:
-            logger.warning(f"[assistant] опоздания {name}: {e!r}")
-        try:
-            hm = await load_heatmap(org, "month", None, user=user)
-            pk = hm.get("peak") if isinstance(hm, dict) else None
-            if pk and pk.get("orders"):
-                b["peak"] = {"day": assistant_ai.DOW_RU.get(pk.get("d")), "hour": pk.get("h")}
-        except Exception as e:
-            logger.warning(f"[assistant] heatmap {name}: {e!r}")
-        try:
-            # функция называется get_stoplist и не принимает период — вызов по
-            # старому имени молча падал в NameError, и сигнал стоп-листа терялся
-            st = await get_stoplist(org, user)
+        if done.get("late") is not None:
+            b["late"] = _late_signal(done["late"])
+        hm = done.get("heatmap")
+        pk = hm.get("peak") if isinstance(hm, dict) else None
+        if pk and pk.get("orders"):
+            b["peak"] = {"day": assistant_ai.DOW_RU.get(pk.get("d")), "hour": pk.get("h")}
+        st = done.get("stoplist")
+        if st:
             stops = [i.get("name") for i in st.get("items", []) if i.get("status") == "stop"]
             b["stop_count"] = len(stops)
             b["stop_items"] = stops[:5]
-        except Exception as e:
-            logger.warning(f"[assistant] stoplist {name}: {e!r}")
-        try:
-            wo = await writeoffs(org, "month", user)
-            if wo.get("total_written"):
-                b["writeoffs"] = {"total": wo.get("total_written"), "pct": wo.get("loss_pct")}
-        except Exception as e:
-            logger.warning(f"[assistant] writeoffs {name}: {e!r}")
+        wo = done.get("writeoffs")
+        if wo and wo.get("total_written"):
+            b["writeoffs"] = {"total": wo.get("total_written"), "pct": wo.get("loss_pct")}
         return b
 
     async def throttled(r: Dict[str, Any]) -> Dict[str, Any]:
