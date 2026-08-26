@@ -12,11 +12,42 @@ os.environ.setdefault("DB_PATH", os.path.join(tempfile.mkdtemp(prefix="chk-ai-")
 import checklist_ai as C  # noqa: E402
 
 
-def test_off_by_default():
-    """Пока владелец не включил CHECKLIST_AI, ни один кадр не уходит в модель."""
-    assert C.AI_ENABLED is False, "рубильник должен быть выключен по умолчанию"
-    assert C._client is None, C._client
-    print("  [OK] разбор выключен по умолчанию — платить не за что")
+def test_switch_turns_the_review_off_without_a_deploy():
+    """Рубильник: разбор включён, но выключается одной переменной.
+
+    Раньше по умолчанию было выключено и включалось переменной на Render.
+    Владелец включил разбор, и умолчание перевернулось — но возможность
+    выключить БЕЗ деплоя обязана остаться: это единственный быстрый способ
+    остановить трату денег.
+    """
+    import importlib
+    old = os.environ.get("CHECKLIST_AI")
+    try:
+        os.environ["CHECKLIST_AI"] = "0"
+        m = importlib.reload(C)
+        assert m.AI_ENABLED is False, "CHECKLIST_AI=0 обязан выключать разбор"
+        assert m._client is None, m._client
+        os.environ.pop("CHECKLIST_AI")
+        m = importlib.reload(C)
+        assert m.AI_ENABLED is True, "по умолчанию разбор включён"
+    finally:
+        if old is None:
+            os.environ.pop("CHECKLIST_AI", None)
+        else:
+            os.environ["CHECKLIST_AI"] = old
+        importlib.reload(C)
+    print("  [OK] по умолчанию включён, CHECKLIST_AI=0 выключает без деплоя")
+
+
+def test_no_key_means_no_calls_even_when_enabled():
+    """Без ANTHROPIC_API_KEY клиента нет — включённый рубильник ничего не тратит."""
+    assert C.AI_ENABLED is True
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        assert C._client is None, "без ключа клиент создаваться не должен"
+        print("  [OK] рубильник включён, ключа нет — в модель ничего не уходит")
+    else:
+        assert C._client is not None
+        print("  [OK] рубильник включён и ключ есть — клиент готов")
 
 
 def test_sampling_keeps_most_uploads_free():
@@ -184,7 +215,8 @@ def test_shrink_really_shrinks_so_the_saving_is_real():
 
 if __name__ == "__main__":
     failed = 0
-    for t in (test_off_by_default, test_sampling_keeps_most_uploads_free,
+    for t in (test_switch_turns_the_review_off_without_a_deploy,
+              test_no_key_means_no_calls_even_when_enabled, test_sampling_keeps_most_uploads_free,
               test_edge_cases_always_reviewed, test_shrink_cuts_tokens_fourfold,
               test_hash_is_stable_and_short, test_cached_slot_costs_nothing,
               test_one_request_per_slot_not_per_photo, test_daily_cost_estimate,

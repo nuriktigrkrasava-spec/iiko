@@ -21,7 +21,12 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-AI_ENABLED = os.getenv("CHECKLIST_AI", "0") == "1"
+# Разбор фото ВКЛЮЧЁН. Выключается явным CHECKLIST_AI=0 — без деплоя.
+#
+# Раньше по умолчанию было выключено, и включали переменной на Render. Владелец
+# попросил включить, а доступа к панели Render у ассистента нет, поэтому рубильник
+# переехал в код: теперь «включено, пока не сказано обратное».
+AI_ENABLED = (os.getenv("CHECKLIST_AI") or "1") != "0"
 MODEL = os.getenv("CHECKLIST_MODEL", "claude-sonnet-5")
 MAX_SIDE = int(os.getenv("CHECKLIST_MAX_SIDE", "512"))
 SAMPLE_PCT = int(os.getenv("CHECKLIST_SAMPLE_PCT", "20"))
