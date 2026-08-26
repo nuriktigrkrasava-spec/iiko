@@ -37,7 +37,8 @@ from database import (
     get_demo_invoice_count, inc_demo_invoice_count,
     start_demo_trial, get_demo_trial,
     get_trials_due_for_sales, mark_trial_sales_sent,
-    get_restaurants, add_restaurant, delete_restaurant, delete_all_restaurants,
+    get_restaurants, get_owned_restaurants, decrypt_password,
+    add_restaurant, delete_restaurant, delete_all_restaurants,
     wipe_demo_user,
     add_manual_expense, get_manual_expenses, delete_manual_expense,
     create_bot_task, answer_bot_task, get_bot_tasks_all,
@@ -1164,6 +1165,10 @@ async def hall(org_id: str, user: Dict = Depends(get_current_user)):
     """Живой зал из iiko Cloud: секции+схема+занятость. Нужен cloud_api_login у филиала."""
     if _use_demo_data(user, org_id):
         return {"connected": False, "demo": True}
+    # Ссылка филиала открывает ровно свой филиал: без этой строки зал СОСЕДНЕЙ
+    # точки читался по чужой ссылке — единственная ручка, где проверка была
+    # забыта совсем (остальные ходят через _get_org_id).
+    _get_org_id(org_id, user)
     rests = get_restaurants(user.get("id", 0))
     r = next((x for x in rests if x.get("organization_id") == org_id), None)
     enc = r.get("cloud_api_login") if r else None
@@ -1612,6 +1617,8 @@ async def widget(org_id: str, response: Response, user: Dict = Depends(get_curre
     переиспользует dashboard()/insights (следующий шаг)."""
     response.headers["Cache-Control"] = "max-age=300"  # кэш 5 минут
     is_demo = _use_demo_data(user, org_id)
+    if not is_demo:
+        _get_org_id(org_id, user)   # чужой филиал по ссылке своего — 403
     d = DEMO_DASHBOARD
     spark = d["chart_7days"]["data"]
     rev, fc = d["revenue_today"], d["forecast"]
@@ -1663,11 +1670,23 @@ app.include_router(mountain_routes.router)
 
 @app.get("/api/mountain/links")
 async def mountain_links(user: Dict = Depends(get_current_user)):
-    """Личные ссылки: владельцу — своя, каждому филиалу — своя.
-    Ссылка = подписанный uid на общем ENCRYPTION_KEY, поэтому она одинакова
-    локально и на проде и не требует отдельного входа."""
+    """Личные ссылки: владельцу — своя, каждому филиалу — своя. ТОЛЬКО ВЛАДЕЛЬЦУ.
+
+    Раньше ручка смотрела только на user["id"], а у ссылки ФИЛИАЛА это uid
+    владельца — своих кредов iiko у филиала нет (см. scope_of_token). Управляющий
+    получал ссылку владельца и по ней открывал всю сеть, ставил задачи и рассылал
+    сообщения всем филиалам. Это была прямая привилегия-эскалация, а не утечка
+    списка: ссылка = вход.
+
+    Владение спрашиваем через get_owned_restaurants: get_restaurants намеренно
+    отдаёт и филиалы, где человек лишь управляющий, и владельца по ней не отличить.
+    """
+    if user.get("only_org"):
+        raise HTTPException(status_code=403, detail="Ссылки раздаёт владелец")
     uid = user.get("id", 0)
-    rests = get_restaurants(uid) or []
+    rests = get_owned_restaurants(uid) or []
+    if not rests:
+        raise HTTPException(status_code=403, detail="Ссылки раздаёт владелец")
     mgrs = {m["organization_id"]: m for m in get_branch_managers()}
     branches = []
     for r in rests:
@@ -1739,7 +1758,9 @@ async def mountain_propose(token: str, force: bool = Query(False),
     uid = mountain_routes.uid_from_token(token)
     if not uid:
         raise HTTPException(status_code=404, detail="bad token")
-    if not (get_restaurants(uid) or []):
+    # Владение, а не доступ: get_restaurants отдаёт и филиалы, где человек лишь
+    # управляющий, и владельца по ней не отличить (см. get_owned_restaurants).
+    if not (get_owned_restaurants(uid) or []):
         raise HTTPException(status_code=403, detail="предлагать задачи может только владелец")
     # Сбор сигналов — это поход в iiko по всем филиалам, дорого и небыстро.
     # Держим результат столько же, сколько разбор ассистента: повторное нажатие
@@ -3430,6 +3451,7 @@ async def companions(org_id: str, period: str = "week", user: Dict = Depends(get
 async def retention(org_id: str, user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
         return DEMO_RETENTION
+    _get_org_id(org_id, user)   # данных пока нет, но филиал проверяем как везде
     return {"clients": 0, "orders": 0, "cohorts": [], "frequency": []}
 
 
@@ -7898,8 +7920,17 @@ async def tasks_status(org_id: str, days: int = Query(14, ge=1, le=90),
     Показываем СВОДКУ по филиалам, а не ленту сообщений: владельцу важно
     «кто закрыл, кто молчит», а не хронология нажатий.
     """
-    mine = {r.get("organization_name") for r in get_restaurants(user.get("id", 0))}
-    rows = [t for t in get_bot_tasks(days) if not mine or t.get("branch") in mine]
+    # Сужаем по organization_id, а не по названию филиала, и БЕЗ отката «нет
+    # своих филиалов → показать всё»: get_bot_tasks отдаёт задачи всех клиентов
+    # сразу. Раньше org_id из пути не участвовал вовсе — по ссылке филиала
+    # трекер показывал всю сеть, а при пустом списке своих филиалов ещё и чужих
+    # клиентов. Ссылка филиала сужает до одного org, владелец видит свои.
+    _get_org_id(org_id, user)          # чужой филиал в пути — 403, как везде
+    allowed = {r.get("organization_id") for r in get_restaurants(user.get("id", 0))}
+    only = user.get("only_org")
+    if only:
+        allowed = {only}               # владельцу — сводка по сети, филиалу — своё
+    rows = [t for t in get_bot_tasks(days) if t.get("organization_id") in allowed]
 
     by_branch: Dict[str, Dict[str, Any]] = {}
     for t in rows:
@@ -8582,11 +8613,13 @@ def _ig_close_html(msg: str, ok: bool = False) -> str:
 @app.get("/api/social/instagram/connect/{org_id}")
 async def ig_connect(org_id: str, request: Request, user: Dict = Depends(get_current_user)):
     """Ссылка на вход через Facebook. Если приложение Meta не настроено — configured:false."""
+    # Филиал проверяем ДО ответа «не настроено»: иначе ручка отвечала 200 на
+    # чужой филиал и выпадала из сплошной проверки изоляции.
+    real_org = _get_org_id(org_id, user)
     if not social_ig.is_configured():
         return {"configured": False,
                 "reason": "Нет META_APP_ID/META_APP_SECRET. Зарегистрируй приложение на "
                           "developers.facebook.com (тип Business) и добавь ключи в окружение."}
-    real_org = _get_org_id(org_id, user)
     redirect_uri = str(request.base_url).rstrip("/") + "/api/social/instagram/callback"
     return {"configured": True, "url": social_ig.authorize_url(redirect_uri, real_org)}
 

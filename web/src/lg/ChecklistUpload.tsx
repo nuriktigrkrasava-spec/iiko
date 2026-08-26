@@ -135,18 +135,23 @@ export default function ChecklistUpload({ token }: { token: string }) {
         </div>
       )}
 
-      <div style={{ marginTop: 12, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+      {/* Кнопку не должно вести. Подпись меняет длину на каждый тап по зоне
+          («Сдать 10:45 · Зал» против «Сдать 23:45 · Санузел») и ещё раз на
+          «Загружаю…», а рядом то появляется, то исчезает «уже сдано в 10:47» —
+          на узком экране оно переносилось и толкало кнопку. Поэтому кнопке
+          задана постоянная ширина по самой длинной подписи, а состояние ушло
+          на свою строку с зарезервированной высотой: меняется текст, но ничто
+          не двигается. */}
+      <div style={{ marginTop: 12 }}>
         <button onClick={() => input.current?.click()} disabled={busy}
-          style={{ padding: '11px 18px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700, cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1 }}>
+          style={{ minWidth: 208, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 18px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700, fontFamily: 'inherit', cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1 }}>
           {busy ? 'Загружаю…' : `Сдать ${slot} · ${ZONES.find(([k]) => k === zone)?.[1]}`}
         </button>
         <input ref={input} type="file" accept="image/*" multiple capture="environment" hidden
           onChange={(e) => upload(e.target.files)} />
-        {sent(slot, zone) && (
-          <span style={{ fontSize: 12.5, color: 'var(--grn)', fontWeight: 650 }}>
-            уже сдано в {sent(slot, zone)?.at}
-          </span>
-        )}
+        <div style={{ minHeight: 18, marginTop: 7, fontSize: 12.5, fontWeight: 650, color: 'var(--grn)' }}>
+          {sent(slot, zone) ? `уже сдано в ${sent(slot, zone)?.at}` : ''}
+        </div>
       </div>
 
       {err && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--red)' }}>{err}</div>}
