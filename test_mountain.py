@@ -435,6 +435,59 @@ def test_checklist_time_is_the_restaurants_not_the_servers():
     print("  [OK] время чек-листа — по Астане (UTC+5), а не по часам сервера")
 
 
+def test_photos_are_not_kept_on_disk():
+    """Кадры чек-листа не должны оседать на диске.
+
+    Их не отдавала наружу ни одна ручка: клиент всегда получал только
+    количество, картинки читал лишь разбор. Посмотреть их глазами было
+    невозможно, а копились они бессрочно — около двух гигабайт в месяц на
+    девяти филиалах. Разбору диск не нужен: кадры уже в памяти запроса.
+    """
+    import base64, os as _os
+    from database import checklist_dir, get_checklist_uploads
+    _seed()
+    # однопиксельный JPEG — достаточно, чтобы пройти путь целиком
+    px = base64.b64encode(bytes.fromhex(
+        "ffd8ffe000104a46494600010100000100010000ffdb004300ff"
+        "c00011080001000101011100ffc4001f0000010501010101010100000000000000000102030405060708090a0b"
+        "ffda0008010100003f00d2cf20ffd9")).decode()
+    before = sum(len(f) for _r, _d, f in _os.walk(checklist_dir()))
+    r = client.post(f"/api/mountain/checklist/{M.token_for_org(ORG_B)}",
+                    json={"slot": "10:45", "zone": "hall", "photos": [px, px]})
+    assert r.status_code == 200, r.text[:200]
+    assert r.json()["photos"] == 2, r.json()
+
+    after = sum(len(f) for _r, _d, f in _os.walk(checklist_dir()))
+    assert after == before, "кадры всё ещё пишутся на диск"
+
+    day = db.local_now().date().isoformat()
+    rows = [u for u in get_checklist_uploads([ORG_B], day) if u["slot"] == "10:45"]
+    assert rows and len(rows[0]["photos"]) == 2, rows
+    assert rows[0]["photos"][0].get("hash"), "не сохранён след кадра (хеш)"
+    print("  [OK] кадры разобраны и не сохранены; в базе остался хеш и счётчик")
+
+
+def test_zone_verdicts_do_not_overwrite_each_other():
+    """Зоны сдаются по одной, а вердикт в базе один на слот.
+
+    Простое сохранение затирало бы разбор зала, когда приедет кухня, — и
+    владелец видел бы только последнюю зону.
+    """
+    from database import merge_checklist_review, get_checklist_reviews
+    _seed()
+    day = db.local_now().date().isoformat()
+    merge_checklist_review(ORG_B, day, "10:45", True, [], "тест",
+                           [{"zone": "зал", "item": "Урна не переполнена", "ok": True}])
+    merge_checklist_review(ORG_B, day, "10:45", False,
+                           [{"zone": "санузел", "what": "нет мыла"}], "тест",
+                           [{"zone": "санузел", "item": "Есть мыло и бумага", "ok": False}])
+    row = [r for r in get_checklist_reviews([ORG_B], day) if r["slot"] == "10:45"][0]
+    zones = {c["zone"] for c in row["criteria"]}
+    assert zones == {"зал", "санузел"}, f"разбор зоны потерян: {zones}"
+    assert row["ok"] == 0, "слот с грязной зоной не может быть чистым"
+    print("  [OK] разбор второй зоны дописывается, а не затирает первую")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -466,7 +519,9 @@ if __name__ == "__main__":
               test_branch_link_confines_access_regardless_of_telegram_tables,
               test_branch_link_gets_the_branch_board_not_the_owners,
               test_personal_link_opens_the_site,
-              test_checklist_time_is_the_restaurants_not_the_servers):
+              test_checklist_time_is_the_restaurants_not_the_servers,
+              test_photos_are_not_kept_on_disk,
+              test_zone_verdicts_do_not_overwrite_each_other):
         print(f"\n>>> {t.__name__}")
         try:
             t()

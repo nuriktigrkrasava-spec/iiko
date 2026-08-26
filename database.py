@@ -2380,6 +2380,44 @@ def _ensure_checklist_ai(conn):
         pass
 
 
+def merge_checklist_review(org_id: str, day: str, slot: str, ok: bool,
+                           issues: List[Dict[str, Any]], reason: str = "",
+                           criteria: Optional[List[Dict[str, Any]]] = None):
+    """Дописать разбор ОДНОЙ зоны к вердикту слота.
+
+    Зоны сдаются по одной, а вердикт в базе один на слот. Простое сохранение
+    затирало бы разбор зала, когда приедет кухня. Сливаем по паре (зона, пункт):
+    новый ответ по тому же пункту побеждает, остальное сохраняется. Общий ok —
+    произведение: слот чист, только если чиста каждая разобранная зона.
+    """
+    prev = {}
+    for r in get_checklist_reviews([org_id], day):
+        if r["slot"] == slot:
+            prev = r
+            break
+    by_key = {(c.get("zone"), c.get("item")): c for c in (prev.get("criteria") or [])}
+    for c in criteria or []:
+        by_key[(c.get("zone"), c.get("item"))] = c
+    merged = list(by_key.values())
+
+    seen, all_issues = set(), []
+    for i in (prev.get("issues") or []) + (issues or []):
+        key = json.dumps(i, ensure_ascii=False, sort_keys=True) if isinstance(i, dict) else str(i)
+        if key not in seen:
+            seen.add(key)
+            all_issues.append(i)
+    # Замечание, которое ушло из свежего разбора зоны, тянуть не надо: если по
+    # этой зоне пришёл новый ответ, старые её замечания вытесняются.
+    zones_now = {c.get("zone") for c in (criteria or [])}
+    if zones_now:
+        all_issues = [i for i in all_issues
+                      if not (isinstance(i, dict) and i.get("zone") in zones_now)] + list(issues or [])
+
+    total_ok = bool(ok) and not any(c.get("ok") is False for c in merged)
+    save_checklist_review(org_id, day, slot, total_ok, all_issues,
+                          reason or prev.get("reason") or "", merged)
+
+
 def save_checklist_review(org_id: str, day: str, slot: str, ok: bool,
                           issues: List[Dict[str, Any]], reason: str = "",
                           criteria: Optional[List[Dict[str, Any]]] = None):

@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -966,6 +966,15 @@ MAX_PHOTO_MB = 4
 # Фора на сдачу слота: снять три зоны за минуту нельзя, и считать это
 # опозданием — значит гонять через модель каждую сдачу.
 SLOT_GRACE_MIN = int(os.getenv("CHECKLIST_GRACE_MIN", "20"))
+# Хранить ли сами кадры на диске. По умолчанию НЕТ.
+#
+# Кадры не отдавала наружу ни одна ручка: клиент всегда получал только их
+# количество, а картинки читал лишь разбор. То есть посмотреть их глазами было
+# невозможно в принципе — они писались в никуда и копили гигабайты на /data
+# (девять филиалов × четыре слота × три зоны × четыре кадра ≈ 2 ГБ в месяц,
+# бессрочно). Разбору диск не нужен вовсе: кадры уже в памяти запроса. Храним
+# вместо них хеш и вес — этого хватает и на счётчик, и на кэш вердиктов.
+KEEP_PHOTOS = os.getenv("CHECKLIST_KEEP_PHOTOS", "0") == "1"
 
 
 def _minutes(hm: str) -> int:
@@ -1005,10 +1014,12 @@ async def checklist_upload(token: str, payload: ChecklistPayload):
     if len(payload.photos) > MAX_PHOTOS:
         return JSONResponse({"error": f"не больше {MAX_PHOTOS} кадров на зону"}, status_code=400)
 
+    import checklist_ai as _C
     day = local_now().date().isoformat()
-    folder = os.path.join(checklist_dir(), b["organization_id"], day)
-    os.makedirs(folder, exist_ok=True)
-    saved = []
+    org = b["organization_id"]
+
+    blobs: List[Tuple[bytes, str]] = []
+    saved: List[Dict[str, Any]] = []
     for i, raw in enumerate(payload.photos):
         try:
             data = _b64.b64decode((raw or "").split(",", 1)[-1], validate=False)
@@ -1016,66 +1027,60 @@ async def checklist_upload(token: str, payload: ChecklistPayload):
             return JSONResponse({"error": "файл не читается"}, status_code=400)
         if len(data) > MAX_PHOTO_MB * 1024 * 1024:
             return JSONResponse({"error": f"кадр больше {MAX_PHOTO_MB} МБ — сожми"}, status_code=413)
-        name = f"{payload.slot.replace(':', '')}_{payload.zone}_{int(local_now().timestamp())}_{i}.jpg"
-        with open(os.path.join(folder, name), "wb") as f:
-            f.write(data)
-        saved.append(os.path.join(b["organization_id"], day, name))
-    rid = save_checklist_upload(b["organization_id"], day, payload.slot, payload.zone,
+        blobs.append((data, ZONES[payload.zone]))
+        # В базе остаётся след кадра — хеш и вес, — но не сам кадр. Хеш ещё и
+        # ключ кэша вердиктов: тот же снимок второй раз не оплачивается.
+        rec: Dict[str, Any] = {"hash": _C.photo_hash(data), "bytes": len(data)}
+        if KEEP_PHOTOS:
+            folder = os.path.join(checklist_dir(), org, day)
+            os.makedirs(folder, exist_ok=True)
+            name = f"{payload.slot.replace(':', '')}_{payload.zone}_{int(local_now().timestamp())}_{i}.jpg"
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(data)
+            rec["path"] = os.path.join(org, day, name)
+        saved.append(rec)
+
+    rid = save_checklist_upload(org, day, payload.slot, payload.zone,
                                 saved, payload.note or "", uid)
-    review = await _maybe_review(b["organization_id"], day, payload.slot)
+    # Разбор идёт по кадрам ЭТОЙ зоны прямо из памяти. Раньше он перечитывал с
+    # диска все зоны слота заново на каждую сдачу: три зоны — три запроса с 1, 2
+    # и 3 наборами кадров, то есть за одни и те же снимки платили трижды.
+    review = await _review_upload(org, day, payload.slot, blobs)
     return JSONResponse({"ok": True, "id": rid, "photos": len(saved),
                          "slot": payload.slot, "zone": ZONES[payload.zone],
                          "review": review})
 
 
-async def _maybe_review(org: str, day: str, slot: str) -> Dict[str, Any]:
-    """Разбор фото моделью — со всеми предохранителями по деньгам.
+async def _review_upload(org: str, day: str, slot: str,
+                         blobs: List[Tuple[bytes, str]]) -> Dict[str, Any]:
+    """Разбор кадров одной сдачи — со всеми предохранителями по деньгам.
 
-    Гоняем не всё: только выборку и спорные случаи (см. checklist_ai). Один
-    запрос на СЛОТ, а не на кадр: три зоны идут одним документом. Кадры
-    ужимаются до 512 px, а по хешу стоит кэш — тот же снимок второй раз не
-    оплачивается. Пока CHECKLIST_AI не включён, сюда вообще ничего не уходит.
+    Кадры приходят из памяти запроса: на диск они больше не ложатся (см.
+    KEEP_PHOTOS). Проверяем ровно то, что сейчас прислали, и дописываем вердикт
+    к слоту — зоны сдаются по одной, а вердикт в базе один на слот.
+
+    Выборка (SAMPLE_PCT) применяется, ТОЛЬКО когда кадры сохраняются: без диска
+    непроверенную сдачу уже никто не посмотрит, и пропустить её — значит
+    превратить фотоконтроль в галочки. Без хранения проверяем всё.
     """
     import checklist_ai as C
-    from database import (get_checklist_uploads, save_checklist_review,
-                          photo_verdict_cache, save_photo_verdict, checklist_dir)
-    ups = [u for u in get_checklist_uploads([org], day) if u["slot"] == slot]
-    if not ups:
-        return {"checked": False, "reason": "нет сдач"}
-
-    # Спорные случаи: сдано СИЛЬНО позже слота или кадров меньше трёх.
-    #
-    # Раньше стояло «время сдачи > время слота», и опозданием считалась любая
-    # нормальная сдача: слот 10:45, сняли в 10:47 — уже late. А late означает
-    # «проверять всегда», то есть выборка в SAMPLE_PCT не применялась НИКОГДА и
-    # в модель уходило 100% слотов вместо 20%. Даём разумную фору.
-    late = _minutes(local_now().strftime("%H:%M")) > _minutes(slot) + SLOT_GRACE_MIN
-    photos_n = sum(len(u.get("photos") or []) for u in ups)
-    do, why = C.should_review({"photos": [1] * photos_n}, late=late)
-    if not do:
-        return {"checked": False, "reason": why}
-
-    blobs: List[Tuple[bytes, str]] = []
-    hashes: List[str] = []
-    for u in ups:
-        for rel in (u.get("photos") or []):
-            try:
-                with open(os.path.join(checklist_dir(), rel), "rb") as f:
-                    data = f.read()
-            except Exception:
-                continue
-            blobs.append((data, ZONES.get(u["zone"], u["zone"])))
-            hashes.append(C.photo_hash(data))
+    from database import (merge_checklist_review, photo_verdict_cache, save_photo_verdict)
     if not blobs:
-        return {"checked": False, "reason": "кадры не читаются"}
+        return {"checked": False, "reason": "нет кадров"}
 
+    why = "кадры не хранятся — проверяем каждую сдачу"
+    if KEEP_PHOTOS:
+        late = _minutes(local_now().strftime("%H:%M")) > _minutes(slot) + SLOT_GRACE_MIN
+        do, why = C.should_review({"photos": [1] * len(blobs)}, late=late)
+        if not do:
+            return {"checked": False, "reason": why}
+
+    hashes = [C.photo_hash(d) for d, _ in blobs]
     cache = photo_verdict_cache(hashes)
-    # Критерии отдаём модели те же, что видит управляющий на экране: разбор
-    # должен отвечать по его чек-листу, а не по своему представлению о чистоте.
     res = await C.review_slot(blobs, cache=cache, criteria=S.ZONE_CRITERIA)
     if res.get("checked"):
-        save_checklist_review(org, day, slot, bool(res.get("ok")),
-                              res.get("issues") or [], why, res.get("criteria") or [])
+        merge_checklist_review(org, day, slot, bool(res.get("ok")),
+                               res.get("issues") or [], why, res.get("criteria") or [])
         for hsh in hashes:
             save_photo_verdict(hsh, {"ok": res.get("ok"), "issues": res.get("issues") or [],
                                      "criteria": res.get("criteria") or []})
