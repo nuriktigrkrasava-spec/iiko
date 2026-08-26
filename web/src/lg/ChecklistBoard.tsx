@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Glass } from './ui'
 import { SLOTS as DEFAULT_SLOTS, ZONES, ZONE_LABEL, type Done, type Review,
-         issueText, slotPassed } from './checklist'
+         issueText, slotPassed, zoneVerdict } from './checklist'
 
 /* Чек-листы филиалов глазами владельца: кто сдал, кто нет.
 
@@ -73,17 +73,24 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
                       <span style={{ display: 'inline-flex', gap: 3 }}>
                         {ZONES.map(([k, label]) => {
                           const d = zoneDone(b, s, k)
-                          // сдана — зелёная; слот прошёл, а её нет — красная;
-                          // слот ещё не наступил — серая, это не провинность
-                          const col = d ? 'var(--grn)' : passed ? 'var(--red)' : 'var(--mute)'
+                          // Сдано — ещё не чисто. Зона со сдачей, в которой разбор
+                          // нашёл грязь, красится КРАСНЫМ, а не зелёным: иначе
+                          // загаженный санузел выглядел как вымытый.
+                          const dirty = d && zoneVerdict(reviews, s, k, b) === 'dirty'
+                          const good = d && !dirty
+                          const col = good ? 'var(--grn)' : dirty || passed ? 'var(--red)' : 'var(--mute)'
+                          const state = dirty ? `сдано в ${d?.at}, но есть замечания`
+                            : d ? `сдано в ${d.at}`
+                            : passed ? 'не сдано' : 'слот ещё не наступил'
                           return (
-                            <span key={k} title={`${label}: ${d ? `сдано в ${d.at}` : passed ? 'не сдано' : 'слот ещё не наступил'}`}
-                              aria-label={`${label} ${d ? 'сдано' : 'не сдано'}`}
+                            <span key={k} title={`${label}: ${state}`}
+                              aria-label={`${label} ${state}`}
                               style={{
                                 width: 18, height: 18, borderRadius: 6, display: 'inline-grid', placeItems: 'center',
-                                fontSize: 9.5, fontWeight: 800, color: d ? 'var(--on-acc)' : col,
-                                background: d ? 'var(--grn)' : 'transparent',
-                                border: `1px solid ${d ? 'var(--grn)' : col}`,
+                                fontSize: 9.5, fontWeight: 800,
+                                color: good || dirty ? 'var(--on-acc)' : col,
+                                background: good ? 'var(--grn)' : dirty ? 'var(--red)' : 'transparent',
+                                border: `1px solid ${col}`,
                                 opacity: d || passed ? 1 : .45,
                               }}>{ZONE_SHORT[k] || label[0]}</span>
                           )
@@ -101,8 +108,8 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
       <div style={{ marginTop: 9, display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--mute)' }}>
         <span>{ZONES.map(([k, label]) => `${ZONE_SHORT[k]} — ${label.toLowerCase()}`).join(' · ')}</span>
         <span style={{ marginLeft: 'auto' }}>
-          <span style={{ color: 'var(--grn)', fontWeight: 700 }}>зелёная</span> сдано ·{' '}
-          <span style={{ color: 'var(--red)', fontWeight: 700 }}>красная</span> слот прошёл, не сдано ·{' '}
+          <span style={{ color: 'var(--grn)', fontWeight: 700 }}>зелёная</span> сдано и чисто ·{' '}
+          <span style={{ color: 'var(--red)', fontWeight: 700 }}>красная</span> не сдано либо есть замечания ·{' '}
           серая — слот ещё не наступил
         </span>
       </div>

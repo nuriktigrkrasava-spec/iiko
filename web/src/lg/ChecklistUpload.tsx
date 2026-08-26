@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Glass } from './ui'
 import { SLOTS, ZONES, type Done, type Issue, type Review,
-         issueText, nearestSlot, sentIn } from './checklist'
+         issueText, nearestSlot, sentIn, zoneVerdict, zoneCriteria } from './checklist'
 
 /* Сдача чек-листа прямо с сайта: слот → зона → кадры → РАЗБОР.
 
@@ -9,11 +9,16 @@ import { SLOTS, ZONES, type Done, type Issue, type Review,
    1024 px и JPEG 0.7 ещё до отправки. Это режет и трафик управляющего, и
    стоимость vision, которая считается по площади картинки.
 
-   Разбор модели раньше приходил в ответе и молча выбрасывался: управляющий
-   отправлял восемь кадров и не узнавал, что не так с санузлом. Теперь вердикт
-   виден сразу после отправки, а замечания за день — списком ниже. */
+   Кадры сначала КОПЯТСЯ, и только потом уходят. Раньше отправка начиналась на
+   onChange: снял один кадр — он и улетел, второй ракурс той же зоны добавить
+   было уже некуда. Теперь до четырёх кадров лежат превью, лишний можно убрать,
+   отправка — отдельной кнопкой.
 
-const MAX_PHOTOS = 8
+   Разбор модели раньше приходил в ответе и молча выбрасывался: управляющий
+   отправлял кадры и не узнавал, что не так с санузлом. Теперь виден ответ по
+   КАЖДОМУ критерию чек-листа, а зелёным грязь не отмечается. */
+
+const MAX_PHOTOS = 4
 const MAX_SIDE = 1024
 
 type Criteria = Record<string, { label: string; items: string[] }>
@@ -48,6 +53,8 @@ export default function ChecklistUpload({ token }: { token: string }) {
   const [reviews, setReviews] = useState<Review[]>([])
   const [criteria, setCriteria] = useState<Criteria>({})
   const [verdict, setVerdict] = useState<{ ok?: boolean; checked?: boolean; issues?: Issue[]; reason?: string } | null>(null)
+  // кадры, снятые но ещё не отправленные: {сжатый base64, ссылка на превью}
+  const [queue, setQueue] = useState<{ b64: string; url: string }[]>([])
 
   const load = () => {
     fetch(`/api/mountain/checklist/${token}`).then((r) => r.json())
@@ -57,29 +64,66 @@ export default function ChecklistUpload({ token }: { token: string }) {
   }
   useEffect(load, [token])
 
-  async function upload(list: FileList | null) {
+  /* Снятый кадр кладём в очередь, а не отправляем. Сжимаем сразу: если ждать
+     отправки, четыре кадра ужимались бы разом и телефон заметно подвисал. */
+  async function addPhotos(list: FileList | null) {
     if (!list?.length) return
-    const files = Array.from(list).slice(0, MAX_PHOTOS)
+    setErr(null)
+    const room = MAX_PHOTOS - queue.length
+    if (room <= 0) { setErr(`Больше ${MAX_PHOTOS} кадров на зону не нужно`); return }
+    const files = Array.from(list).slice(0, room)
+    try {
+      const added = await Promise.all(files.map(async (f) => ({
+        b64: await compress(f), url: URL.createObjectURL(f),
+      })))
+      setQueue((q) => [...q, ...added])
+    } catch (e) {
+      setErr(String((e as Error).message || e))
+    } finally {
+      if (input.current) input.current.value = ''
+    }
+  }
+
+  function dropPhoto(i: number) {
+    setQueue((q) => {
+      URL.revokeObjectURL(q[i]?.url || '')
+      return q.filter((_, k) => k !== i)
+    })
+  }
+
+  async function send() {
+    if (!queue.length) return
     setErr(null); setBusy(true); setVerdict(null)
     try {
-      const photos = await Promise.all(files.map(compress))
       const r = await fetch(`/api/mountain/checklist/${token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slot, zone, photos }),
+        body: JSON.stringify({ slot, zone, photos: queue.map((q) => q.b64) }),
       })
       const d = await r.json()
       if (!r.ok || d.error) setErr(d.error || `HTTP ${r.status}`)
-      else { setVerdict(d.review || { checked: false }); load() }
+      else {
+        setVerdict(d.review || { checked: false })
+        queue.forEach((q) => URL.revokeObjectURL(q.url))
+        setQueue([])
+        load()
+      }
     } catch (e) {
       setErr(String((e as Error).message || e))
     } finally {
       setBusy(false)
-      if (input.current) input.current.value = ''
     }
   }
 
   const sent = (s: string, key: string) => sentIn(done, s, key)
   const slotCount = (s: string) => ZONES.filter(([k]) => sent(s, k)).length
+  /* Зелёный = сдано И ЧИСТО. Раньше зелёным красилось «кадры присланы», и
+     филиал, снявший загаженный санузел, получал ровно тот же зелёный, что и
+     вымытый. Разбор нашёл грязь — цвет красный, сколько бы кадров ни прислали. */
+  const verdictOf = (s: string, key: string) => zoneVerdict(reviews, s, key)
+  const zoneColor = (s: string, key: string) => {
+    if (!sent(s, key)) return 'var(--mute)'
+    return verdictOf(s, key) === 'dirty' ? 'var(--red)' : 'var(--grn)'
+  }
   // Замечания за сегодня по всем слотам — в одном месте, свежие сверху
   const problems = reviews.filter((r) => !r.ok && (r.issues || []).length)
 
@@ -104,7 +148,8 @@ export default function ChecklistUpload({ token }: { token: string }) {
             <button key={s} onClick={() => setSlot(s)} style={chip(slot === s)}>
               {s}
               <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700,
-                             color: n === ZONES.length ? 'var(--grn)' : n ? 'var(--amb)' : 'var(--mute)' }}>
+                             color: ZONES.some(([k]) => verdictOf(s, k) === 'dirty') ? 'var(--red)'
+                                    : n === ZONES.length ? 'var(--grn)' : n ? 'var(--amb)' : 'var(--mute)' }}>
                 {n}/{ZONES.length}
               </span>
             </button>
@@ -117,27 +162,42 @@ export default function ChecklistUpload({ token }: { token: string }) {
       <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {ZONES.map(([k, label]) => {
           const d = sent(slot, k)
+          const dirty = verdictOf(slot, k) === 'dirty'
+          const col = zoneColor(slot, k)
           return (
             <button key={k} onClick={() => setZone(k)}
-              style={chip(zone === k, d ? { borderColor: 'var(--grn)' } : undefined)}>
-              {d && <span style={{ color: 'var(--grn)', marginRight: 5, fontWeight: 800 }}>✓</span>}
+              style={chip(zone === k, d ? { borderColor: col } : undefined)}>
+              {d && <span style={{ color: col, marginRight: 5, fontWeight: 800 }}>{dirty ? '✕' : '✓'}</span>}
               {label}
-              {d && <span style={{ marginLeft: 5, fontSize: 11, color: 'var(--mute)' }}>{d.at}</span>}
+              {d && <span style={{ marginLeft: 5, fontSize: 11, color: dirty ? 'var(--red)' : 'var(--mute)' }}>
+                {dirty ? 'есть замечания' : d.at}
+              </span>}
             </button>
           )
         })}
       </div>
 
       {/* Что именно снимать: без этого «сдал чистоту» превращается в пять кадров потолка */}
+      {/* Критерии: до разбора — «что снять», после — ответ модели по КАЖДОМУ
+          пункту. Список один и тот же, поэтому видно, что именно зачли. */}
       {criteria[zone] && (
         <div style={{ marginTop: 12, padding: '11px 13px', borderRadius: 12, border: '1px solid var(--hair)', background: 'var(--glass-2)' }}>
           <div style={{ fontSize: 11, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 700 }}>
-            {criteria[zone].label} · что снять
+            {criteria[zone].label} · {verdictOf(slot, zone) ? 'разбор по пунктам' : 'что снять'}
           </div>
-          <div style={{ marginTop: 7, display: 'grid', gap: 4 }}>
-            {criteria[zone].items.map((it) => (
-              <div key={it} style={{ fontSize: 12.5, color: 'var(--hi)', display: 'flex', gap: 8 }}>
-                <span style={{ color: 'var(--mute)' }}>•</span>{it}
+          <div style={{ marginTop: 7, display: 'grid', gap: 5 }}>
+            {zoneCriteria(reviews, slot, zone, criteria[zone].items).map((c) => (
+              <div key={c.item} style={{ fontSize: 12.5, color: 'var(--hi)', display: 'flex', gap: 8, alignItems: 'baseline' }}>
+                <span style={{ flex: 'none', width: 12, fontWeight: 800,
+                               color: c.ok === null ? 'var(--mute)' : c.ok ? 'var(--grn)' : 'var(--red)' }}>
+                  {c.ok === null ? '•' : c.ok ? '✓' : '✕'}
+                </span>
+                <span>
+                  {c.item}
+                  {c.ok === false && c.what && (
+                    <span style={{ color: 'var(--red)' }}> — {c.what}</span>
+                  )}
+                </span>
               </div>
             ))}
           </div>
@@ -146,16 +206,40 @@ export default function ChecklistUpload({ token }: { token: string }) {
 
       {/* Кнопку не должно вести: подпись меняет длину на каждый тап по зоне и
           ещё раз на «Загружаю…». Постоянная ширина + состояние своей строкой. */}
-      <div style={{ marginTop: 12 }}>
-        <button onClick={() => input.current?.click()} disabled={busy}
-          style={{ minWidth: 208, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 18px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700, fontFamily: 'inherit', cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1 }}>
-          {busy ? 'Загружаю…' : `Сдать ${slot} · ${ZONES.find(([k]) => k === zone)?.[1]}`}
+      {/* Превью снятого: пока кадры в очереди, их видно и лишний можно убрать. */}
+      {queue.length > 0 && (
+        <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {queue.map((q, i) => (
+            <span key={q.url} style={{ position: 'relative', display: 'inline-block' }}>
+              <img src={q.url} alt={`кадр ${i + 1}`}
+                style={{ width: 68, height: 68, objectFit: 'cover', borderRadius: 10, border: '1px solid var(--hair)', display: 'block' }} />
+              <button onClick={() => dropPhoto(i)} aria-label={`убрать кадр ${i + 1}`}
+                style={{ position: 'absolute', top: -6, right: -6, width: 20, height: 20, borderRadius: '50%', border: 'none', background: 'var(--red)', color: '#fff', fontSize: 12, fontWeight: 800, lineHeight: 1, cursor: 'pointer', fontFamily: 'inherit' }}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Кнопку не должно вести: подписи меняют длину, поэтому ширина постоянная. */}
+      <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        <button onClick={() => input.current?.click()} disabled={busy || queue.length >= MAX_PHOTOS}
+          style={{ minWidth: 150, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 18px', borderRadius: 14, border: '1px solid var(--hair)', background: 'transparent', color: queue.length >= MAX_PHOTOS ? 'var(--mute)' : 'var(--hi)', fontSize: 13.5, fontWeight: 700, fontFamily: 'inherit', cursor: queue.length >= MAX_PHOTOS ? 'default' : 'pointer' }}>
+          {queue.length ? `Ещё кадр · ${queue.length}/${MAX_PHOTOS}` : 'Снять кадр'}
         </button>
         <input ref={input} type="file" accept="image/*" multiple capture="environment" hidden
-          onChange={(e) => upload(e.target.files)} />
-        <div style={{ minHeight: 18, marginTop: 7, fontSize: 12.5, fontWeight: 650, color: 'var(--grn)' }}>
-          {sent(slot, zone) ? `уже сдано в ${sent(slot, zone)?.at}` : ''}
-        </div>
+          onChange={(e) => addPhotos(e.target.files)} />
+        <button onClick={send} disabled={busy || !queue.length}
+          style={{ minWidth: 208, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 18px', borderRadius: 14, border: 'none', background: queue.length ? 'linear-gradient(135deg,var(--acc),var(--acc-2))' : 'var(--hair)', color: queue.length ? 'var(--on-acc)' : 'var(--mute)', fontSize: 13.5, fontWeight: 700, fontFamily: 'inherit', cursor: busy || !queue.length ? 'default' : 'pointer', opacity: busy ? .6 : 1 }}>
+          {busy ? 'Отправляю…' : `Сдать ${slot} · ${ZONES.find(([k]) => k === zone)?.[1]}`}
+        </button>
+      </div>
+      <div style={{ minHeight: 18, marginTop: 7, fontSize: 12.5, fontWeight: 650,
+                    color: verdictOf(slot, zone) === 'dirty' ? 'var(--red)' : 'var(--grn)' }}>
+        {sent(slot, zone)
+          ? (verdictOf(slot, zone) === 'dirty'
+              ? `сдано в ${sent(slot, zone)?.at}, но разбор нашёл замечания`
+              : `уже сдано в ${sent(slot, zone)?.at}`)
+          : queue.length ? `${queue.length} из ${MAX_PHOTOS} кадров готово к отправке` : ''}
       </div>
 
       {err && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--red)' }}>{err}</div>}
@@ -221,8 +305,8 @@ export default function ChecklistUpload({ token }: { token: string }) {
               {ZONES.map(([k]) => {
                 const d = sent(s, k)
                 return (
-                  <td key={k} style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', textAlign: 'center', color: d ? 'var(--grn)' : 'var(--mute)' }}>
-                    {d ? `✓ ${d.photos} · ${d.at}` : '—'}
+                  <td key={k} style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', textAlign: 'center', color: zoneColor(s, k) }}>
+                    {d ? `${verdictOf(s, k) === 'dirty' ? '✕' : '✓'} ${d.photos} · ${d.at}` : '—'}
                   </td>
                 )
               })}

@@ -963,7 +963,20 @@ from database import (save_checklist_upload, get_checklist_uploads, checklist_di
 ZONES = {"hall": "зал", "kitchen": "кухня", "wc": "санузел"}
 SLOTS = ["10:45", "15:00", "20:45", "23:45"]
 MAX_PHOTO_MB = 4
-MAX_PHOTOS = 8
+# Фора на сдачу слота: снять три зоны за минуту нельзя, и считать это
+# опозданием — значит гонять через модель каждую сдачу.
+SLOT_GRACE_MIN = int(os.getenv("CHECKLIST_GRACE_MIN", "20"))
+
+
+def _minutes(hm: str) -> int:
+    """«10:45» → 645. Сравниваем числа, а не строки: строковое сравнение
+    работало лишь потому, что все слоты двузначные."""
+    try:
+        h, m = hm.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return 0
+MAX_PHOTOS = 4        # больше четырёх на зону не нужно — и дороже в разборе
 
 
 class ChecklistPayload(BaseModel):
@@ -1030,8 +1043,13 @@ async def _maybe_review(org: str, day: str, slot: str) -> Dict[str, Any]:
     if not ups:
         return {"checked": False, "reason": "нет сдач"}
 
-    # спорные случаи: сдано позже слота или кадров меньше трёх
-    late = local_now().strftime("%H:%M") > slot
+    # Спорные случаи: сдано СИЛЬНО позже слота или кадров меньше трёх.
+    #
+    # Раньше стояло «время сдачи > время слота», и опозданием считалась любая
+    # нормальная сдача: слот 10:45, сняли в 10:47 — уже late. А late означает
+    # «проверять всегда», то есть выборка в SAMPLE_PCT не применялась НИКОГДА и
+    # в модель уходило 100% слотов вместо 20%. Даём разумную фору.
+    late = _minutes(local_now().strftime("%H:%M")) > _minutes(slot) + SLOT_GRACE_MIN
     photos_n = sum(len(u.get("photos") or []) for u in ups)
     do, why = C.should_review({"photos": [1] * photos_n}, late=late)
     if not do:
@@ -1052,11 +1070,15 @@ async def _maybe_review(org: str, day: str, slot: str) -> Dict[str, Any]:
         return {"checked": False, "reason": "кадры не читаются"}
 
     cache = photo_verdict_cache(hashes)
-    res = await C.review_slot(blobs, cache=cache)
+    # Критерии отдаём модели те же, что видит управляющий на экране: разбор
+    # должен отвечать по его чек-листу, а не по своему представлению о чистоте.
+    res = await C.review_slot(blobs, cache=cache, criteria=S.ZONE_CRITERIA)
     if res.get("checked"):
-        save_checklist_review(org, day, slot, bool(res.get("ok")), res.get("issues") or [], why)
+        save_checklist_review(org, day, slot, bool(res.get("ok")),
+                              res.get("issues") or [], why, res.get("criteria") or [])
         for hsh in hashes:
-            save_photo_verdict(hsh, {"ok": res.get("ok"), "issues": res.get("issues") or []})
+            save_photo_verdict(hsh, {"ok": res.get("ok"), "issues": res.get("issues") or [],
+                                     "criteria": res.get("criteria") or []})
     res["reason"] = why
     return res
 
@@ -1086,6 +1108,7 @@ async def checklist_today(token: str):
                               "photos": len(r["photos"]), "at": (r["created_at"] or "")[11:16]})
     from database import get_checklist_reviews
     reviews = [{"slot": r["slot"], "ok": bool(r["ok"]), "issues": r["issues"],
+                "criteria": r.get("criteria") or [],
                 "reason": r.get("reason") or "",
                 "branch": names.get(r["organization_id"], "")}
                for r in get_checklist_reviews(orgs, day)]

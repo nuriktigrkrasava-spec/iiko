@@ -2371,17 +2371,27 @@ def _ensure_checklist_ai(conn):
         created_at TEXT
     );
     """)
+    # Разбор по критериям добавился позже общего вердикта — дотягиваем колонку
+    # в уже созданных базах, иначе прод падал бы на первом же сохранении.
+    try:
+        conn.execute("ALTER TABLE checklist_reviews ADD COLUMN criteria TEXT")
+        conn.commit()
+    except Exception:
+        pass
 
 
 def save_checklist_review(org_id: str, day: str, slot: str, ok: bool,
-                          issues: List[Dict[str, Any]], reason: str = ""):
+                          issues: List[Dict[str, Any]], reason: str = "",
+                          criteria: Optional[List[Dict[str, Any]]] = None):
     conn = get_db()
     _ensure_checklist_ai(conn)
     conn.execute("INSERT OR REPLACE INTO checklist_reviews "
-                 "(organization_id, day, slot, ok, issues, reason, created_at) VALUES (?,?,?,?,?,?,?)",
+                 "(organization_id, day, slot, ok, issues, reason, criteria, created_at) "
+                 "VALUES (?,?,?,?,?,?,?,?)",
                  (org_id, day, slot, 1 if ok else 0,
                   json.dumps(issues or [], ensure_ascii=False), reason,
-                  datetime.now().isoformat()))
+                  json.dumps(criteria or [], ensure_ascii=False),
+                  local_now().isoformat()))
     conn.commit()
     conn.close()
 
@@ -2398,10 +2408,11 @@ def get_checklist_reviews(org_ids: List[str], day: str) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
         d = dict(r)
-        try:
-            d["issues"] = json.loads(d.get("issues") or "[]")
-        except Exception:
-            d["issues"] = []
+        for fld in ("issues", "criteria"):
+            try:
+                d[fld] = json.loads(d.get(fld) or "[]")
+            except Exception:
+                d[fld] = []
         out.append(d)
     return out
 

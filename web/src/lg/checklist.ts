@@ -13,7 +13,12 @@ export type Done = { branch: string; slot: string; zone: string; zone_key?: stri
    строки — на экран падало «[object Object]», то есть управляющий не узнавал
    ровно того, ради чего разбор и затевался. */
 export type Issue = string | { zone?: string; what?: string }
-export type Review = { slot: string; ok: boolean; issues: Issue[]; reason?: string; branch?: string }
+/** Ответ модели по одному пункту чек-листа. item — дословно из ZONE_CRITERIA. */
+export type Criterion = { zone?: string; item?: string; ok?: boolean; what?: string }
+export type Review = {
+  slot: string; ok: boolean; issues: Issue[]; criteria?: Criterion[]
+  reason?: string; branch?: string
+}
 
 export function issueText(i: Issue): string {
   if (typeof i === 'string') return i
@@ -42,3 +47,36 @@ export const slotPassed = (slot: string, now = new Date()) =>
 export const sentIn = (done: Done[], slot: string, key: string) =>
   done.find((d) => d.slot === slot
     && (d.zone_key || d.zone?.toLowerCase()) === (d.zone_key ? key : ZONE_LABEL[key]))
+
+
+/* Вердикт по КОНКРЕТНОЙ зоне слота: 'clean' | 'dirty' | null (не разбирали).
+
+   Нужен, чтобы не красить зелёным грязь. Зелёный до сих пор значил «кадры
+   присланы» — то есть филиал, снявший загаженный санузел, получал ровно тот же
+   зелёный, что и вымытый. Сдано и чисто — разные вещи, и на экране они теперь
+   разные. */
+export function zoneVerdict(reviews: Review[], slot: string, key: string,
+                            branch?: string): 'clean' | 'dirty' | null {
+  const r = reviews.find((x) => x.slot === slot && (!branch || x.branch === branch))
+  if (!r) return null
+  const label = ZONE_LABEL[key]
+  const mine = (r.criteria || []).filter((c) => (c.zone || '').trim().toLowerCase() === label)
+  if (mine.length) return mine.some((c) => c.ok === false) ? 'dirty' : 'clean'
+  // Критериев по зоне нет (старый разбор) — смотрим, есть ли про неё замечание
+  const named = (r.issues || []).some(
+    (i) => typeof i !== 'string' && (i.zone || '').trim().toLowerCase() === label)
+  if (named) return 'dirty'
+  return r.ok ? 'clean' : null
+}
+
+/** Критерии зоны с ответом модели по каждому: выполнен, не выполнен, не разбирали. */
+export function zoneCriteria(reviews: Review[], slot: string, key: string,
+                             items: string[]): { item: string; ok: boolean | null; what?: string }[] {
+  const r = reviews.find((x) => x.slot === slot)
+  const label = ZONE_LABEL[key]
+  const mine = (r?.criteria || []).filter((c) => (c.zone || '').trim().toLowerCase() === label)
+  return items.map((item) => {
+    const hit = mine.find((c) => (c.item || '').trim().toLowerCase() === item.trim().toLowerCase())
+    return { item, ok: hit ? hit.ok !== false : null, what: hit?.what }
+  })
+}

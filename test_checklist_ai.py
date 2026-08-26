@@ -83,12 +83,94 @@ def test_daily_cost_estimate():
     print(f"  [OK] в день: слепой прогон ≈ {naive:,.0f} токенов, наш ≈ {ours:,.0f}")
 
 
+def _fake_model(reply: str):
+    """Подставная модель: отвечает заданным текстом, запоминает системный промпт."""
+    import asyncio
+    seen = {}
+
+    class _Msg:
+        def __init__(self, t): self.text = t
+
+    class _Resp:
+        def __init__(self, t): self.content = [_Msg(t)]
+
+    class _Messages:
+        async def create(self, **kw):
+            seen.update(kw)
+            return _Resp(reply)
+
+    class _Client:
+        messages = _Messages()
+
+    return _Client(), seen, asyncio
+
+
+def test_review_answers_by_the_same_criteria_the_manager_sees():
+    """Разбор отвечает ПО КРИТЕРИЯМ чек-листа, а не свободным текстом.
+
+    Раньше приходил общий вердикт и россыпь замечаний: список «что снять» на
+    экране жил сам по себе, разбор — сам по себе, и управляющий не понимал, что
+    именно зачли. Критерии уходят в промпт и возвращаются с ответом по каждому.
+    """
+    import scoring as S
+    reply = ('{"ok":false,"criteria":['
+             '{"zone":"зал","item":"Пол под столами и у входа","ok":true,"what":""},'
+             '{"zone":"зал","item":"Урна не переполнена","ok":false,"what":"урна с горкой"}]}')
+    client, seen, aio = _fake_model(reply)
+    old = C._client
+    C._client = client
+    try:
+        out = aio.run(C.review_slot([(b"jpg", "зал")], cache={}, criteria=S.ZONE_CRITERIA))
+    finally:
+        C._client = old
+
+    assert "Пол под столами и у входа" in seen["system"], "критерии не ушли в промпт"
+    assert "Санузел" not in seen["system"], "ушли критерии зон, кадров которых нет"
+    assert out["checked"] and out["ok"] is False, out
+    assert len(out["criteria"]) == 2, out["criteria"]
+    assert out["issues"] == [{"zone": "зал", "what": "Урна не переполнена — урна с горкой"}], out["issues"]
+    print("  [OK] разбор идёт по критериям чек-листа и возвращает ответ по каждому")
+
+
+def test_failed_criterion_beats_the_models_own_verdict():
+    """Общий вердикт не берём на веру: модель ставила ok=true при проваленном
+    же критерии — и грязная зона отмечалась зелёным."""
+    import scoring as S
+    reply = ('{"ok":true,"criteria":['
+             '{"zone":"санузел","item":"Есть мыло и бумага","ok":false,"what":"нет мыла"}]}')
+    client, _seen, aio = _fake_model(reply)
+    old = C._client
+    C._client = client
+    try:
+        out = aio.run(C.review_slot([(b"jpg", "санузел")], cache={}, criteria=S.ZONE_CRITERIA))
+    finally:
+        C._client = old
+    assert out["ok"] is False, "проваленный критерий обязан перевесить общий ok"
+    print("  [OK] проваленный критерий перевешивает общий вердикт модели")
+
+
+def test_normal_submission_is_not_an_overdue_one():
+    """Сдача через пару минут после слота — не опоздание.
+
+    Опозданием считалось любое время больше времени слота: сняли в 10:47 при
+    слоте 10:45 — уже late. А late значит «проверять всегда», поэтому выборка
+    в SAMPLE_PCT не применялась никогда и в модель уходило 100% слотов.
+    """
+    import mountain_routes as M
+    assert M._minutes("10:47") <= M._minutes("10:45") + M.SLOT_GRACE_MIN, "обычная сдача — не опоздание"
+    assert M._minutes("11:30") > M._minutes("10:45") + M.SLOT_GRACE_MIN, "через 45 минут — опоздание"
+    print(f"  [OK] фора {M.SLOT_GRACE_MIN} мин: 10:47 не опоздание, 11:30 — опоздание")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_off_by_default, test_sampling_keeps_most_uploads_free,
               test_edge_cases_always_reviewed, test_shrink_cuts_tokens_fourfold,
               test_hash_is_stable_and_short, test_cached_slot_costs_nothing,
-              test_one_request_per_slot_not_per_photo, test_daily_cost_estimate):
+              test_one_request_per_slot_not_per_photo, test_daily_cost_estimate,
+              test_review_answers_by_the_same_criteria_the_manager_sees,
+              test_failed_criterion_beats_the_models_own_verdict,
+              test_normal_submission_is_not_an_overdue_one):
         print(f"\n>>> {t.__name__}")
         try:
             t()

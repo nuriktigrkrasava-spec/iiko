@@ -36,15 +36,60 @@ if AI_ENABLED and os.getenv("ANTHROPIC_API_KEY"):
     except Exception:
         _client = None
 
+# Модель отвечает ПО КРИТЕРИЯМ, а не свободным текстом. Раньше приходил общий
+# вердикт «ok / не ok» плюс россыпь замечаний, и управляющий не понимал, что
+# именно зачли: список «что снять» на экране жил сам по себе, разбор — сам по
+# себе. Теперь это один и тот же список, и по каждому пункту виден ответ.
 PROMPT = (
     "Ты проверяешь чистоту в ресторане по фото. На вход — кадры одной сдачи "
-    "чек-листа: зал, кухня, санузел.\n"
-    "Верни СТРОГО JSON: "
-    '{"ok":true|false,"issues":[{"zone":"зал|кухня|санузел","what":"<что не так, до 80 знаков>"}]}\n'
-    "Отмечай только видимое: грязный пол, мусор, разводы, немытая посуда, "
-    "открытые продукты, беспорядок на полках. Не выдумывай и не придирайся к "
-    "мелочам — задача поймать реальную грязь, а не идеальный порядок."
+    "чек-листа, перед каждым кадром указана его зона.\n\n"
+    "Ниже — критерии по зонам. Ответь по КАЖДОМУ критерию той зоны, кадры "
+    "которой тебе прислали. Критерии зон, кадров которых нет, пропусти.\n"
+    "{criteria}\n"
+    "Верни СТРОГО JSON без пояснений:\n"
+    '{{"ok":true|false,"criteria":[{{"zone":"<зона>","item":"<критерий дословно>",'
+    '"ok":true|false,"what":"<если не выполнен — что видно, до 80 знаков>"}}]}}\n\n'
+    "Правила:\n"
+    "• item копируй ДОСЛОВНО из списка — по нему ответ сходится с чек-листом;\n"
+    "• ok=false ставь только на ВИДИМОЕ нарушение: грязный пол, мусор, разводы, "
+    "немытая посуда, открытые продукты, переполненная урна;\n"
+    "• если по кадрам критерий не видно — ok=true и what пустой: наказывать за "
+    "ракурс нельзя, это работа фотографа, а не уборщика;\n"
+    "• общий ok=false, если хотя бы один критерий не выполнен;\n"
+    "• не придирайся к мелочам — задача поймать реальную грязь, а не идеальный "
+    "порядок."
 )
+
+
+def criteria_text(criteria: Optional[Dict[str, Dict[str, Any]]], zones: List[str]) -> str:
+    """Список критериев для промпта — только по зонам, кадры которых прислали."""
+    if not criteria:
+        return ""
+    want = {z.strip().lower() for z in zones}
+    out = []
+    for spec in criteria.values():
+        label = str(spec.get("label") or "")
+        if want and label.strip().lower() not in want:
+            continue
+        items = "\n".join(f"  - {i}" for i in (spec.get("items") or []))
+        out.append(f"{label}:\n{items}")
+    return "\n".join(out)
+
+
+def issues_from_criteria(criteria: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Невыполненные критерии → замечания в прежнем формате {zone, what}.
+
+    Формат ответа не ломаем: доска владельца, «Гора» и уведомления читают
+    issues, и переучивать их ради нового поля незачем.
+    """
+    out = []
+    for c in criteria or []:
+        if c.get("ok") is False:
+            what = (c.get("what") or "").strip()
+            item = (c.get("item") or "").strip()
+            out.append({"zone": c.get("zone") or "",
+                        "what": f"{item} — {what}" if what and item else (what or item)})
+    return out
 
 
 def photo_hash(data: bytes) -> str:
@@ -98,7 +143,8 @@ def should_review(upload: Dict[str, Any], *, late: bool = False,
 
 
 async def review_slot(photos: List[Tuple[bytes, str]],
-                      cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      cache: Optional[Dict[str, Any]] = None,
+                      criteria: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Один запрос на слот: все зоны одним документом.
 
     cache — {хеш кадра: результат}; повторный кадр не оплачивается.
@@ -121,16 +167,25 @@ async def review_slot(photos: List[Tuple[bytes, str]],
         content.append({"type": "image", "source": {
             "type": "base64", "media_type": mime,
             "data": base64.b64encode(small).decode()}})
+    zones = [z for _, z in photos[:MAX_PHOTOS_PER_SLOT]]
+    system = PROMPT.replace("{criteria}", criteria_text(criteria, zones))
     try:
         resp = await _client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS, system=PROMPT,
+            model=MODEL, max_tokens=MAX_TOKENS, system=system,
             messages=[{"role": "user", "content": content}])
         txt = "".join(getattr(c, "text", "") for c in resp.content).strip()
         start, end = txt.find("{"), txt.rfind("}")
         data = json.loads(txt[start:end + 1]) if start >= 0 and end > start else {}
-        out = {"checked": True, "ok": bool(data.get("ok")), "issues": data.get("issues") or []}
+        crit = [c for c in (data.get("criteria") or []) if isinstance(c, dict)]
+        # Замечания собираем из невыполненных критериев; свободный список от
+        # модели принимаем, только если критериев она не вернула вовсе.
+        issues = issues_from_criteria(crit) or (data.get("issues") or [])
+        # Общий вердикт не берём на веру: модель ставила ok=true, забыв про
+        # собственный же проваленный критерий. Считаем сами.
+        ok = bool(data.get("ok")) and not any(c.get("ok") is False for c in crit)
+        out = {"checked": True, "ok": ok, "criteria": crit, "issues": issues}
     except Exception as e:
         return {"checked": False, "reason": f"модель не ответила: {e!r}"[:160]}
     for k in keys:
-        cache[k] = {"ok": out["ok"], "issues": out["issues"]}
+        cache[k] = {"ok": out["ok"], "criteria": out["criteria"], "issues": out["issues"]}
     return out
