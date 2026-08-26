@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Glass } from './ui'
-import { SLOTS as DEFAULT_SLOTS, type Done, type Review, issueText, slotPassed } from './checklist'
+import { SLOTS as DEFAULT_SLOTS, ZONES, ZONE_LABEL, type Done, type Review,
+         issueText, slotPassed } from './checklist'
 
 /* Чек-листы филиалов глазами владельца: кто сдал, кто нет.
 
@@ -9,8 +10,17 @@ import { SLOTS as DEFAULT_SLOTS, type Done, type Review, issueText, slotPassed }
    оставался чип «чек-листы 3» внутри прогресса, по которому нельзя понять, кто
    именно не снял санузел в 20:45. Здесь — сетка филиалы × слоты за сегодня.
 
+   В клетке — не «2/3», а сами зоны: З · К · С. Счётчик отвечал «сколько», но
+   не «какую», а владельцу нужно именно это: одно дело не снят зал, другое —
+   санузел. Зелёная — сдана, красная — слот прошёл и её нет, серая — слот ещё
+   не наступил, спрашивать не за что.
+
    Ходим в тот же /api/mountain/checklist/{token}: владельцу он и так отдаёт
    сдачи по всем его филиалам. */
+
+// Одна буква на зону: полные подписи в девять строк × четыре слота не влезают
+// ни на телефон, ни на глаз. Наведение и aria-label дают полное название.
+const ZONE_SHORT: Record<string, string> = { hall: 'З', kitchen: 'К', wc: 'С' }
 
 const shortName = (name: string) => name.replace(/^Астана,?\s*(ул\.?)?\s*/i, '').trim() || name
 
@@ -32,6 +42,11 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
 
   const cell = (branch: string, slot: string) =>
     done.filter((d) => d.branch === branch && d.slot === slot)
+  // Сдана ли КОНКРЕТНАЯ зона: сверяем по ключу, а подпись дочитываем у старых
+  // ответов без zone_key — регистр у сервера и экрана разный.
+  const zoneDone = (branch: string, slot: string, key: string) =>
+    cell(branch, slot).find((d) => (d.zone_key || d.zone?.toLowerCase())
+                                   === (d.zone_key ? key : ZONE_LABEL[key]))
   const problems = reviews.filter((r) => !r.ok && (r.issues || []).length)
 
   return (
@@ -52,16 +67,28 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
               <tr key={b}>
                 <td style={{ padding: '9px 8px 9px 0', borderBottom: '1px solid var(--hair-2)', color: 'var(--hi)' }}>{shortName(b)}</td>
                 {slots.map((s) => {
-                  const got = cell(b, s)
-                  const full = got.length >= zoneCount
-                  // прошедший слот без сдачи — это и есть «не сдал», он красный;
-                  // будущий просто ждёт своего часа
-                  const late = !got.length && slotPassed(s)
-                  const col = full ? 'var(--grn)' : got.length ? 'var(--amb)' : late ? 'var(--red)' : 'var(--mute)'
+                  const passed = slotPassed(s)
                   return (
-                    <td key={s} className="tnum" title={got.map((g) => `${g.zone} · ${g.at}`).join('\n') || 'не сдано'}
-                      style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', textAlign: 'center', color: col, fontWeight: got.length ? 700 : 500 }}>
-                      {full ? '✓' : got.length ? `${got.length}/${zoneCount}` : late ? '—' : '·'}
+                    <td key={s} style={{ padding: '7px 4px', borderBottom: '1px solid var(--hair-2)', textAlign: 'center' }}>
+                      <span style={{ display: 'inline-flex', gap: 3 }}>
+                        {ZONES.map(([k, label]) => {
+                          const d = zoneDone(b, s, k)
+                          // сдана — зелёная; слот прошёл, а её нет — красная;
+                          // слот ещё не наступил — серая, это не провинность
+                          const col = d ? 'var(--grn)' : passed ? 'var(--red)' : 'var(--mute)'
+                          return (
+                            <span key={k} title={`${label}: ${d ? `сдано в ${d.at}` : passed ? 'не сдано' : 'слот ещё не наступил'}`}
+                              aria-label={`${label} ${d ? 'сдано' : 'не сдано'}`}
+                              style={{
+                                width: 18, height: 18, borderRadius: 6, display: 'inline-grid', placeItems: 'center',
+                                fontSize: 9.5, fontWeight: 800, color: d ? 'var(--on-acc)' : col,
+                                background: d ? 'var(--grn)' : 'transparent',
+                                border: `1px solid ${d ? 'var(--grn)' : col}`,
+                                opacity: d || passed ? 1 : .45,
+                              }}>{ZONE_SHORT[k] || label[0]}</span>
+                          )
+                        })}
+                      </span>
                     </td>
                   )
                 })}
@@ -69,6 +96,15 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div style={{ marginTop: 9, display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 11, color: 'var(--mute)' }}>
+        <span>{ZONES.map(([k, label]) => `${ZONE_SHORT[k]} — ${label.toLowerCase()}`).join(' · ')}</span>
+        <span style={{ marginLeft: 'auto' }}>
+          <span style={{ color: 'var(--grn)', fontWeight: 700 }}>зелёная</span> сдано ·{' '}
+          <span style={{ color: 'var(--red)', fontWeight: 700 }}>красная</span> слот прошёл, не сдано ·{' '}
+          серая — слот ещё не наступил
+        </span>
       </div>
 
       {/* Замечания разбора: ради них чек-лист и снимают — иначе это просто галочки */}
