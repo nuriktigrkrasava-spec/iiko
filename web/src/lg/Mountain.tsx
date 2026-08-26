@@ -240,7 +240,12 @@ function Peak({ rows, mine }: { rows: Row[]; mine?: string }) {
                 style={{ width: 8, height: 26, borderRadius: 4, background: 'var(--hair)', overflow: 'hidden', display: 'flex', alignItems: 'flex-end', flex: 'none' }}>
                 <span style={{ display: 'block', width: '100%', height: `${frac * 100}%`, background: col, borderRadius: 4 }} />
               </span>
-              <span className="tnum" style={{ width: 66, textAlign: 'right', fontSize: 12.5, color: 'var(--hi)', fontWeight: 700 }}>
+              {/* Минус показываем ЯВНО. Ступень у всех отстающих нулевая, и филиал
+                  со штрафом −28 выглядел ровно как тот, кто просто ещё не начал:
+                  «0» и «0». Красная цифра со знаком отличает провал от старта. */}
+              <span className="tnum" title={r.points < 0 ? 'штрафы за пропуски перевесили — филиал ниже нуля' : undefined}
+                style={{ width: 66, textAlign: 'right', fontSize: 12.5, fontWeight: 700,
+                         color: r.points < 0 ? 'var(--red)' : 'var(--hi)' }}>
                 {r.points}
                 <span style={{ color: 'var(--mute)', fontWeight: 500, fontSize: 10.5 }}> балл.</span>
               </span>
@@ -283,7 +288,8 @@ function Progress({ row }: { row: Row }) {
           {row.name}
         </div>
         <div className="tnum" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'baseline', gap: 6 }}>
-          <span style={{ fontSize: 26, fontWeight: 780, letterSpacing: '-.03em', color: 'var(--hi)', lineHeight: 1 }}>
+          <span style={{ fontSize: 26, fontWeight: 780, letterSpacing: '-.03em', lineHeight: 1,
+                         color: row.points < 0 ? 'var(--red)' : 'var(--hi)' }}>
             {row.points}
           </span>
           <span style={{ fontSize: 11.5, color: 'var(--mute)', fontWeight: 600 }}>баллов</span>
@@ -316,9 +322,15 @@ function Progress({ row }: { row: Row }) {
         <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--hi)' }}>
           Ступень {step}<span style={{ color: 'var(--mute)', fontWeight: 500 }}> из {steps}</span>
         </span>
-        {row.level.to_next
-          ? <span style={{ fontSize: 11.5, color: 'var(--mute)' }}>до следующей {row.level.to_next}</span>
-          : <span style={{ fontSize: 11.5, color: 'var(--grn)', fontWeight: 650 }}>вершина</span>}
+        {row.points < 0
+          /* Ниже нулевой ступени гора не опускает — иначе подъём превратился бы
+             в яму. Но молчать об этом нельзя: пишем, сколько до нуля. */
+          ? <span style={{ fontSize: 11.5, color: 'var(--red)', fontWeight: 650 }}>
+              ниже нуля на {Math.abs(row.points)} — сначала выйти в ноль
+            </span>
+          : row.level.to_next
+            ? <span style={{ fontSize: 11.5, color: 'var(--mute)' }}>до следующей {row.level.to_next}</span>
+            : <span style={{ fontSize: 11.5, color: 'var(--grn)', fontWeight: 650 }}>вершина</span>}
         <span style={{ marginLeft: 'auto', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {chip(`закрыто ${row.tasks_done}`, row.tasks_done ? 'var(--grn)' : undefined)}
           {chip(`чек-листы ${row.checklist.done}`)}

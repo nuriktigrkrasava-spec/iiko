@@ -104,3 +104,34 @@ describe('«Гора» глазами владельца', () => {
     await screen.findByText('Чек-листы филиалов')
   })
 })
+
+describe('филиал ниже нуля', () => {
+  /* Ступень у всех отстающих нулевая: филиал со штрафом −28 выглядел ровно как
+     тот, кто просто ещё не начал, — «0 из 40» и там, и там. Минус должен быть
+     виден, иначе провал читается как старт. */
+  it('показывает накопленный минус и сколько до нуля', async () => {
+    history.replaceState({}, '', '/?m=b-org.sig')
+    mockFetch({
+      '/api/mountain/data/': () => new Response(JSON.stringify({
+        ...board('manager', [['c', 'Астана, ул. Г.Алиева 10 (EXPO)']]),
+        branches: [{ ...row('c', 'Астана, ул. Г.Алиева 10 (EXPO)'), points: -28,
+                     checklist: { done: 1, missed: -29, points: -28 } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    })
+    render(<Mountain />)
+    await screen.findByText('Мои задачи')
+    expect(screen.getByText('ниже нуля на 28 — сначала выйти в ноль')).toBeTruthy()
+  })
+
+  it('филиал в нуле такой подписи не получает', async () => {
+    history.replaceState({}, '', '/?m=b-org.sig')
+    mockFetch({
+      '/api/mountain/data/': () => new Response(
+        JSON.stringify(board('manager', [['c', 'Астана, ул. Г.Алиева 10 (EXPO)']])),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    })
+    render(<Mountain />)
+    await screen.findByText('Мои задачи')
+    expect(screen.queryByText(/ниже нуля/)).toBeNull()
+  })
+})
