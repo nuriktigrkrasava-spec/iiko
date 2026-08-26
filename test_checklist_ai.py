@@ -162,6 +162,26 @@ def test_normal_submission_is_not_an_overdue_one():
     print(f"  [OK] фора {M.SLOT_GRACE_MIN} мин: 10:47 не опоздание, 11:30 — опоздание")
 
 
+def test_shrink_really_shrinks_so_the_saving_is_real():
+    """Сжатие до 512 px должно РАБОТАТЬ, а не молча отступать.
+
+    shrink() без Pillow отдаёт кадр как есть — и весь расчёт экономии
+    разваливается: вместо 512 px в модель уходит 1024 px, вчетверо дороже. А
+    Pillow в requirements.txt не было вовсе, он стоял только на машине
+    разработчика. Тест падает, если зависимость снова потеряется.
+    """
+    from PIL import Image
+    import io as _io
+    buf = _io.BytesIO()
+    Image.new("RGB", (1600, 1200), (200, 200, 200)).save(buf, format="JPEG")
+    small, mime = C.shrink(buf.getvalue())
+    assert mime == "image/jpeg"
+    w, h = Image.open(_io.BytesIO(small)).size
+    assert max(w, h) <= C.MAX_SIDE, f"кадр не сжался: {w}x{h}"
+    assert len(small) < len(buf.getvalue()), "после сжатия кадр не стал легче"
+    print(f"  [OK] 1600x1200 -> {w}x{h}, {len(buf.getvalue())//1024} КБ -> {len(small)//1024} КБ")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_off_by_default, test_sampling_keeps_most_uploads_free,
@@ -170,7 +190,8 @@ if __name__ == "__main__":
               test_one_request_per_slot_not_per_photo, test_daily_cost_estimate,
               test_review_answers_by_the_same_criteria_the_manager_sees,
               test_failed_criterion_beats_the_models_own_verdict,
-              test_normal_submission_is_not_an_overdue_one):
+              test_normal_submission_is_not_an_overdue_one,
+              test_shrink_really_shrinks_so_the_saving_is_real):
         print(f"\n>>> {t.__name__}")
         try:
             t()
