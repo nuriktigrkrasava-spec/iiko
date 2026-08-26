@@ -290,9 +290,15 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, al
         return validate_telegram_init_data(x_telegram_init_data)
     if x_site_token:
         import mountain_routes
-        uid = mountain_routes.uid_from_token(x_site_token)
-        if uid:
-            return {"id": uid, "username": "site", "first_name": "Site"}
+        sc = mountain_routes.scope_of_token(x_site_token)
+        if sc.get("role") == "owner":
+            return {"id": sc["uid"], "username": "site", "first_name": "Site"}
+        if sc.get("role") and sc.get("org"):
+            # Ссылка ФИЛИАЛА. В iiko ходим от имени владельца — своих кредов у
+            # филиала нет, — но доступ прибит к одному org: `only_org` проверяет
+            # _get_org_id, единственная точка, через которую экраны получают филиал.
+            return {"id": sc["uid"], "username": "site", "first_name": "Site",
+                    "only_org": sc["org"]}
         raise HTTPException(status_code=401, detail="Ссылка недействительна")
     if not BOT_TOKEN:
         # dev-режим без Telegram: DEV_TID позволяет действовать как владелец
@@ -1114,6 +1120,11 @@ async def list_restaurants(user: Dict = Depends(get_current_user)):
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     rests = get_restaurants(tid)
+    # По ссылке филиала список — из одного филиала: переключатель сети в шапке
+    # не должен обещать доступ, которого нет.
+    only = user.get("only_org")
+    if only:
+        rests = [r for r in rests if r.get("organization_id") == only]
     if not rests:
         # Не меняем is_demo флаг автоматически — только явный /api/demo его ставит
         return [_safe_restaurant(DEMO_RESTAURANT)]
@@ -1315,6 +1326,12 @@ def _use_demo_data(user: Dict, org_id: str) -> bool:
 
 
 def _get_org_id(org_id: str, user: Dict) -> str:
+    # Ссылка филиала открывает ровно свой филиал. Проверка здесь, потому что
+    # через эту функцию проходит КАЖДЫЙ экран: поставь её в самих экранах —
+    # забудешь в одном, и ссылка откроет чужую точку.
+    only = user.get("only_org")
+    if only and org_id not in (only, "demo-org-1"):
+        raise HTTPException(status_code=403, detail="Ссылка открывает только свой филиал")
     if _use_demo_data(user, org_id):
         return "demo"
     rests = get_restaurants(user.get("id", 0))
@@ -1646,9 +1663,11 @@ async def mountain_links(user: Dict = Depends(get_current_user)):
         branches.append({
             "organization_id": org,
             "name": r.get("organization_name") or "Филиал",
+            # telegram id оставлен справочно — для бота. Ссылка от него больше
+            # НЕ зависит: она подписывает сам филиал, поэтому есть у каждого,
+            # а не только у тех семи, кому успели завести управляющего.
             "manager_tid": (m or {}).get("telegram_id"),
-            "link": (f"/m/{mountain_routes.token_for(int(m['telegram_id']))}"
-                     if m and m.get("telegram_id") else None),
+            "link": f"/m/{mountain_routes.token_for_org(org)}",
         })
     return {"owner": {"tid": uid, "link": f"/m/{mountain_routes.token_for(uid)}"},
             "branches": branches}

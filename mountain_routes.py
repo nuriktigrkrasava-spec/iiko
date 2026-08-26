@@ -86,8 +86,36 @@ def _sign(uid: int) -> str:
 
 
 def token_for(uid: int) -> str:
-    """Ссылка одинакова локально и на проде — общий ENCRYPTION_KEY, без БД."""
+    """Ссылка ВЛАДЕЛЬЦА: подписанный telegram id. Одинакова локально и на
+    проде — общий ENCRYPTION_KEY, без обращения к базе."""
     return f"{uid}.{_sign(uid)}"
+
+
+def _sign_org(org_id: str) -> str:
+    mac = hmac.new(_secret(), f"mountain-org:{org_id}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:20]
+
+
+def token_for_org(org_id: str) -> str:
+    """Ссылка ФИЛИАЛА — подписанный organization_id.
+
+    Раньше ссылка выдавалась человеку: подписывался telegram id управляющего.
+    Из-за этого филиал без управляющего в боте ссылку получить не мог (семь из
+    двадцати трёх), а права на сайте зависели от таблиц бота. Сайт — это сайт:
+    ссылка привязана к филиалу, телеграм для неё не нужен вообще.
+    """
+    return f"b{org_id}.{_sign_org(org_id)}"
+
+
+def org_from_token(token: str) -> Optional[str]:
+    """organization_id из ссылки филиала. None — это не ссылка филиала."""
+    if not token or not token.startswith("b") or "." not in token:
+        return None
+    org, sig = token[1:].rsplit(".", 1)
+    if not org:
+        return None
+    return org if hmac.compare_digest(sig.encode("utf-8", "ignore"),
+                                      _sign_org(org).encode()) else None
 
 
 def uid_from_token(token: str) -> Optional[int]:
@@ -116,6 +144,40 @@ def _is_branch(name: str) -> bool:
     # «кц»/«цех» проверяем как отдельные слова: иначе «Кцентр» и «Цеховая» тоже отпадут
     words = set(n.replace("(", " ").replace(")", " ").replace(",", " ").split())
     return not any(sk in words or (len(sk) > 4 and sk in n) for sk in SKIP)
+
+
+def scope_of_token(token: str) -> Dict[str, Any]:
+    """Что открывает эта ссылка. Единственная точка разбора доступа на сайте.
+
+      • ссылка ФИЛИАЛА (`b{org}.{подпись}`) — ровно один филиал. Телеграм для
+        неё не нужен: филиалу не обязательно иметь управляющего в боте;
+      • ссылка ВЛАДЕЛЬЦА (`{uid}.{подпись}`) — вся его сеть.
+
+    `org` — чем ограничен доступ (у владельца None), `uid` — от чьего имени
+    ходить в iiko (у ссылки филиала это владелец филиала: своих кредов у
+    управляющего нет, см. грабли из 234.md).
+    """
+    org = org_from_token(token)
+    if org:
+        from database import get_db
+        conn = get_db()
+        row = conn.execute("SELECT organization_name FROM restaurants "
+                           "WHERE organization_id = ? ORDER BY id LIMIT 1", (org,)).fetchone()
+        conn.close()
+        if not row:
+            return {"role": None, "branches": [], "org": None, "uid": 0, "valid": False}
+        return {"role": "manager", "org": org, "uid": _owner_of(org), "valid": True,
+                "branches": [{"organization_id": org, "name": row[0] or "Филиал"}]}
+    uid = uid_from_token(token)
+    if not uid:
+        # подпись не сошлась — ссылки не существует
+        return {"role": None, "branches": [], "org": None, "uid": 0, "valid": False}
+    sc = _scope(uid)
+    # valid = подпись верна. Роли при этом может не быть: uid, у которого нет
+    # ни своих филиалов, ни назначения управляющим. Это «прав нет» (403), а не
+    # «ссылки нет» (404) — счётчик прочтений отличает одно от другого.
+    sc["org"], sc["uid"], sc["valid"] = None, uid, True
+    return sc
 
 
 def _scope(uid: int) -> Dict[str, Any]:
@@ -456,10 +518,12 @@ def weekly_score_lines(orgs: List[Dict[str, str]]) -> List[str]:
 async def mountain_scores(token: str, days: int = 30):
     """История оценок: график динамики на доске. Управляющему — только его филиал."""
     from database import get_branch_scores
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
+    if not sc["role"]:
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = [b["organization_id"] for b in sc["branches"]]
     today = datetime.now().date()
     hist = get_branch_scores(orgs, (today - timedelta(days=max(1, days))).isoformat(),
@@ -476,10 +540,10 @@ async def mountain_scores(token: str, days: int = 30):
 async def whoami(token: str):
     """Кто пришёл по ссылке. Лёгкий запрос: шапке сайта нужна только роль,
     гонять ради неё всю доску (задачи, чек-листы, рейтинг) незачем."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"role": None}, status_code=404)
-    sc = _scope(uid)
     return JSONResponse({"role": sc["role"],
                          "branch": sc["branches"][0]["name"] if sc["branches"] else ""})
 
@@ -490,10 +554,12 @@ async def mountain_data(token: str, refresh: int = 0):
     отдаётся сразу, а сбор уходит в фон (score_pending=true). Ждать минуту с
     белым экраном ради числа в кружке нельзя. refresh=1 — считать сейчас."""
     import asyncio as _aio
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
+    if not sc["role"]:
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = [b["organization_id"] for b in sc["branches"]]
     # Показатели ключуем на ВЛАДЕЛЬЦА сети, а не на того, кто открыл ссылку.
     # Управляющему нужны оценки чужих филиалов (сравнить себя одним взглядом),
@@ -517,10 +583,10 @@ class AssignPayload(BaseModel):
 @router.post("/api/mountain/assign/{token}")
 async def mountain_assign(token: str, payload: AssignPayload):
     """Владелец подтверждает предложенные задачи. Управляющему сюда нельзя."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if sc["role"] != "owner":
         return JSONResponse({"error": "задачи ставит только владелец"}, status_code=403)
     allowed = {b["organization_id"]: b["name"] for b in sc["branches"]}
@@ -545,10 +611,10 @@ class ClosePayload(BaseModel):
 @router.post("/api/mountain/close/{token}")
 async def mountain_close(token: str, payload: ClosePayload):
     """Закрыть задачу может и управляющий своего филиала, и владелец."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = {b["organization_id"] for b in sc["branches"]}
@@ -565,13 +631,20 @@ async def mountain_close(token: str, payload: ClosePayload):
 import acts as A
 
 
-def _branch_or_403(uid: int, org: Optional[str]) -> Optional[Dict[str, Any]]:
-    sc = _scope(uid)
-    if not sc["role"]:
+def _branch_or_403(sc: Dict[str, Any], org: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Филиал из уже разобранного доступа.
+
+    Раньше принимал uid и сам звал _scope. Со ссылкой ФИЛИАЛА это стало дырой:
+    uid у неё — владелец филиала (своих кредов у управляющего нет), и проверка
+    пускала бы в любой филиал сети. Доступ разбирается один раз в
+    scope_of_token, сюда приходит уже готовым.
+    """
+    if not sc.get("role"):
         return None
+    branches = sc.get("branches") or []
     if not org:
-        return sc["branches"][0] if sc["branches"] else None
-    return next((b for b in sc["branches"] if b["organization_id"] == org), None)
+        return branches[0] if branches else None
+    return next((b for b in branches if b["organization_id"] == org), None)
 
 
 def _rest_by_org(org_id: str) -> Dict[str, Any]:
@@ -598,9 +671,9 @@ def _rest_by_org(org_id: str) -> Dict[str, Any]:
             "org_name": row["organization_name"] or ""}
 
 
-async def _salmon_context(uid: int, org: Optional[str]) -> Dict[str, Any]:
+async def _salmon_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, Any]:
     import api                                   # ленивый импорт: избегаем цикла
-    b = _branch_or_403(uid, org)
+    b = _branch_or_403(sc, org)
     if not b:
         return {"error": "нет доступа к филиалу"}
     real_org = b["organization_id"]
@@ -651,10 +724,13 @@ async def _salmon_context(uid: int, org: Optional[str]) -> Dict[str, Any]:
 
 @router.get("/api/acts/salmon/{token}")
 async def acts_salmon_get(token: str, org: Optional[str] = None):
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _salmon_context(uid, org)
+    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
+    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
+    ctx = await _salmon_context(sc, sc["org"] or org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     sc = _scope(uid)
@@ -675,10 +751,13 @@ class SalmonPayload(BaseModel):
 async def acts_salmon_calc(token: str, payload: SalmonPayload):
     """Считает акт. В iiko пока не отправляет: схему productionDocument
     выясняем по ошибкам сервера, и отправлять «наугад» в учёт нельзя."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _salmon_context(uid, payload.org)
+    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
+    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
+    ctx = await _salmon_context(sc, sc["org"] or payload.org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
@@ -707,10 +786,10 @@ class NoticePayload(BaseModel):
 
 @router.post("/api/mountain/notice/{token}")
 async def notice_send(token: str, payload: NoticePayload):
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if sc["role"] != "owner":
         return JSONResponse({"error": "сообщения рассылает только владелец"}, status_code=403)
     text = (payload.text or "").strip()
@@ -727,10 +806,10 @@ async def notice_send(token: str, payload: NoticePayload):
 
 @router.get("/api/mountain/notices/{token}")
 async def notices_list(token: str):
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = [b["organization_id"] for b in sc["branches"]]
@@ -750,10 +829,10 @@ async def notice_read(token: str, notice_id: int):
     дошло ли сообщение до филиала. Раньше любой подписанный uid — в том числе
     без роли вообще — мог отметить ЛЮБОЕ сообщение, и счётчик «прочитали N»
     показывал больше, чем есть управляющих. Пускаем только адресата."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = [b["organization_id"] for b in sc["branches"]]
@@ -771,10 +850,13 @@ class SalmonSendPayload(SalmonPayload):
 async def acts_salmon_stores(token: str, org: Optional[str] = None):
     """Склады филиала + подсказка, на каком реально лежит входной П/Ф."""
     import api
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _salmon_context(uid, org)
+    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
+    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
+    ctx = await _salmon_context(sc, sc["org"] or org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     real_org = ctx["branch"]["organization_id"]
@@ -802,10 +884,13 @@ async def acts_salmon_send(token: str, payload: SalmonSendPayload):
     """Отправка акта в iiko. Пишет в учёт, поэтому считаем здесь заново, а не
     доверяем числам из браузера: подменённый вес не должен попасть в документ."""
     import api
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _salmon_context(uid, payload.org)
+    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
+    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
+    ctx = await _salmon_context(sc, sc["org"] or payload.org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     prods = ctx["products"]
@@ -874,10 +959,11 @@ class ChecklistPayload(BaseModel):
 
 @router.post("/api/mountain/checklist/{token}")
 async def checklist_upload(token: str, payload: ChecklistPayload):
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    b = _branch_or_403(uid, payload.org)
+    b = _branch_or_403(sc, payload.org)
     if not b:
         return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
     if payload.slot not in SLOTS:
@@ -961,10 +1047,10 @@ async def _maybe_review(org: str, day: str, slot: str) -> Dict[str, Any]:
 @router.get("/api/mountain/checklist/{token}")
 async def checklist_today(token: str):
     """Что сдано с сайта сегодня: слоты × зоны по каждому доступному филиалу."""
-    uid = uid_from_token(token)
-    if not uid:
+    sc = scope_of_token(token)
+    uid = sc["uid"]
+    if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    sc = _scope(uid)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
     day = datetime.now().date().isoformat()
