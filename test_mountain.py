@@ -32,6 +32,13 @@ def _seed():
     db.set_branch_manager(ORG_B, MANAGER, "Управляющий Б")
 
 
+def _clear_checklists():
+    """Сдачи от соседних тестов не должны влиять на арифметику ожидания."""
+    conn = db.get_db()
+    conn.execute("DELETE FROM checklist_uploads WHERE organization_id IN (?,?)", (ORG_A, ORG_B))
+    conn.commit(); conn.close()
+
+
 def test_token_is_signed():
     """Ссылку нельзя подделать, поменяв uid: подпись не сойдётся."""
     t = M.token_for(OWNER)
@@ -510,6 +517,56 @@ def test_upload_says_honestly_why_there_was_no_review():
     print(f"  [OK] причина отсутствия разбора честная: {reason}")
 
 
+def test_checklists_do_not_count_until_the_owner_starts_them():
+    """Без даты старта чек-листы не дают ни баллов, ни штрафов.
+
+    Нужно и для тестов, и для честной раскатки: пока владелец не сказал «с
+    такого-то дня работаем», спрашивать не за что.
+    """
+    _seed()
+    _clear_checklists()
+    day = db.local_now().date().isoformat()
+    db.save_checklist_upload(ORG_B, day, "10:45", "hall", [{"hash": "h"}], by=MANAGER)
+    prog = db.checklist_progress([ORG_A, ORG_B], "2026-08-01", day, slots_passed_today=4, start="")
+    assert prog == {}, f"чек-листы считаются до старта: {prog}"
+    print("  [OK] старт не задан — чек-листы вне зачёта")
+
+
+def test_trying_once_no_longer_costs_more_than_never_trying():
+    """Попытка не должна быть хуже бездействия.
+
+    Отсчёт шёл с ПЕРВОЙ сдачи филиала: сдал один слот — и с этого дня отвечаешь
+    за все, а кто не сдавал ни разу, в выборку не попадал вовсе. Филиал,
+    попробовавший один раз, уходил в −29, восемь молчащих стояли на нуле.
+    Спрашиваем со всех с одной даты.
+    """
+    _seed()
+    _clear_checklists()
+    day = db.local_now().date().isoformat()
+    db.save_checklist_upload(ORG_B, day, "10:45", "hall", [{"hash": "h"}], by=MANAGER)
+    prog = db.checklist_progress([ORG_A, ORG_B], "2026-08-01", day,
+                                 slots_passed_today=4, start=day)
+    tried, silent = prog[ORG_B], prog[ORG_A]
+    assert silent["missed"] < 0, "молчащий филиал обязан получать штраф"
+    assert tried["missed"] > silent["missed"], (
+        f"попытка хуже бездействия: сдавший {tried}, молчащий {silent}")
+    assert tried["done"] == 1 and silent["done"] == 0
+    print(f"  [OK] сдавший {tried['missed']} против молчащего {silent['missed']} — попытка выгоднее")
+
+
+def test_expectation_counts_from_the_start_not_from_the_first_upload():
+    """Ожидание отсчитывается от даты старта, а не от первой сдачи филиала."""
+    _seed()
+    _clear_checklists()
+    day = db.local_now().date().isoformat()
+    db.save_checklist_upload(ORG_B, day, "10:45", "hall", [{"hash": "h"}], by=MANAGER)
+    # старт сегодня: прошло 0 полных дней, ждём только прошедшие слоты
+    today_only = db.checklist_progress([ORG_B], "2026-08-01", day,
+                                       slots_passed_today=1, start=day)[ORG_B]
+    assert today_only["expect"] == 3, today_only     # один слот x три зоны
+    print(f"  [OK] старт сегодня, прошёл один слот — ждём 3 сдачи, получили {today_only['done']}")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -544,7 +601,10 @@ if __name__ == "__main__":
               test_checklist_time_is_the_restaurants_not_the_servers,
               test_photos_are_not_kept_on_disk,
               test_zone_verdicts_do_not_overwrite_each_other,
-              test_upload_says_honestly_why_there_was_no_review):
+              test_upload_says_honestly_why_there_was_no_review,
+              test_checklists_do_not_count_until_the_owner_starts_them,
+              test_trying_once_no_longer_costs_more_than_never_trying,
+              test_expectation_counts_from_the_start_not_from_the_first_upload):
         print(f"\n>>> {t.__name__}")
         try:
             t()

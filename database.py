@@ -2484,37 +2484,60 @@ def save_photo_verdict(photo_hash: str, verdict: Dict[str, Any]):
     conn.close()
 
 
+# С какого дня чек-листы идут в зачёт. Пусто — НЕ идут вовсе: ни баллов, ни
+# штрафов. Это и режим тестирования, и честная раскатка.
+CHECKLIST_FROM = (os.getenv("CHECKLIST_FROM") or "").strip()
+
+
 def checklist_progress(org_ids: List[str], day_from: str, day_to: str,
                        slots_passed_today: int = 4, zones: int = 3,
-                       slots_per_day: int = 4) -> Dict[str, Dict[str, int]]:
-    """Сдачи чек-листов по нашим загрузкам (без бота и мини-аппа).
+                       slots_per_day: int = 4,
+                       start: Optional[str] = None) -> Dict[str, Dict[str, int]]:
+    """Сдачи чек-листов и сколько их ждали, по каждому филиалу.
 
-    Ожидание считаем ЧЕСТНО, иначе филиал сразу минусовой:
-      • отсчёт идёт с ПЕРВОЙ сдачи филиала, а не с начала месяца — до этого
-        сайта у него не было и спрашивать не за что;
-      • у сегодняшнего дня учитываем только слоты, которые уже прошли;
-      • филиал, который ещё ни разу не сдавал, получает пустой результат:
-        критерий выпадает из оценки, а не обнуляет её.
+    Ожидание идёт от ДАТЫ СТАРТА, общей для всей сети, а не от первой сдачи
+    филиала. Это принципиально.
+
+    Раньше отсчёт начинался с первой сдачи — по-своему логично («до этого сайта
+    у него не было»), но следствие вышло обратное задуманному: первая же
+    попытка ВЗВОДИЛА счётчик долга, и филиал сразу отвечал за все слоты с того
+    дня. Кто не пробовал ни разу, в выборку не попадал и не получал ничего.
+    Попытаться становилось строго хуже, чем не трогать: филиал, сдавший один
+    слот, уходил в −29, а восемь молчащих стояли на нуле.
+
+    Теперь спрашивают со всех одинаково и с одного дня:
+      • старт не задан → пустой результат: чек-листы не в зачёте (тесты, раскатка);
+      • старт задан → ожидание считается для КАЖДОГО филиала, сдавал он хоть раз
+        или нет: игнорировать чек-листы больше не выгоднее, чем делать их плохо;
+      • у сегодняшнего дня учитываем только прошедшие слоты;
+      • сдал больше ожидаемого — не штрафуем.
     """
-    if not org_ids:
+    start = (start if start is not None else CHECKLIST_FROM) or ""
+    if not org_ids or not start:
         return {}
+    # старт раньше начала периода не тянем: месяц считается помесячно
+    begin = max(start, day_from)
+    if begin > day_to:
+        return {}
+
     conn = get_db()
     _ensure_checklist(conn)
     rows = conn.execute(
-        f"SELECT organization_id, MIN(day) AS first_day, "
+        f"SELECT organization_id, "
         f"       COUNT(DISTINCT day || '|' || slot || '|' || zone) AS done "
         f"FROM checklist_uploads WHERE day BETWEEN ? AND ? AND organization_id IN "
         f"({','.join('?' * len(org_ids))}) GROUP BY organization_id",
-        [day_from, day_to] + list(org_ids)).fetchall()
+        [begin, day_to] + list(org_ids)).fetchall()
     conn.close()
+    done_by = {r["organization_id"]: int(r["done"] or 0) for r in rows}
+
+    full_days = max(0, (datetime.fromisoformat(day_to) - datetime.fromisoformat(begin)).days)
+    expect_base = full_days * slots_per_day * zones + max(0, slots_passed_today) * zones
 
     out: Dict[str, Dict[str, int]] = {}
-    for r in rows:
-        first = r["first_day"] or day_to
-        full_days = max(0, (datetime.fromisoformat(day_to) - datetime.fromisoformat(first)).days)
-        expect = full_days * slots_per_day * zones + max(0, slots_passed_today) * zones
-        done = int(r["done"] or 0)
-        expect = max(expect, done)          # сдал больше ожидаемого — не штрафуем
-        out[r["organization_id"]] = {"done": done, "expect": expect,
-                                     "missed": -max(0, expect - done)}
+    for org in org_ids:
+        done = done_by.get(org, 0)
+        expect = max(expect_base, done)     # сдал больше ожидаемого — не штрафуем
+        out[org] = {"done": done, "expect": expect,
+                    "missed": -max(0, expect - done)}
     return out

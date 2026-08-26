@@ -216,6 +216,12 @@ def _scope(uid: int) -> Dict[str, Any]:
          "name": names.get(m["organization_id"]) or m.get("name") or "Филиал"} for m in mine]}
 
 
+def _db_checklist_from() -> str:
+    """С какого дня чек-листы идут в зачёт (пусто — не идут)."""
+    import database as _db
+    return _db.CHECKLIST_FROM
+
+
 def _month_start() -> str:
     now = local_now()
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -467,6 +473,9 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
             "ranking": ranking,
             # true — показатели ещё собираются, оценка появится через минуту
             "score_pending": not signals,
+            # Пусто — чек-листы не в зачёте: экран так и пишет, чтобы нули на
+            # горе не читались как «все провалили».
+            "checklist_from": _db_checklist_from(),
             "scale": {"tasks": TASK_POINTS, "checklist_done": CHECKLIST_POINT,
                       "checklist_missed": CHECKLIST_PENALTY,
                       "step_points": STEP_POINTS, "steps": STEPS},

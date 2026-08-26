@@ -38,6 +38,7 @@ type RankRow = {
 type Board = {
   role?: 'owner' | 'manager'; month?: string; error?: string; ranking?: RankRow[]
   scale?: { tasks: Record<string, number>; step_points: number; steps: number }
+  checklist_from?: string   // пусто — чек-листы ещё не в зачёте
   branches?: Row[]; score_pending?: boolean
 }
 type Note = { branch: string; note: string }
@@ -492,7 +493,12 @@ export default function Mountain() {
           hint={`${board.scale?.steps ?? 40} ступеней по ${board.scale?.step_points ?? 25} баллов · месяц ${board.month ?? ''}`} />
         <Peak rows={peakRows.length ? peakRows : rows} mine={mine} />
         <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--mute)', textAlign: 'center' }}>
-          Задача: быстро 10 · средне 25 · долго 50. Чек-лист: сдан слот +1, пропуск −1.
+          Задача: быстро 10 · средне 25 · долго 50.{' '}
+          {/* Пока старт не задан, чек-листы не дают ни баллов, ни штрафов.
+              Молчать об этом нельзя: нули на горе читались бы как «все провалили». */}
+          {board.checklist_from
+            ? <>Чек-лист: сдан слот +1, пропуск −1 · с {board.checklist_from}</>
+            : <span style={{ color: 'var(--amb)' }}>Чек-листы пока не в зачёте — идёт настройка</span>}
         </div>
       </Glass>
 
