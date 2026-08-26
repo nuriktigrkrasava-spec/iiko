@@ -352,33 +352,28 @@ def test_read_receipt_cannot_be_faked_by_a_stranger():
     print("  [OK] отметку «прочитал» ставит только адресат, счётчик не накрутить")
 
 
-def test_manager_who_also_registered_the_network_stays_a_manager():
-    """Живой случай 26.08 на проде: управляющему дали креды владельца, и он
-    подключил через бота ВСЮ сеть — под его telegram id появились те же 23
-    филиала. «Гора» считала владельцем всякого, у кого есть свои рестораны, и
-    двое управляющих открывали доску как владельцы: видели все филиалы, могли
-    ставить задачи любому и рассылать сообщения сети.
+def test_branch_link_confines_access_regardless_of_telegram_tables():
+    """Доступ на сайте определяет ТИП ССЫЛКИ, а не таблицы бота.
 
-    Владелец — тот, чья регистрация филиала ПЕРВАЯ."""
+    Правило «владелец — чья регистрация филиала первая» пробовали и откатили:
+    на проде филиал заведён несколько раз под разными telegram id, первой
+    оказалась не запись владельца, и он терял всю сеть. Теперь ограничивает
+    ссылка: по ссылке филиала виден ровно один филиал, кто бы её ни открыл."""
     _seed()
-    # управляющий Б заводит те же два филиала под собой — второй регистрацией
-    db.add_restaurant(MANAGER, "login", ORG_A, "Астана, Филиал А", iiko_server="", api_password="")
-    db.add_restaurant(MANAGER, "login", ORG_B, "Астана, Филиал Б", iiko_server="", api_password="")
-
-    sc = M._scope(MANAGER)
-    assert sc["role"] == "manager", f"управляющий стал владельцем: {sc['role']}"
+    sc = M.scope_of_token(M.token_for_org(ORG_B))
+    assert sc["role"] == "manager" and sc["org"] == ORG_B, sc
     assert [b["organization_id"] for b in sc["branches"]] == [ORG_B], sc["branches"]
 
-    # у настоящего владельца ничего не отобрали
-    so = M._scope(OWNER)
-    assert so["role"] == "owner", so["role"]
-    assert {b["organization_id"] for b in so["branches"]} == {ORG_A, ORG_B}, so["branches"]
+    # владелец по своей ссылке видит сеть
+    so = M.scope_of_token(M.token_for(OWNER))
+    assert so["role"] == "owner" and so["org"] is None, so
+    assert {b["organization_id"] for b in so["branches"]} == {ORG_A, ORG_B}
 
-    # и задачи он по-прежнему ставить не может
-    r = client.post(f"/api/mountain/assign/{M.token_for(MANAGER)}",
-                    json={"tasks": [{"organization_id": ORG_A, "title": "чужая задача"}]})
+    # по ссылке филиала задачу чужому филиалу не поставить
+    r = client.post(f"/api/mountain/assign/{M.token_for_org(ORG_B)}",
+                    json={"tasks": [{"organization_id": ORG_A, "title": "чужая"}]})
     assert r.status_code == 403, (r.status_code, r.text)
-    print("  [OK] повторная регистрация сети не делает управляющего владельцем")
+    print("  [OK] ссылка филиала ограничивает доступ независимо от telegram id")
 
 
 if __name__ == "__main__":
@@ -409,7 +404,7 @@ if __name__ == "__main__":
               test_shifts_signal_separates_zero_from_no_data,
               test_notice_reaches_the_addressed_branch_only,
               test_read_receipt_cannot_be_faked_by_a_stranger,
-              test_manager_who_also_registered_the_network_stays_a_manager):
+              test_branch_link_confines_access_regardless_of_telegram_tables):
         print(f"\n>>> {t.__name__}")
         try:
             t()
