@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useState, lazy, Suspense, type CSSProperties } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
 import { isoWeekOf, shiftWeek } from './planWeek'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
+// Экран собрания открывают редко — незачем тянуть его в общий кусок вкладки
+const Progress = lazy(() => import('./Progress'))
+import type { ScoreRow } from './Progress'
 
 /* Вкладка «План» — повторяет таблицу владельца.
 
@@ -36,6 +39,9 @@ type MetricRow = {
 }
 type MetricsData = {
   week: string
+  // границы недели сервер отдаёт всегда — их показывает экран собрания
+  from: string
+  to: string
   done_days?: number
   metrics: { key: string; label: string; unit: string; lower_better: boolean }[]
   branches: MetricRow[]
@@ -376,6 +382,11 @@ export default function Plan() {
   const [saved, setSaved] = useState('')
   const [metrics, setMetrics] = useState<MetricsData | null>(null)
   const [celebrate, setCelebrate] = useState(false)
+  const [showProgress, setShowProgress] = useState(false)
+  // Оценки филиалов живут на «Горе», а не в метриках недели — тянем их
+  // только когда экран собрания открывают: лишний запрос на каждой
+  // загрузке вкладки «План» не нужен.
+  const [scores, setScores] = useState<ScoreRow[]>([])
   const [busy, setBusy] = useState(false)
   const org = useOrg()
   // Ссылка управляющего: сервер по ней сам сузит охват до его филиала —
@@ -588,6 +599,15 @@ export default function Plan() {
   const prevOf = (b: Branch, t: string) => daySum(b.prev, t)
   const sumTypes = (fn: (t: string) => number) => TYPES.reduce((s, t) => s + fn(t), 0)
 
+  function openProgress() {
+    setShowProgress(true)
+    if (scores.length || !token) return
+    fetch(`/api/mountain/data/${token}`, { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('scores'))))
+      .then((d: { ranking?: ScoreRow[] }) => setScores(d.ranking || []))
+      .catch(() => {})   // без оценок экран живёт: топ по движению остаётся
+  }
+
   return (
     <>
       <Glass span={12}>
@@ -692,6 +712,40 @@ export default function Plan() {
         )}
       </AnimatePresence>
       {metrics && <Congrats rows={metrics.branches} onOpen={() => setCelebrate(true)} />}
+
+      {/* Экран собрания. Кнопка стоит рядом с поздравлением: там владелец и
+          начинает разговор о неделе. Управляющему не показываем — у него один
+          филиал, и «топ» из одной строки смысла не имеет. */}
+      {/* isManager === false, а не !isManager: роль трёхзначная, и пока она
+          неизвестна (null) кнопка успевала мигнуть у управляющего. */}
+      {metrics && isManager === false && metrics.branches.length > 1 && (
+        <Glass span={12}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--hi)' }}>Прогресс и динамика</div>
+              <div style={{ marginTop: 2, fontSize: 12, color: 'var(--mute)' }}>
+                Заказы, опоздания, кухня и дорога — и кто наверху. Для собрания.
+              </div>
+            </div>
+            <button onClick={openProgress}
+              style={{ marginLeft: 'auto', padding: '11px 18px', borderRadius: 14, border: 'none',
+                       background: 'linear-gradient(135deg,var(--acc),var(--acc-2))',
+                       color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700,
+                       fontFamily: 'inherit', cursor: 'pointer' }}>
+              Показать
+            </button>
+          </div>
+        </Glass>
+      )}
+
+      <AnimatePresence>
+        {showProgress && metrics && (
+          <Suspense fallback={null}>
+            <Progress key="progress" data={metrics} scores={scores}
+              onClose={() => setShowProgress(false)} />
+          </Suspense>
+        )}
+      </AnimatePresence>
       {/* Топ прибавивших — сразу под поздравлением: на собрании это первое,
           что называют вслух. Одному филиалу топ не нужен: он в нём и первый,
           и последний. */}
