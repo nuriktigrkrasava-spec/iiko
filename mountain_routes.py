@@ -410,8 +410,19 @@ def _ranking_with_scores(ranking: List[Dict[str, Any]],
 
 
 def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
-               signals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    sc = _scope(uid)
+               signals: Optional[Dict[str, Any]] = None,
+               scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Доска по УЖЕ разобранному доступу.
+
+    `scope` обязателен везде, где доступ пришёл ссылкой. Раньше сюда передавали
+    только uid и роль считалась заново — а у ссылки ФИЛИАЛА uid принадлежит
+    ВЛАДЕЛЬЦУ (своих кредов iiko у управляющего нет, см. scope_of_token). Роль
+    выходила «owner», и управляющий получал доску владельца целиком: форму
+    постановки задач, рассылку «отправить всем» и прогресс всех филиалов, — а
+    сдача чек-листа с экрана пропадала, она рисуется только не-владельцу.
+    Без scope (ночной пересчёт оценок) считаем от uid, как раньше.
+    """
+    sc = scope or _scope(uid)
     if not sc["role"]:
         return {"error": "нет доступа"}
     orgs = [b["organization_id"] for b in sc["branches"]]
@@ -573,7 +584,7 @@ async def mountain_data(token: str, refresh: int = 0):
             signals = await _collect_score_signals(owner_uid or uid, network)
         else:
             _aio.create_task(_collect_score_signals(owner_uid or uid, network))
-    return JSONResponse(_board_for(uid, signals=signals))
+    return JSONResponse(_board_for(uid, signals=signals, scope=sc))
 
 
 class AssignPayload(BaseModel):
@@ -1064,6 +1075,10 @@ async def checklist_today(token: str):
         key = f'{r["organization_id"]}|{r["slot"]}|{r["zone"]}'
         done.setdefault(key, {"branch": names.get(r["organization_id"], ""),
                               "slot": r["slot"], "zone": ZONES.get(r["zone"], r["zone"]),
+                              # ключ зоны как в базе («hall»): сайт сверял сдачу по
+                              # ПОДПИСИ и не сходился на регистре — у нас «зал», у
+                              # него «Зал», и сданный слот выглядел несданным
+                              "zone_key": r["zone"],
                               "photos": len(r["photos"]), "at": (r["created_at"] or "")[11:16]})
     from database import get_checklist_reviews
     reviews = [{"slot": r["slot"], "ok": bool(r["ok"]), "issues": r["issues"],

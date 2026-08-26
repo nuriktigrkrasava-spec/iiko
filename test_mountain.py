@@ -376,6 +376,41 @@ def test_branch_link_confines_access_regardless_of_telegram_tables():
     print("  [OK] ссылка филиала ограничивает доступ независимо от telegram id")
 
 
+def test_branch_link_gets_the_branch_board_not_the_owners():
+    """Ссылка филиала открывает доску ФИЛИАЛА, а не сеть владельца.
+
+    scope_of_token разбирал доступ верно — manager, один филиал. Но _board_for
+    принимал только uid, а у ссылки филиала это uid ВЛАДЕЛЬЦА (своих кредов iiko
+    у управляющего нет, см. scope_of_token), и роль считалась заново от него.
+    Управляющий получал доску владельца целиком: форму постановки задач,
+    рассылку «отправить всем» и прогресс всех девяти филиалов — а сдача
+    чек-листа с экрана исчезала, она рисуется только не-владельцу.
+    """
+    _seed()
+    t = M.token_for_org(ORG_B)
+    assert M.scope_of_token(t)["role"] == "manager", "ссылка филиала — не владелец"
+    d = client.get(f"/api/mountain/data/{t}").json()
+    assert d.get("role") == "manager", f'доска отдала роль {d.get("role")}'
+    names = [b["name"] for b in d.get("branches") or []]
+    assert names == ["Астана, Филиал Б"], f"на доске чужие филиалы: {names}"
+    print("  [OK] по ссылке филиала — только свой филиал и роль управляющего")
+
+
+def test_personal_link_opens_the_site():
+    """Ссылка вида /m/{токен} должна открывать сайт.
+
+    `/api/mountain/links` раздаёт ссылки именно в таком виде, а маршрута под них
+    не было вовсе: catch-all исключает префикс `m/`, и каждая розданная ссылка
+    отвечала 404. Токен сайт читает из ?m=, поэтому путь ведёт туда.
+    """
+    _seed()
+    t = M.token_for_org(ORG_B)
+    r = client.get(f"/m/{t}", follow_redirects=False)
+    assert r.status_code in (302, 307), f"личная ссылка отвечает {r.status_code}"
+    assert r.headers["location"] == f"/?m={t}", r.headers.get("location")
+    print("  [OK] /m/{токен} ведёт на сайт с этим токеном")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -404,7 +439,9 @@ if __name__ == "__main__":
               test_shifts_signal_separates_zero_from_no_data,
               test_notice_reaches_the_addressed_branch_only,
               test_read_receipt_cannot_be_faked_by_a_stranger,
-              test_branch_link_confines_access_regardless_of_telegram_tables):
+              test_branch_link_confines_access_regardless_of_telegram_tables,
+              test_branch_link_gets_the_branch_board_not_the_owners,
+              test_personal_link_opens_the_site):
         print(f"\n>>> {t.__name__}")
         try:
             t()

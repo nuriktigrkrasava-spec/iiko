@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Optional, List, Dict, Any, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request, Depends, Query
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -1043,6 +1043,19 @@ async def root():
             "затем закоммитить dist.</body>", status_code=503)
     return FileResponse(index, headers={"Cache-Control": "no-store, must-revalidate"})
 
+
+
+@app.get("/m/{token}")
+async def personal_link(token: str):
+    """Личная ссылка владельца и филиала.
+
+    `/api/mountain/links` раздаёт ссылки именно в таком виде, а маршрута под них
+    не было: catch-all в конце файла префикс `m/` исключает, и каждая розданная
+    ссылка отвечала 404 — на сайт по ней было не попасть. Сам сайт читает токен
+    из `?m=` (lib/api.ts шлёт его как X-Site-Token), поэтому путь переводим в
+    запрос, а не отдаём index.html молча: иначе токен потерялся бы по дороге.
+    """
+    return RedirectResponse(f"/?m={token}", status_code=307)
 
 
 @app.get("/api/version")

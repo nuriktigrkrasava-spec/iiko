@@ -12,8 +12,10 @@ const SLOTS = ['10:45', '15:00', '20:45', '23:45']
 const ZONES: [string, string][] = [['hall', 'Зал'], ['kitchen', 'Кухня'], ['wc', 'Санузел']]
 const MAX_PHOTOS = 8
 const MAX_SIDE = 1024
+// подписи зон строчными — как их отдаёт сервер в старых ответах, без zone_key
+const ZONE_LABEL: Record<string, string> = { hall: 'зал', kitchen: 'кухня', wc: 'санузел' }
 
-type Done = { branch: string; slot: string; zone: string; photos: number; at: string }
+type Done = { branch: string; slot: string; zone: string; zone_key?: string; photos: number; at: string }
 type Criteria = Record<string, { label: string; items: string[] }>
 
 function compress(file: File): Promise<string> {
@@ -82,7 +84,13 @@ export default function ChecklistUpload({ token }: { token: string }) {
     }
   }
 
-  const sent = (s: string, z: string) => done.find((d) => d.slot === s && d.zone === z)
+  /* Сверяем по КЛЮЧУ зоны («hall»), а не по подписи: сервер подписывает зоны
+     строчными («зал»), здесь они с заглавной («Зал») — сравнение подписей не
+     сходилось на регистре, и сданный слот навсегда оставался пустым: ни
+     галочки в таблице, ни строки «уже сдано в 10:47». zone_key появился не
+     сразу, поэтому старый ответ дочитываем подписью. */
+  const sent = (s: string, key: string) => done.find((d) => d.slot === s
+    && (d.zone_key || d.zone?.toLowerCase()) === (d.zone_key ? key : ZONE_LABEL[key]))
 
   return (
     <Glass span={12}>
@@ -134,9 +142,9 @@ export default function ChecklistUpload({ token }: { token: string }) {
         </button>
         <input ref={input} type="file" accept="image/*" multiple capture="environment" hidden
           onChange={(e) => upload(e.target.files)} />
-        {sent(slot, ZONES.find(([k]) => k === zone)?.[1] || '') && (
+        {sent(slot, zone) && (
           <span style={{ fontSize: 12.5, color: 'var(--grn)', fontWeight: 650 }}>
-            уже сдано в {sent(slot, ZONES.find(([k]) => k === zone)?.[1] || '')?.at}
+            уже сдано в {sent(slot, zone)?.at}
           </span>
         )}
       </div>
@@ -155,10 +163,10 @@ export default function ChecklistUpload({ token }: { token: string }) {
           {SLOTS.map((s) => (
             <tr key={s}>
               <td className="tnum" style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', color: 'var(--hi)' }}>{s}</td>
-              {ZONES.map(([, label]) => {
-                const d = sent(s, label)
+              {ZONES.map(([k]) => {
+                const d = sent(s, k)
                 return (
-                  <td key={label} style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', textAlign: 'center', color: d ? 'var(--grn)' : 'var(--mute)' }}>
+                  <td key={k} style={{ padding: '9px 0', borderBottom: '1px solid var(--hair-2)', textAlign: 'center', color: d ? 'var(--grn)' : 'var(--mute)' }}>
                     {d ? `✓ ${d.photos} · ${d.at}` : '—'}
                   </td>
                 )

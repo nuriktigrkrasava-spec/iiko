@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { Glass } from './ui'
 import SalmonAct from './SalmonAct'
 import ChecklistUpload from './ChecklistUpload'
+import ChecklistBoard from './ChecklistBoard'
 import { tenge } from '../lib/format'
 import type { Notice } from './Notices'
 
@@ -341,32 +342,36 @@ export default function Mountain() {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)      // фатальная: экран не собрать
   const [formErr, setFormErr] = useState('')               // подсказка в форме, экран живёт
-  const [stale, setStale] = useState(false)   // ссылка протухла, открыли кабинет
   const [notices, setNotices] = useState<Notice[]>([])
   const [msg, setMsg] = useState('')
 
 
-  // Токен из ссылки, иначе — кабинет владельца. Ссылка живёт долго и может
-  // устареть (сменился ключ подписи, отключили управляющего). Тупик с «bad
-  // token» в таком случае бесполезен: молча пробуем свою ссылку кабинета и
-  // говорим об этом одной строкой.
+  /* Токен из ссылки, иначе — кабинет владельца.
+
+     Откат «ссылка филиала не открылась → открываем кабинет владельца» убран.
+     Он стоил дорого: любая осечка — и управляющий получал доску ВЛАДЕЛЬЦА, с
+     формой постановки задач, рассылкой всем и прогрессом всех филиалов, а сдача
+     чек-листа исчезала, она рисуется только не-владельцу. Ссылка филиала не
+     должна превращаться в чужой кабинет ни при каких обстоятельствах: не
+     открылась — так и говорим. */
   useEffect(() => {
     const q = new URLSearchParams(window.location.search).get('m')
-    const ownLink = () => fetch('/api/mountain/links', { headers: { Accept: 'application/json' } })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((d: { owner?: { link?: string } }) => (d.owner?.link || '').split('/m/')[1] || null)
 
-    if (!q) { ownLink().then(setToken).catch((e) => setErr(String(e.message || e))); return }
+    if (!q) {
+      fetch('/api/mountain/links', { headers: { Accept: 'application/json' } })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+        .then((d: { owner?: { link?: string } }) => {
+          const t = (d.owner?.link || '').split('/m/')[1] || null
+          if (t) setToken(t); else setErr('Открой сайт по своей личной ссылке.')
+        })
+        .catch((e) => setErr(String(e.message || e)))
+      return
+    }
 
     fetch(`/api/mountain/data/${q}`)
       .then((r) => (r.ok ? q : Promise.reject(new Error('stale'))))
       .then(setToken)
-      .catch(() => ownLink()
-        .then((t) => {
-          if (!t) { setErr('Ссылка недействительна — попроси владельца прислать новую.'); return }
-          setStale(true); setToken(t)
-        })
-        .catch(() => setErr('Ссылка недействительна — попроси владельца прислать новую.')))
+      .catch(() => setErr('Ссылка недействительна — попроси владельца прислать новую.'))
   }, [])
 
   const load = useCallback((t: string) => {
@@ -469,14 +474,6 @@ export default function Mountain() {
 
   return (
     <>
-      {stale && (
-        <Glass span={12}>
-          <div style={{ padding: '10px 2px', fontSize: 12.5, color: 'var(--amb)' }}>
-            Ссылка, по которой ты пришёл, устарела — открыт твой кабинет. Раздай новые ссылки.
-          </div>
-        </Glass>
-      )}
-
       {/* Гора */}
       <Glass span={12}>
         <Eyebrow t="Гора · уровень филиалов"
@@ -631,6 +628,7 @@ export default function Mountain() {
       {/* Сдачу чек-листа показываем только управляющему: владелец их не сдаёт,
           ему нужна картина «кто сдал, кто нет» — она ниже. */}
       {token && !owner && <ChecklistUpload token={token} />}
+      {token && owner && <ChecklistBoard token={token} branches={rows.map((r) => r.name)} />}
 
     </>
   )
