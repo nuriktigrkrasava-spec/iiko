@@ -488,6 +488,28 @@ def test_zone_verdicts_do_not_overwrite_each_other():
     print("  [OK] разбор второй зоны дописывается, а не затирает первую")
 
 
+def test_upload_says_honestly_why_there_was_no_review():
+    """Когда разбора не было, управляющему говорят НАСТОЯЩУЮ причину.
+
+    Причина от review_slot («выключен CHECKLIST_AI», «модель не ответила»)
+    затиралась причиной отбора, и на экране появлялось «разбор не запускался:
+    кадры не хранятся — проверяем каждую сдачу». Это не объясняет ничего:
+    человек делает вывод, что виновато отключённое хранение кадров.
+    """
+    import base64
+    _seed()
+    px = base64.b64encode(bytes.fromhex(
+        "ffd8ffe000104a46494600010100000100010000ffdb004300ff"
+        "c00011080001000101011100ffc4001f0000010501010101010100000000000000000102030405060708090a0b"
+        "ffda0008010100003f00d2cf20ffd9")).decode()
+    r = client.post(f"/api/mountain/checklist/{M.token_for_org(ORG_B)}",
+                    json={"slot": "15:00", "zone": "wc", "photos": [px]})
+    assert r.status_code == 200, r.text[:200]
+    reason = (r.json().get("review") or {}).get("reason") or ""
+    assert "CHECKLIST_AI" in reason, f"причина подменена: {reason!r}"
+    print(f"  [OK] причина отсутствия разбора честная: {reason}")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -521,7 +543,8 @@ if __name__ == "__main__":
               test_personal_link_opens_the_site,
               test_checklist_time_is_the_restaurants_not_the_servers,
               test_photos_are_not_kept_on_disk,
-              test_zone_verdicts_do_not_overwrite_each_other):
+              test_zone_verdicts_do_not_overwrite_each_other,
+              test_upload_says_honestly_why_there_was_no_review):
         print(f"\n>>> {t.__name__}")
         try:
             t()

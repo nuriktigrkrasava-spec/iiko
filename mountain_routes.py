@@ -1084,7 +1084,12 @@ async def _review_upload(org: str, day: str, slot: str,
         for hsh in hashes:
             save_photo_verdict(hsh, {"ok": res.get("ok"), "issues": res.get("issues") or [],
                                      "criteria": res.get("criteria") or []})
-    res["reason"] = why
+        # Причину подменяем ТОЛЬКО у состоявшегося разбора: тут она отвечает на
+        # «почему проверяли». Когда разбора не было, причину знает review_slot —
+        # «выключен CHECKLIST_AI», «модель не ответила», — и затирать её нельзя:
+        # управляющий читал «разбор не запускался: кадры не хранятся», что не
+        # объясняет ничего.
+        res["reason"] = why
     return res
 
 
