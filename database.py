@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from cryptography.fernet import Fernet
 
@@ -21,6 +21,20 @@ def encrypt_password(password: str) -> str:
     if not cipher or not password:
         return password
     return cipher.encrypt(password.encode()).decode()
+
+# Часовой пояс ресторанов. Казахстан с 2024 — единый UTC+5 (Asia/Almaty).
+# Render крутится в UTC, и голый datetime.now() писал в базу время на пять часов
+# назад: чек-лист, сданный в 10:47 по Астане, показывался сданным в 05:47, день
+# переворачивался в 05:00, а «сколько слотов уже прошло» считалось по UTC — из-за
+# чего филиалу насчитывались пропуски за слоты, которые ещё не наступили.
+# Возвращаем НАИВНОЕ время: формат хранения тот же, меняются только стрелки.
+LOCAL_TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET_HOURS", "5"))))
+
+
+def local_now() -> datetime:
+    """Стенные часы ресторана (UTC+5), не зависят от часового пояса сервера."""
+    return datetime.now(LOCAL_TZ).replace(tzinfo=None)
+
 
 def decrypt_password(encrypted: str) -> str:
     cipher = _get_cipher()
@@ -2310,7 +2324,7 @@ def save_checklist_upload(org_id: str, day: str, slot: str, zone: str,
         "INSERT INTO checklist_uploads (organization_id, day, slot, zone, photos, note, "
         "created_at, created_by) VALUES (?,?,?,?,?,?,?,?)",
         (org_id, day, slot, zone, json.dumps(photos, ensure_ascii=False), note or "",
-         datetime.now().isoformat(), int(by or 0)))
+         local_now().isoformat(), int(by or 0)))
     conn.commit()
     rid = cur.lastrowid
     conn.close()

@@ -31,6 +31,10 @@ from pydantic import BaseModel
 
 import scoring as S
 from database import (
+    # local_now — стенные часы ресторана (UTC+5). Голый datetime.now() на Render
+    # давал UTC: и время сдачи, и «какой сегодня день», и «сколько слотов уже
+    # прошло» уезжали на пять часов, а вместе с ними и оценка филиала.
+    local_now,
     get_restaurants, get_owned_restaurants, get_branch_managers,
     add_branch_task, close_branch_task, get_branch_tasks, TASK_POINTS,
 )
@@ -213,7 +217,7 @@ def _scope(uid: int) -> Dict[str, Any]:
 
 
 def _month_start() -> str:
-    now = datetime.now()
+    now = local_now()
     return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
 
 
@@ -250,7 +254,7 @@ async def _collect_score_signals(uid: int, branches: List[Dict[str, str]]) -> Di
     import asyncio as _aio
     import api
     month_from = _month_start()[:10]
-    today = datetime.now().date().isoformat()
+    today = local_now().date().isoformat()
     sem = _aio.Semaphore(4)
 
     async def one(b: Dict[str, str]):
@@ -370,10 +374,10 @@ def _network_ranking(owner_uid: int) -> List[Dict[str, Any]]:
     branches = _all_branches(owner_uid)
     orgs = [b["organization_id"] for b in branches]
     tasks = get_branch_tasks(orgs, since=_month_start())
-    now_hm = datetime.now().strftime("%H:%M")
+    now_hm = local_now().strftime("%H:%M")
     passed = sum(1 for sl in SLOTS if sl <= now_hm)
     prog = checklist_progress(orgs, _month_start()[:10],
-                              datetime.now().date().isoformat(), slots_passed_today=passed)
+                              local_now().date().isoformat(), slots_passed_today=passed)
     out = []
     for b in branches:
         org = b["organization_id"]
@@ -397,10 +401,10 @@ def _ranking_with_scores(ranking: List[Dict[str, Any]],
     """
     from database import checklist_progress
     orgs = [r["organization_id"] for r in ranking]
-    now_hm = datetime.now().strftime("%H:%M")
+    now_hm = local_now().strftime("%H:%M")
     passed = sum(1 for sl in SLOTS if sl <= now_hm)
     prog = checklist_progress(orgs, _month_start()[:10],
-                              datetime.now().date().isoformat(), slots_passed_today=passed)
+                              local_now().date().isoformat(), slots_passed_today=passed)
     out = []
     for r in ranking:
         ch = _checklist_points_own(prog, r["organization_id"])
@@ -430,10 +434,10 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
     journals = journals or {}
     signals = _signals_by_branch(uid) if signals is None else signals
     from database import checklist_progress
-    now_hm = datetime.now().strftime("%H:%M")
+    now_hm = local_now().strftime("%H:%M")
     passed = sum(1 for sl in SLOTS if sl <= now_hm)      # какие слоты уже прошли сегодня
     progress = checklist_progress(orgs, _month_start()[:10],
-                                  datetime.now().date().isoformat(), slots_passed_today=passed)
+                                  local_now().date().isoformat(), slots_passed_today=passed)
 
     rows = []
     for b in sc["branches"]:
@@ -459,7 +463,7 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
     # результатов не работает. Задачи и чек-листы при этом остаются своими.
     owner_uid = uid if sc["role"] == "owner" else _owner_of(orgs[0] if orgs else "")
     ranking = _ranking_with_scores(_network_ranking(owner_uid), signals)
-    return {"role": sc["role"], "month": datetime.now().strftime("%Y-%m"),
+    return {"role": sc["role"], "month": local_now().strftime("%Y-%m"),
             "ranking": ranking,
             # true — показатели ещё собираются, оценка появится через минуту
             "score_pending": not signals,
@@ -482,7 +486,7 @@ async def recompute_all_scores() -> int:
     uids = [int(r[0]) for r in conn.execute(
         "SELECT DISTINCT telegram_id FROM restaurants WHERE telegram_id IS NOT NULL").fetchall()]
     conn.close()
-    day = datetime.now().date().isoformat()
+    day = local_now().date().isoformat()
     saved = 0
     for uid in uids:
         sc = _scope(uid)
@@ -509,7 +513,7 @@ def weekly_score_lines(orgs: List[Dict[str, str]]) -> List[str]:
     """
     from database import branch_score_average
     ids = [b["organization_id"] for b in orgs]
-    today = datetime.now().date()
+    today = local_now().date()
     cur = branch_score_average(ids, (today - timedelta(days=7)).isoformat(), today.isoformat())
     prev = branch_score_average(ids, (today - timedelta(days=14)).isoformat(),
                                 (today - timedelta(days=8)).isoformat())
@@ -536,7 +540,7 @@ async def mountain_scores(token: str, days: int = 30):
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
     orgs = [b["organization_id"] for b in sc["branches"]]
-    today = datetime.now().date()
+    today = local_now().date()
     hist = get_branch_scores(orgs, (today - timedelta(days=max(1, days))).isoformat(),
                              today.isoformat())
     from database import branch_score_average
@@ -988,7 +992,7 @@ async def checklist_upload(token: str, payload: ChecklistPayload):
     if len(payload.photos) > MAX_PHOTOS:
         return JSONResponse({"error": f"не больше {MAX_PHOTOS} кадров на зону"}, status_code=400)
 
-    day = datetime.now().date().isoformat()
+    day = local_now().date().isoformat()
     folder = os.path.join(checklist_dir(), b["organization_id"], day)
     os.makedirs(folder, exist_ok=True)
     saved = []
@@ -999,7 +1003,7 @@ async def checklist_upload(token: str, payload: ChecklistPayload):
             return JSONResponse({"error": "файл не читается"}, status_code=400)
         if len(data) > MAX_PHOTO_MB * 1024 * 1024:
             return JSONResponse({"error": f"кадр больше {MAX_PHOTO_MB} МБ — сожми"}, status_code=413)
-        name = f"{payload.slot.replace(':', '')}_{payload.zone}_{int(datetime.now().timestamp())}_{i}.jpg"
+        name = f"{payload.slot.replace(':', '')}_{payload.zone}_{int(local_now().timestamp())}_{i}.jpg"
         with open(os.path.join(folder, name), "wb") as f:
             f.write(data)
         saved.append(os.path.join(b["organization_id"], day, name))
@@ -1027,7 +1031,7 @@ async def _maybe_review(org: str, day: str, slot: str) -> Dict[str, Any]:
         return {"checked": False, "reason": "нет сдач"}
 
     # спорные случаи: сдано позже слота или кадров меньше трёх
-    late = datetime.now().strftime("%H:%M") > slot
+    late = local_now().strftime("%H:%M") > slot
     photos_n = sum(len(u.get("photos") or []) for u in ups)
     do, why = C.should_review({"photos": [1] * photos_n}, late=late)
     if not do:
@@ -1066,7 +1070,7 @@ async def checklist_today(token: str):
         return JSONResponse({"error": "bad token"}, status_code=404)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
-    day = datetime.now().date().isoformat()
+    day = local_now().date().isoformat()
     orgs = [b["organization_id"] for b in sc["branches"]]
     rows = get_checklist_uploads(orgs, day)
     names = {b["organization_id"]: b["name"] for b in sc["branches"]}

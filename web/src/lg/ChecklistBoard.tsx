@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Glass } from './ui'
+import { SLOTS as DEFAULT_SLOTS, type Done, type Review, issueText, slotPassed } from './checklist'
 
 /* Чек-листы филиалов глазами владельца: кто сдал, кто нет.
 
@@ -11,19 +12,12 @@ import { Glass } from './ui'
    Ходим в тот же /api/mountain/checklist/{token}: владельцу он и так отдаёт
    сдачи по всем его филиалам. */
 
-type Done = { branch: string; slot: string; zone: string; photos: number; at: string }
-type Review = { branch: string; slot: string; ok: boolean; issues: string[]; reason?: string }
-
 const shortName = (name: string) => name.replace(/^Астана,?\s*(ул\.?)?\s*/i, '').trim() || name
-
-// Сколько слотов уже прошло: за будущие спрашивать нечего, красным их красить нельзя.
-export const slotPassed = (slot: string, now = new Date()) =>
-  Number(slot.slice(0, 2)) * 60 + Number(slot.slice(3)) <= now.getHours() * 60 + now.getMinutes()
 
 export default function ChecklistBoard({ token, branches }: { token: string; branches: string[] }) {
   const [done, setDone] = useState<Done[]>([])
   const [reviews, setReviews] = useState<Review[]>([])
-  const [slots, setSlots] = useState<string[]>(['10:45', '15:00', '20:45', '23:45'])
+  const [slots, setSlots] = useState<string[]>(DEFAULT_SLOTS)
   const [zoneCount, setZoneCount] = useState(3)
 
   useEffect(() => {
@@ -83,8 +77,8 @@ export default function ChecklistBoard({ token, branches }: { token: string; bra
           {problems.slice(0, 6).map((r, i) => (
             <div key={`${r.branch}${r.slot}${i}`} style={{ display: 'flex', gap: 10, alignItems: 'baseline', fontSize: 12.5 }}>
               <span className="tnum" style={{ color: 'var(--mute)', flex: 'none' }}>{r.slot}</span>
-              <span style={{ color: 'var(--hi)', flex: 'none', fontWeight: 650 }}>{shortName(r.branch)}</span>
-              <span style={{ color: 'var(--red)' }}>{r.issues.join(' · ')}</span>
+              <span style={{ color: 'var(--hi)', flex: 'none', fontWeight: 650 }}>{shortName(r.branch || '')}</span>
+              <span style={{ color: 'var(--red)' }}>{(r.issues || []).map(issueText).join(' · ')}</span>
             </div>
           ))}
         </div>

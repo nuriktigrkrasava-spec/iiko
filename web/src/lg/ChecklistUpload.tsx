@@ -1,21 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { Glass } from './ui'
+import { SLOTS, ZONES, type Done, type Issue, type Review,
+         issueText, nearestSlot, sentIn } from './checklist'
 
-/* Сдача чек-листа прямо с сайта: слот → зона → кадры.
+/* Сдача чек-листа прямо с сайта: слот → зона → кадры → РАЗБОР.
 
    Экономия заложена в загрузку, а не в разбор: кадры сжимаются В БРАУЗЕРЕ до
-   1024 px и JPEG 0.7 ещё до отправки. Это режет и трафик управляющего, и —
-   когда включим разбор фото — стоимость vision, которая считается по площади
-   картинки. Восемь кадров на зону хватает, больше — только вес. */
+   1024 px и JPEG 0.7 ещё до отправки. Это режет и трафик управляющего, и
+   стоимость vision, которая считается по площади картинки.
 
-const SLOTS = ['10:45', '15:00', '20:45', '23:45']
-const ZONES: [string, string][] = [['hall', 'Зал'], ['kitchen', 'Кухня'], ['wc', 'Санузел']]
+   Разбор модели раньше приходил в ответе и молча выбрасывался: управляющий
+   отправлял восемь кадров и не узнавал, что не так с санузлом. Теперь вердикт
+   виден сразу после отправки, а замечания за день — списком ниже. */
+
 const MAX_PHOTOS = 8
 const MAX_SIDE = 1024
-// подписи зон строчными — как их отдаёт сервер в старых ответах, без zone_key
-const ZONE_LABEL: Record<string, string> = { hall: 'зал', kitchen: 'кухня', wc: 'санузел' }
 
-type Done = { branch: string; slot: string; zone: string; zone_key?: string; photos: number; at: string }
 type Criteria = Record<string, { label: string; items: string[] }>
 
 function compress(file: File): Promise<string> {
@@ -38,27 +38,21 @@ function compress(file: File): Promise<string> {
   })
 }
 
-const nearestSlot = () => {
-  const now = new Date().getHours() * 60 + new Date().getMinutes()
-  const mins = SLOTS.map((s) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3)))
-  let best = 0
-  mins.forEach((m, i) => { if (m <= now) best = i })
-  return SLOTS[best]
-}
-
 export default function ChecklistUpload({ token }: { token: string }) {
   const input = useRef<HTMLInputElement>(null)
-  const [slot, setSlot] = useState(nearestSlot())
+  const [slot, setSlot] = useState(() => nearestSlot())
   const [zone, setZone] = useState('hall')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<Done[]>([])
+  const [reviews, setReviews] = useState<Review[]>([])
   const [criteria, setCriteria] = useState<Criteria>({})
+  const [verdict, setVerdict] = useState<{ ok?: boolean; checked?: boolean; issues?: Issue[]; reason?: string } | null>(null)
 
   const load = () => {
     fetch(`/api/mountain/checklist/${token}`).then((r) => r.json())
-      .then((d: { done?: Done[]; criteria?: Criteria }) => {
-        setDone(d.done || []); setCriteria(d.criteria || {})
+      .then((d: { done?: Done[]; criteria?: Criteria; reviews?: Review[] }) => {
+        setDone(d.done || []); setCriteria(d.criteria || {}); setReviews(d.reviews || [])
       }).catch(() => {})
   }
   useEffect(load, [token])
@@ -66,7 +60,7 @@ export default function ChecklistUpload({ token }: { token: string }) {
   async function upload(list: FileList | null) {
     if (!list?.length) return
     const files = Array.from(list).slice(0, MAX_PHOTOS)
-    setErr(null); setBusy(true)
+    setErr(null); setBusy(true); setVerdict(null)
     try {
       const photos = await Promise.all(files.map(compress))
       const r = await fetch(`/api/mountain/checklist/${token}`, {
@@ -75,7 +69,7 @@ export default function ChecklistUpload({ token }: { token: string }) {
       })
       const d = await r.json()
       if (!r.ok || d.error) setErr(d.error || `HTTP ${r.status}`)
-      else load()
+      else { setVerdict(d.review || { checked: false }); load() }
     } catch (e) {
       setErr(String((e as Error).message || e))
     } finally {
@@ -84,39 +78,54 @@ export default function ChecklistUpload({ token }: { token: string }) {
     }
   }
 
-  /* Сверяем по КЛЮЧУ зоны («hall»), а не по подписи: сервер подписывает зоны
-     строчными («зал»), здесь они с заглавной («Зал») — сравнение подписей не
-     сходилось на регистре, и сданный слот навсегда оставался пустым: ни
-     галочки в таблице, ни строки «уже сдано в 10:47». zone_key появился не
-     сразу, поэтому старый ответ дочитываем подписью. */
-  const sent = (s: string, key: string) => done.find((d) => d.slot === s
-    && (d.zone_key || d.zone?.toLowerCase()) === (d.zone_key ? key : ZONE_LABEL[key]))
+  const sent = (s: string, key: string) => sentIn(done, s, key)
+  const slotCount = (s: string) => ZONES.filter(([k]) => sent(s, k)).length
+  // Замечания за сегодня по всем слотам — в одном месте, свежие сверху
+  const problems = reviews.filter((r) => !r.ok && (r.issues || []).length)
+
+  const chip = (on: boolean, extra?: React.CSSProperties): React.CSSProperties => ({
+    padding: '7px 13px', borderRadius: 11, fontSize: 12.5, fontWeight: 650, cursor: 'pointer',
+    border: '1px solid var(--hair)', fontFamily: 'inherit',
+    background: on ? 'var(--glass-2)' : 'transparent',
+    color: on ? 'var(--hi)' : 'var(--mute)', ...extra,
+  })
 
   return (
     <Glass span={12}>
       <div className="eyebrow"><span>Сдать чек-лист</span>
         <span className="hint">кадры сжимаются в браузере · до {MAX_PHOTOS} на зону</span></div>
 
+      {/* Слоты: рядом с временем — сколько зон из трёх уже сдано. Без счётчика
+          приходилось открывать каждый слот, чтобы понять, где дыра. */}
       <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {SLOTS.map((s) => (
-          <button key={s} onClick={() => setSlot(s)}
-            style={{
-              padding: '7px 13px', borderRadius: 11, fontSize: 12.5, fontWeight: 650, cursor: 'pointer',
-              border: '1px solid var(--hair)', fontFamily: 'inherit',
-              background: slot === s ? 'var(--glass-2)' : 'transparent',
-              color: slot === s ? 'var(--hi)' : 'var(--mute)',
-            }}>{s}</button>
-        ))}
-        <span style={{ width: 1, background: 'var(--hair)', margin: '0 4px' }} />
-        {ZONES.map(([k, label]) => (
-          <button key={k} onClick={() => setZone(k)}
-            style={{
-              padding: '7px 13px', borderRadius: 11, fontSize: 12.5, fontWeight: 650, cursor: 'pointer',
-              border: '1px solid var(--hair)', fontFamily: 'inherit',
-              background: zone === k ? 'var(--glass-2)' : 'transparent',
-              color: zone === k ? 'var(--hi)' : 'var(--mute)',
-            }}>{label}</button>
-        ))}
+        {SLOTS.map((s) => {
+          const n = slotCount(s)
+          return (
+            <button key={s} onClick={() => setSlot(s)} style={chip(slot === s)}>
+              {s}
+              <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 700,
+                             color: n === ZONES.length ? 'var(--grn)' : n ? 'var(--amb)' : 'var(--mute)' }}>
+                {n}/{ZONES.length}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Зоны выбранного слота: галочка прямо на кнопке — видно, что уже сдано,
+          не заглядывая в таблицу ниже. */}
+      <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {ZONES.map(([k, label]) => {
+          const d = sent(slot, k)
+          return (
+            <button key={k} onClick={() => setZone(k)}
+              style={chip(zone === k, d ? { borderColor: 'var(--grn)' } : undefined)}>
+              {d && <span style={{ color: 'var(--grn)', marginRight: 5, fontWeight: 800 }}>✓</span>}
+              {label}
+              {d && <span style={{ marginLeft: 5, fontSize: 11, color: 'var(--mute)' }}>{d.at}</span>}
+            </button>
+          )
+        })}
       </div>
 
       {/* Что именно снимать: без этого «сдал чистоту» превращается в пять кадров потолка */}
@@ -135,13 +144,8 @@ export default function ChecklistUpload({ token }: { token: string }) {
         </div>
       )}
 
-      {/* Кнопку не должно вести. Подпись меняет длину на каждый тап по зоне
-          («Сдать 10:45 · Зал» против «Сдать 23:45 · Санузел») и ещё раз на
-          «Загружаю…», а рядом то появляется, то исчезает «уже сдано в 10:47» —
-          на узком экране оно переносилось и толкало кнопку. Поэтому кнопке
-          задана постоянная ширина по самой длинной подписи, а состояние ушло
-          на свою строку с зарезервированной высотой: меняется текст, но ничто
-          не двигается. */}
+      {/* Кнопку не должно вести: подпись меняет длину на каждый тап по зоне и
+          ещё раз на «Загружаю…». Постоянная ширина + состояние своей строкой. */}
       <div style={{ marginTop: 12 }}>
         <button onClick={() => input.current?.click()} disabled={busy}
           style={{ minWidth: 208, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: '11px 18px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700, fontFamily: 'inherit', cursor: busy ? 'default' : 'pointer', opacity: busy ? .6 : 1 }}>
@@ -155,6 +159,52 @@ export default function ChecklistUpload({ token }: { token: string }) {
       </div>
 
       {err && <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--red)' }}>{err}</div>}
+
+      {/* Вердикт разбора сразу после отправки — ради него всё и снимают */}
+      {verdict && (
+        <div style={{ marginTop: 12, padding: '11px 13px', borderRadius: 12,
+                      border: `1px solid ${verdict.checked ? (verdict.ok ? 'var(--grn)' : 'var(--red)') : 'var(--hair)'}`,
+                      background: 'var(--glass-2)' }}>
+          {verdict.checked ? (
+            verdict.ok ? (
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--grn)' }}>Разбор: замечаний нет</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--red)' }}>Разбор нашёл, что поправить</div>
+                <div style={{ marginTop: 6, display: 'grid', gap: 4 }}>
+                  {(verdict.issues || []).map((it, i) => (
+                    <div key={i} style={{ fontSize: 12.5, color: 'var(--hi)', display: 'flex', gap: 8 }}>
+                      <span style={{ color: 'var(--red)' }}>•</span>{issueText(it)}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )
+          ) : (
+            /* Разбор не гоняли — так и говорим. Молчание читалось как «всё хорошо». */
+            <div style={{ fontSize: 12.5, color: 'var(--mute)' }}>
+              Кадры приняты. Разбор не запускался{verdict.reason ? `: ${verdict.reason}` : ''}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Замечания за сегодня — что плохо по всем слотам, а не только по последнему */}
+      {problems.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 11, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 700 }}>
+            Замечания за сегодня
+          </div>
+          <div style={{ marginTop: 7, display: 'grid', gap: 5 }}>
+            {problems.map((r, i) => (
+              <div key={`${r.slot}${i}`} style={{ display: 'flex', gap: 9, alignItems: 'baseline', fontSize: 12.5 }}>
+                <span className="tnum" style={{ color: 'var(--mute)', flex: 'none' }}>{r.slot}</span>
+                <span style={{ color: 'var(--red)' }}>{(r.issues || []).map(issueText).join(' · ')}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* что сдано сегодня: слоты × зоны */}
       <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16, fontSize: 12.5 }}>

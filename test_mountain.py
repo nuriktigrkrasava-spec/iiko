@@ -411,6 +411,30 @@ def test_personal_link_opens_the_site():
     print("  [OK] /m/{токен} ведёт на сайт с этим токеном")
 
 
+def test_checklist_time_is_the_restaurants_not_the_servers():
+    """Время чек-листа — астанинское, независимо от часов сервера.
+
+    Render крутится в UTC, а запись шла голым datetime.now(): чек-лист, сданный
+    в 10:47 по Астане, показывался сданным в 05:47. Хуже цифры на экране было
+    другое — по UTC считались и «какой сегодня день» (сутки переворачивались в
+    05:00), и «сколько слотов уже прошло»: филиалу насчитывались пропуски за
+    слоты, которые ещё не наступили, и оценка уезжала вниз.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    utc_naive = _dt.now(_tz.utc).replace(tzinfo=None)
+    off = round((db.local_now() - utc_naive).total_seconds() / 3600)
+    assert off == 5, f"часы ресторана отстают/спешат на {off} ч от UTC, ждали +5"
+
+    _seed()
+    day = db.local_now().date().isoformat()
+    db.save_checklist_upload(ORG_B, day, "10:45", "hall", ["h"], by=MANAGER)
+    row = db.get_checklist_uploads([ORG_B], day)[0]
+    stored = _dt.fromisoformat(row["created_at"])
+    drift = abs((stored - db.local_now()).total_seconds())
+    assert drift < 120, f"в базу записано не время филиала: {row['created_at']}"
+    print("  [OK] время чек-листа — по Астане (UTC+5), а не по часам сервера")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -441,7 +465,8 @@ if __name__ == "__main__":
               test_read_receipt_cannot_be_faked_by_a_stranger,
               test_branch_link_confines_access_regardless_of_telegram_tables,
               test_branch_link_gets_the_branch_board_not_the_owners,
-              test_personal_link_opens_the_site):
+              test_personal_link_opens_the_site,
+              test_checklist_time_is_the_restaurants_not_the_servers):
         print(f"\n>>> {t.__name__}")
         try:
             t()
