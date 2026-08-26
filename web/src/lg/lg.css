@@ -230,8 +230,10 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 .lg-theme:hover{color:var(--hi); transform:translateY(-1px)}
 
 /* ── Шапка ── */
+/* flex-wrap — страховка: длинное имя раздела и плашка филиала на узком экране
+   переносятся, а не распирают страницу в горизонтальную прокрутку. */
 .lg-head{position:relative; display:flex; align-items:flex-end; justify-content:space-between;
-  gap:20px; padding:22px 40px 8px; background:transparent}
+  flex-wrap:wrap; gap:20px; padding:22px 40px 8px; background:transparent}
 .lg-seg{position:relative; display:flex; gap:2px; background:var(--glass-2); border:1px solid var(--hair);
   border-radius:13px; padding:3px}
 .lg-per{position:relative; font:inherit; font-size:12px; color:var(--lo); background:none; border:0;
@@ -253,7 +255,7 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 
 /* ── Переключатель филиалов ── */
 .lg-branch{position:relative}
-.lg-branch-btn{display:inline-flex; align-items:center; gap:8px; font:inherit; font-size:13px; font-weight:600; color:var(--hi); cursor:pointer;
+.lg-branch-btn{display:inline-flex; align-items:center; gap:8px; max-width:100%; min-width:0; font:inherit; font-size:13px; font-weight:600; color:var(--hi); cursor:pointer;
   background:var(--glass-2); border:1px solid var(--hair); border-radius:12px; padding:8px 13px; transition:border-color .15s}
 .lg-branch-btn:hover{border-color:var(--acc)}
 .lg-branch-ic{color:var(--acc); font-size:12px}
@@ -431,6 +433,12 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   .lg-root main>div{padding:16px 14px 120px !important}
   .lg-bento{grid-template-columns:repeat(2,1fr) !important}
   .lg-bento>*{grid-column:span 2 !important}
+  /* Таблицы в карточках. Их в приложении десяток, и почти все — денежные, по
+     5–7 колонок: в 390 px они не влезают ни при каком шрифте и утаскивали за
+     собой всю страницу в горизонтальную прокрутку. Одно правило дешевле, чем
+     обёртка у каждой таблицы: на узком экране таблица скроллится внутри себя. */
+  .glass table{display:block; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch}
+
   .lg-tabbar{display:flex; position:fixed; left:10px; right:10px; bottom:10px; z-index:20; padding:7px;
     justify-content:space-around; border-radius:24px;
     background:var(--card); border:1px solid var(--hair); box-shadow:0 14px 40px -16px rgba(0,0,0,.5)}

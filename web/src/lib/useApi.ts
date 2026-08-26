@@ -32,3 +32,15 @@ export function useApi<T>(path: string, params: Record<string, string> = {}) {
 
   return { data, error, loading }
 }
+
+/** Текущий филиал с подпиской на переключатель.
+
+    getOrg() сам по себе — снимок на момент рендера: экран, который читает его
+    напрямую и ходит в fetch мимо useApi, после смены филиала показывал данные
+    прошлого (а «План» ещё и сохранял правки не в тот филиал). Экранам вне
+    useApi нужен именно этот хук. */
+export function useOrg(): string {
+  const [org, setOrgState] = useState(getOrg())
+  useEffect(() => onOrgChange(() => setOrgState(getOrg())), [])
+  return org
+}

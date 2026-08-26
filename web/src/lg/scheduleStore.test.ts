@@ -1,6 +1,12 @@
 import { getPlan, setShift, removeShift, shiftFor } from './scheduleStore'
+import { setOrg } from '../lib/api'
 
-beforeEach(() => localStorage.clear())
+// Тень графика лежит ПО ФИЛИАЛУ, поэтому филиал нужно выбрать: без него
+// store молчит намеренно — смена без филиала непонятно чья.
+beforeEach(() => {
+  localStorage.clear()
+  setOrg('org-a')
+})
 
 describe('scheduleStore', () => {
   it('пустой план в начале', () => {
@@ -22,5 +28,21 @@ describe('scheduleStore', () => {
     setShift({ employeeId: 'e1', date: '2026-07-20', start: '10:00', end: '18:00' })
     removeShift('e1', '2026-07-20')
     expect(shiftFor('e1', '2026-07-20')).toBeNull()
+  })
+
+  // Ради этого и заводили ключ с org: раньше тень была одна на всё приложение,
+  // владелец переключал филиал — и в сетке оставались чужие смены, а первая же
+  // правка уходила на сервер НЕ того филиала.
+  it('смены не перетекают между филиалами', () => {
+    setShift({ employeeId: 'e1', date: '2026-07-20', start: '10:00', end: '18:00' })
+    setOrg('org-b')
+    expect(getPlan()).toEqual([])
+    expect(shiftFor('e1', '2026-07-20')).toBeNull()
+
+    setShift({ employeeId: 'e1', date: '2026-07-20', start: '14:00', end: '22:00' })
+    expect(shiftFor('e1', '2026-07-20')?.start).toBe('14:00')
+
+    setOrg('org-a')
+    expect(shiftFor('e1', '2026-07-20')?.start).toBe('10:00')
   })
 })

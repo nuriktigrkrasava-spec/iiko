@@ -516,3 +516,91 @@ async def propose_tasks(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"[mountain] Claude не дал формулировки, идём по правилам: {e!r}")
         return fallback
+
+
+# ── «Что изменилось» вместо готовых задач ────────────────────────────────────
+# Владелец пишет задачи сам, а от модели ему нужно другое: короткое наблюдение
+# по филиалу — куда уходят деньги и что поменялось за неделю. Один вызов на всю
+# сеть, потолок ответа маленький, шаблонные обороты запрещены прямо в промпте.
+DIGEST_MAX_TOKENS = int(os.getenv("MOUNTAIN_DIGEST_TOKENS", "900"))
+
+_DIGEST_PROMPT = (
+    "Ты смотришь на показатели филиалов ресторана и говоришь владельцу, ЧТО "
+    "ИЗМЕНИЛОСЬ и куда уходят деньги. Не задачи, не советы «оптимизировать» — "
+    "наблюдение.\n"
+    "Верни СТРОГО JSON-массив: "
+    '[{"branch":"<имя как во входе>","note":"<одно предложение, до 120 знаков>"}]\n'
+    "Правила: называй конкретную цифру; пиши по-русски просто, как сказал бы "
+    "управляющему; если филиал в порядке — так и скажи одной фразой. "
+    "Запрещено: «оптимизировать», «проработать», «взять под контроль», "
+    "«улучшить показатели», «обратить внимание»."
+)
+
+
+def _digest_rows(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Компактная выжимка по филиалу: выручка и её динамика, фудкост, списания,
+    закупки, опоздания. Ровно то, из чего видно «что изменилось»."""
+    rows = []
+    for b in (signals.get("branches") or []):
+        ch = b.get("changes") or {}
+        wo = b.get("writeoffs") or {}
+        fc = b.get("foodcost") or {}
+        lt = b.get("late") or {}
+        rows.append({
+            "branch": b.get("name") or "Филиал",
+            "revenue": round(float(b.get("revenue") or 0)),
+            "revenue_pct": ch.get("revenue_pct"),
+            "check_pct": ch.get("avg_check_pct"),
+            "foodcost": fc.get("fact_pct"),
+            "writeoffs": wo.get("total"),
+            "cancels": b.get("cancels"),
+            "late_pct": lt.get("late_pct"),
+        })
+    return rows
+
+
+async def digest(signals: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """По одному наблюдению на филиал. Без ключа — короткая фраза по правилам."""
+    rows = _digest_rows(signals)
+    if not rows:
+        return []
+
+    def rule(r: Dict[str, Any]) -> str:
+        bits = []
+        if r.get("revenue_pct") is not None:
+            d = float(r["revenue_pct"])
+            bits.append(f"выручка {'выросла' if d >= 0 else 'упала'} на {abs(d):.0f}% к прошлой неделе")
+        if r.get("writeoffs"):
+            bits.append(f"списаний на {round(float(r['writeoffs'])):,} ₸".replace(",", " "))
+        if r.get("late_pct") is not None:
+            bits.append(f"опозданий {float(r['late_pct']):.0f}%")
+        return "; ".join(bits) or "данных за период мало"
+
+    fallback = [{"branch": r["branch"], "note": rule(r)} for r in rows]
+    if _tasks_client is None:
+        return fallback
+    try:
+        table = "\n".join(
+            f'{r["branch"]} | выручка {r["revenue"]} ₸'
+            + (f' ({r["revenue_pct"]:+.0f}% к прошлой неделе)' if r.get("revenue_pct") is not None else "")
+            + (f' | фудкост {r["foodcost"]}%' if r.get("foodcost") else "")
+            + (f' | списания {round(float(r["writeoffs"]))} ₸' if r.get("writeoffs") else "")
+            + (f' | отмены {round(float(r["cancels"]))} ₸' if r.get("cancels") else "")
+            + (f' | опоздания {r["late_pct"]}%' if r.get("late_pct") is not None else "")
+            for r in rows)
+        # Потолок ответа растёт от числа филиалов: на 23 строки фиксированные 900
+        # токенов не хватало, JSON обрывался — и все наблюдения молча падали
+        # в шаблонный фоллбэк.
+        cap = min(4000, 140 * len(rows) + 200)
+        resp = await _tasks_client.messages.create(
+            model=MODEL, max_tokens=max(DIGEST_MAX_TOKENS, cap), system=_DIGEST_PROMPT,
+            messages=[{"role": "user", "content": table}])
+        txt = "".join(getattr(c, "text", "") for c in resp.content).strip()
+        start, end = txt.find("["), txt.rfind("]")
+        parsed = json.loads(txt[start:end + 1]) if start >= 0 and end > start else []
+        by = {str(p.get("branch")): str(p.get("note") or "") for p in parsed if isinstance(p, dict)}
+        return [{"branch": r["branch"], "note": by.get(r["branch"]) or f["note"]}
+                for r, f in zip(rows, fallback)]
+    except Exception as e:
+        print(f"[mountain] дайджест не собрался, идём по правилам: {e!r}")
+        return fallback

@@ -62,7 +62,9 @@ export function Dash() {
   if (loading) return <Note>Собираю выручку…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   const c = data.chart_7days
-  const bars = c.labels.map((l, i) => ({ l, v: +(c.data[i] / 1_000_000).toFixed(2) }))
+  // Полные суммы, а не «0,6 млн»: владелец сравнивает дни между собой, и
+  // округление до сотых миллиона стирает разницу в десятки тысяч.
+  const bars = c.labels.map((l, i) => ({ l, v: Math.round(c.data[i]) }))
   const hiIdx = c.data.indexOf(Math.max(...c.data))
   const avg7 = Math.round(c.data.reduce((a, b) => a + b, 0) / c.data.length)
   return (
@@ -70,7 +72,7 @@ export function Dash() {
       <Glass span={8} spot warp>
         <div style={{ fontSize: 11, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка · {periodLabel()}</div>
         <div className="tnum" style={{ fontSize: 40, fontWeight: 680, letterSpacing: '-.03em', marginTop: 8, display: 'flex', alignItems: 'baseline', gap: 14 }}>{tenge(data.revenue_today)}</div>
-        <Chart html={barChart(bars, hiIdx, 'var(--acc)', ' млн')} />
+        <Chart html={barChart(bars, hiIdx, 'var(--acc)', ' ₸')} />
         <div style={{ fontSize: 12, color: 'var(--mute)', marginTop: 4 }}>Средняя за 7 дней — {tenge(avg7)}</div>
       </Glass>
       <Glass span={4}>
@@ -337,7 +339,13 @@ export function Staff() {
       <Glass span={7}>
         <Eyebrow t="Час-пик по дням недели" hint="за месяц · пиковый час каждого дня · когда ставить больше людей" />
         {hm.data?.cells?.length ? (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7,1fr)', gap: 8, marginTop: 12 }}>
+          <div style={{
+            display: 'grid',
+            // Семь жёстких колонок не ужимались ниже «12:00» и распирали страницу
+            // на телефоне в горизонтальную прокрутку. auto-fit — семь в ряд на
+            // широком экране, 4+3 на узком.
+            gridTemplateColumns: 'repeat(auto-fit,minmax(74px,1fr))', gap: 8, marginTop: 12,
+          }}>
             {perDay.map((x) => {
               const c = x.peakOrders >= maxDayPeak * 0.85 ? 'var(--red)' : x.peakOrders >= maxDayPeak * 0.6 ? 'var(--amb)' : 'var(--hi)'
               return (

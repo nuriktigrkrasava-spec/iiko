@@ -507,8 +507,16 @@ def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def _ensure_app_state(conn):
+    """Таблица создаётся в init_db, но app_state читают и фоновые задачи, и
+    миграции — а они могут стартовать раньше. Без этого «no such table»."""
+    conn.execute("CREATE TABLE IF NOT EXISTS app_state ("
+                 "key TEXT PRIMARY KEY, value TEXT)")
+
+
 def get_app_state(key: str) -> Optional[str]:
     conn = get_db()
+    _ensure_app_state(conn)
     row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
     conn.close()
     return row["value"] if row else None
@@ -516,6 +524,7 @@ def get_app_state(key: str) -> Optional[str]:
 
 def set_app_state(key: str, value: str):
     conn = get_db()
+    _ensure_app_state(conn)
     conn.execute(
         "INSERT INTO app_state (key, value) VALUES (?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -686,6 +695,356 @@ def get_weekly_plans(org_id: str, ym: str) -> List[Dict[str, Any]]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Дневной план недели (вкладка «План» = таблица владельца) ──
+# Неделя ISO ('2026-W35' — та самая «Неделя 35»), день недели 1..7 (Пн..Вс),
+# канал hall | delivery | agg. Старая weekly_plans (план на неделю целиком)
+# осталась: на ней стоит похвала ассистента «план недели выполнен».
+def _ensure_week_plan_day(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS week_plan_day (
+        organization_id TEXT NOT NULL,
+        iso_week TEXT NOT NULL,      -- 'YYYY-Www'
+        dow INTEGER NOT NULL,        -- 1..7, понедельник первый
+        ch_type TEXT NOT NULL,       -- 'hall' | 'delivery' | 'agg'
+        planned INTEGER NOT NULL,    -- план по КОЛИЧЕСТВУ заказов
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, iso_week, dow, ch_type)
+    )""")
+
+
+def set_day_plan(org_id: str, iso_week: str, dow: int, ch_type: str, planned: int):
+    conn = get_db()
+    _ensure_week_plan_day(conn)
+    conn.execute(
+        """INSERT INTO week_plan_day (organization_id, iso_week, dow, ch_type, planned, updated_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(organization_id, iso_week, dow, ch_type)
+           DO UPDATE SET planned = excluded.planned, updated_at = excluded.updated_at""",
+        (org_id, iso_week, int(dow), ch_type, int(planned), datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def set_day_plans(cells: List[Dict[str, Any]]):
+    """Пачкой — «поставить план на всю неделю по средней»: одна транзакция
+    вместо двадцати одного запроса подряд."""
+    conn = get_db()
+    _ensure_week_plan_day(conn)
+    now = datetime.now().isoformat()
+    conn.executemany(
+        """INSERT INTO week_plan_day (organization_id, iso_week, dow, ch_type, planned, updated_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(organization_id, iso_week, dow, ch_type)
+           DO UPDATE SET planned = excluded.planned, updated_at = excluded.updated_at""",
+        [(c["org"], c["week"], int(c["dow"]), c["ch_type"], int(c["planned"]), now) for c in cells])
+    conn.commit()
+    conn.close()
+
+
+def get_day_plans(org_ids: List[str], iso_week: str) -> Dict[str, Dict[int, Dict[str, int]]]:
+    """{org: {dow: {ch_type: planned}}} за одну неделю по всем филиалам сразу."""
+    if not org_ids:
+        return {}
+    conn = get_db()
+    _ensure_week_plan_day(conn)
+    rows = conn.execute(
+        f"SELECT organization_id, dow, ch_type, planned FROM week_plan_day "
+        f"WHERE iso_week = ? AND organization_id IN ({','.join('?' * len(org_ids))})",
+        [iso_week] + list(org_ids)).fetchall()
+    conn.close()
+    out: Dict[str, Dict[int, Dict[str, int]]] = {}
+    for r in rows:
+        out.setdefault(r["organization_id"], {}).setdefault(int(r["dow"]), {})[r["ch_type"]] = int(r["planned"])
+    return out
+
+
+# ── Снимок факта заказов по дням (для вкладки «План») ──
+# Факт берётся из iiko OLAP, но ЗАКРЫТЫЙ день больше не меняется — тянуть его
+# заново при каждом открытии вкладки незачем: девять филиалов на девяти
+# серверах, это десятки секунд на ровном месте. Ночью день закрывается и
+# ложится сюда, дальше вкладка читает базу.
+def _ensure_plan_day_facts(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS plan_day_facts (
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,              -- 'YYYY-MM-DD'
+        ch_type TEXT NOT NULL,          -- hall / delivery / agg
+        orders INTEGER NOT NULL,
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, day, ch_type)
+    )""")
+
+
+def drop_plan_day_facts():
+    """Выбрасывает снимок факта целиком. Нужен при смене классификатора
+    каналов: строки, посчитанные по старому правилу, нельзя сравнивать с
+    новыми — «эта неделя против прошлой» тихо смешала бы два разных смысла.
+    Данные восстановимы из iiko, поэтому чистим без сожалений."""
+    conn = get_db()
+    _ensure_plan_day_facts(conn)
+    conn.execute("DELETE FROM plan_day_facts")
+    conn.commit()
+    conn.close()
+
+
+def save_plan_day_facts(org_id: str, days: Dict[str, Dict[str, int]]):
+    """{день: {канал: заказов}} → в базу. Перезапись осознанная: iiko может
+    поправить закрытый день задним числом (возвраты, перепробитие смены),
+    и снимок должен догонять, а не спорить."""
+    if not days:
+        return
+    conn = get_db()
+    _ensure_plan_day_facts(conn)
+    now = datetime.now().isoformat()
+    conn.executemany(
+        """INSERT INTO plan_day_facts (organization_id, day, ch_type, orders, updated_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(organization_id, day, ch_type)
+           DO UPDATE SET orders = excluded.orders, updated_at = excluded.updated_at""",
+        [(org_id, day, ch, int(n), now)
+         for day, cells in days.items() for ch, n in cells.items()])
+    conn.commit()
+    conn.close()
+
+
+def get_plan_day_facts(org_id: str, d_from: str, d_to: str) -> Dict[str, Dict[str, int]]:
+    """{день: {канал: заказов}} за период по одному филиалу."""
+    conn = get_db()
+    _ensure_plan_day_facts(conn)
+    rows = conn.execute(
+        "SELECT day, ch_type, orders FROM plan_day_facts "
+        "WHERE organization_id = ? AND day >= ? AND day <= ?",
+        (org_id, d_from, d_to)).fetchall()
+    conn.close()
+    out: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        out.setdefault(r["day"], {})[r["ch_type"]] = int(r["orders"])
+    return out
+
+
+# ── История оценок филиалов ──
+# Оценка считается каждую ночь и складывается сюда. Нужна для двух вещей:
+# вторничной средней за неделю и динамики «было 44 — стало 61». Без истории
+# оценка была мгновенным снимком, по которому нельзя понять, стало лучше или хуже.
+def _ensure_branch_scores(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS branch_scores (
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,              -- 'YYYY-MM-DD'
+        score INTEGER,                  -- NULL = в тот день данных не хватило
+        counted INTEGER,                -- сколько критериев посчиталось
+        criteria TEXT,                  -- JSON разбора, чтобы видеть, что просело
+        PRIMARY KEY (organization_id, day)
+    )""")
+
+
+def save_branch_score(org_id: str, day: str, score: Optional[int],
+                      counted: int = 0, criteria: Optional[List[Dict[str, Any]]] = None):
+    conn = get_db()
+    _ensure_branch_scores(conn)
+    conn.execute("INSERT OR REPLACE INTO branch_scores "
+                 "(organization_id, day, score, counted, criteria) VALUES (?,?,?,?,?)",
+                 (org_id, day, score, int(counted), json.dumps(criteria or [], ensure_ascii=False)))
+    conn.commit()
+    conn.close()
+
+
+def get_branch_scores(org_ids: List[str], day_from: str, day_to: str) -> Dict[str, List[Dict[str, Any]]]:
+    """{org: [{day, score}, …]} за период, по возрастанию дат."""
+    if not org_ids:
+        return {}
+    conn = get_db()
+    _ensure_branch_scores(conn)
+    rows = conn.execute(
+        f"SELECT organization_id, day, score, counted FROM branch_scores "
+        f"WHERE day BETWEEN ? AND ? AND organization_id IN ({','.join('?' * len(org_ids))}) "
+        f"ORDER BY day", [day_from, day_to] + list(org_ids)).fetchall()
+    conn.close()
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for r in rows:
+        out.setdefault(r["organization_id"], []).append(
+            {"day": r["day"], "score": r["score"], "counted": r["counted"]})
+    return out
+
+
+def branch_score_average(org_ids: List[str], day_from: str, day_to: str) -> Dict[str, Dict[str, Any]]:
+    """Средняя оценка за период по филиалам. Дни без оценки в среднее не идут:
+    иначе филиал, у которого один день не собрался, «падал» без причины."""
+    hist = get_branch_scores(org_ids, day_from, day_to)
+    out: Dict[str, Dict[str, Any]] = {}
+    for org, rows in hist.items():
+        vals = [r["score"] for r in rows if r["score"] is not None]
+        if not vals:
+            continue
+        out[org] = {"avg": round(sum(vals) / len(vals)), "days": len(vals),
+                    "last": vals[-1], "first": vals[0]}
+    return out
+
+
+# ── Смены персонала: эталон старта, график и опоздания ──
+# Факт (во сколько пришёл) живёт в iiko, у нас — только то, чего там нет:
+# с чем сравнивать, что уже посчитано и о чём уже написали в телеграм.
+def _ensure_staff_shifts(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS branch_shift_starts (
+        organization_id TEXT NOT NULL,
+        kind TEXT NOT NULL,             -- 'morning' | 'evening'
+        start_time TEXT NOT NULL,       -- 'HH:MM'
+        PRIMARY KEY (organization_id, kind)
+    );
+    CREATE TABLE IF NOT EXISTS branch_shift_grace (
+        organization_id TEXT PRIMARY KEY,
+        grace_min INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS staff_schedule (
+        organization_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        day TEXT NOT NULL,              -- 'YYYY-MM-DD'
+        start_time TEXT NOT NULL,
+        end_time TEXT,
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, employee_id, day)
+    );
+    CREATE TABLE IF NOT EXISTS staff_late (
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        name TEXT,
+        planned TEXT,
+        arrival TEXT,
+        late_min INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (organization_id, day, employee_id)
+    );
+    CREATE TABLE IF NOT EXISTS staff_late_notified (
+        organization_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        sent_at TEXT,
+        PRIMARY KEY (organization_id, day, employee_id)
+    );
+    """)
+
+
+def get_shift_starts(org_id: str) -> Dict[str, Any]:
+    """Эталон старта смен филиала. Пусто — значит филиал ещё не настраивали:
+    решение, чем это заменить, принимает вызывающий (см. staff_late.DEFAULT_STARTS)."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute("SELECT kind, start_time FROM branch_shift_starts "
+                        "WHERE organization_id = ? ORDER BY start_time", (org_id,)).fetchall()
+    g = conn.execute("SELECT grace_min FROM branch_shift_grace WHERE organization_id = ?",
+                     (org_id,)).fetchone()
+    conn.close()
+    return {"starts": [{"kind": r["kind"], "time": r["start_time"]} for r in rows],
+            "grace_min": int(g["grace_min"]) if g else None}
+
+
+def set_shift_starts(org_id: str, starts: List[Dict[str, str]],
+                     grace_min: Optional[int] = None):
+    """Перезаписывает набор стартов целиком: их два-три, редактируются вместе."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("DELETE FROM branch_shift_starts WHERE organization_id = ?", (org_id,))
+    for s in starts:
+        if s.get("time"):
+            conn.execute("INSERT OR REPLACE INTO branch_shift_starts "
+                         "(organization_id, kind, start_time) VALUES (?,?,?)",
+                         (org_id, s.get("kind") or s["time"], s["time"]))
+    if grace_min is not None:
+        conn.execute("INSERT OR REPLACE INTO branch_shift_grace (organization_id, grace_min) "
+                     "VALUES (?,?)", (org_id, max(0, int(grace_min))))
+    conn.commit()
+    conn.close()
+
+
+def get_staff_schedule(org_id: str, day_from: str, day_to: str) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute(
+        "SELECT employee_id, day, start_time, end_time FROM staff_schedule "
+        "WHERE organization_id = ? AND day BETWEEN ? AND ?", (org_id, day_from, day_to)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_staff_shift(org_id: str, employee_id: str, day: str, start: str, end: str = ""):
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("INSERT OR REPLACE INTO staff_schedule "
+                 "(organization_id, employee_id, day, start_time, end_time, updated_at) "
+                 "VALUES (?,?,?,?,?,?)",
+                 (org_id, employee_id, day, start, end or "", datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def remove_staff_shift(org_id: str, employee_id: str, day: str):
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("DELETE FROM staff_schedule WHERE organization_id = ? AND employee_id = ? "
+                 "AND day = ?", (org_id, employee_id, day))
+    conn.commit()
+    conn.close()
+
+
+def save_staff_late(org_id: str, rows: List[Dict[str, Any]]):
+    """Кладём посчитанные приходы, чтобы оценка филиала не ходила в iiko заново.
+    Строки без эталона ('noplan') не храним — они ничего не значат."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    for r in rows:
+        if r.get("status") not in ("late", "ontime"):
+            continue
+        conn.execute("INSERT OR REPLACE INTO staff_late "
+                     "(organization_id, day, employee_id, name, planned, arrival, late_min) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (org_id, r["date"], r["employee_id"], r.get("name") or "",
+                      r.get("planned") or "", r.get("arrival") or "", int(r.get("late_min") or 0)))
+    conn.commit()
+    conn.close()
+
+
+def staff_late_progress(org_ids: List[str], day_from: str, day_to: str) -> Dict[str, Dict[str, Any]]:
+    """Опоздания сотрудников за период по филиалам — для оценки филиала.
+    Филиал без единой посчитанной явки в ответ не попадает: критерий выпадает,
+    а не обнуляет оценку."""
+    if not org_ids:
+        return {}
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute(
+        f"SELECT organization_id, COUNT(*) AS total, "
+        f"       SUM(CASE WHEN late_min > 0 THEN 1 ELSE 0 END) AS late, "
+        f"       SUM(late_min) AS minutes "
+        f"FROM staff_late WHERE day BETWEEN ? AND ? AND organization_id IN "
+        f"({','.join('?' * len(org_ids))}) GROUP BY organization_id",
+        [day_from, day_to] + list(org_ids)).fetchall()
+    conn.close()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        total, late = int(r["total"] or 0), int(r["late"] or 0)
+        if not total:
+            continue
+        out[r["organization_id"]] = {"total": total, "late": late,
+                                     "late_pct": round(late / total * 100, 1),
+                                     "late_minutes": int(r["minutes"] or 0)}
+    return out
+
+
+def mark_late_notified(org_id: str, day: str, employee_id: str) -> bool:
+    """True — отметили впервые (можно слать). False — уже писали, второй раз не надо.
+    Гонки нет: PRIMARY KEY делает вставку атомарной."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    try:
+        conn.execute("INSERT INTO staff_late_notified "
+                     "(organization_id, day, employee_id, sent_at) VALUES (?,?,?,?)",
+                     (org_id, day, employee_id, datetime.now().isoformat()))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
 
 
 # ── Трекер задач из бота: кто отметил выполнение, кто нет ──
@@ -1602,6 +1961,19 @@ def get_branch_notices(org_ids: Optional[List[str]] = None, reader: int = 0,
     rows = conn.execute(q + " ORDER BY n.id DESC LIMIT ?", args + [int(limit)]).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def notice_is_for(notice_id: int, org_ids: List[str]) -> bool:
+    """Адресовано ли сообщение хоть одному из этих филиалов. Пустой
+    organization_id — сообщение всем, оно годится любому филиалу."""
+    conn = get_db()
+    _ensure_notices(conn)
+    row = conn.execute("SELECT COALESCE(organization_id,'') FROM branch_notices WHERE id = ?",
+                       (int(notice_id),)).fetchone()
+    conn.close()
+    if row is None:
+        return False
+    return row[0] == "" or row[0] in set(org_ids)
 
 
 def mark_notice_read(notice_id: int, telegram_id: int):

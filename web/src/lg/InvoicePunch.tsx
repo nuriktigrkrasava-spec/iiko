@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { getOrg, getBranches } from '../lib/api'
+import { getBranches } from '../lib/api'
+import { useOrg } from '../lib/useApi'
 import { tenge } from '../lib/format'
 
 /* «Пробить накладную» — весь путь на сайте, без телеграма:
@@ -169,7 +170,7 @@ function ProductPicker({ org, onPick }: { org: string; onPick: (p: Product) => v
 
 export default function InvoicePunch() {
   const input = useRef<HTMLInputElement>(null)
-  const org = getOrg()
+  const org = useOrg()
   const [branch, setBranch] = useState('')
   const [busy, setBusy] = useState(false)
   const [rec, setRec] = useState<Recognized | null>(null)

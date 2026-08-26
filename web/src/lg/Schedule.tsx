@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Glass } from './ui'
-import { useApi } from '../lib/useApi'
+import { useApi, useOrg } from '../lib/useApi'
 import { comparePlanFact } from './scheduleCalc'
 import type { Fact, Shift } from './scheduleCalc'
-import { setShift, removeShift, shiftFor } from './scheduleStore'
+import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
 
 /* Расписание: план (расписание) — наш localStorage, факт (явки) — из iiko через
    /api/attendance. Экран составляет план с телефона и кладёт факт рядом. */
@@ -80,6 +80,18 @@ export default function Schedule() {
 
   const days = useMemo(() => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)), [weekStart])
   const { data, error, loading } = useApi<Att>('attendance', { from: iso(days[0]), to: iso(days[6]) })
+
+  // График теперь общий (лежит на сервере): подтягиваем неделю при её смене
+  // И при смене филиала. По нему же считаются опоздания, поэтому важно видеть
+  // чужие правки, а не только свои — раньше расписание жило в localStorage и
+  // было у каждого своё. Без org в зависимостях переключение филиала оставляло
+  // в сетке чужой график, и первая правка уходила на сервер не в тот филиал.
+  const org = useOrg()
+  useEffect(() => {
+    if (!org) return
+    syncPlan(iso(days[0]), iso(days[6])).then(bump)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [org, weekStart])
 
   const factMap = useMemo(() => {
     const m: Record<string, Row> = {}

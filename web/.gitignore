@@ -8,7 +8,10 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+# dist ПОПАДАЕТ в репозиторий намеренно: сервис на Render — Python-окружение
+# без Node, собирать фронт там нечем. Пересобирать перед каждым деплоем:
+#   cd web && npm run build
+!dist
 dist-ssr
 *.local
 

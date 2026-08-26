@@ -38,9 +38,40 @@ from database import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ── Гора: 40 отметок по 25 баллов ────────────────────────────────────────────
-STEP_POINTS = int(os.getenv("MOUNTAIN_STEP", "25"))
+# ── Гора: 40 отметок по 10 баллов, вершина — 400 ─────────────────────────────
+# Считано по потолку месяца: идеальные чек-листы дают 360 баллов, задачи ещё
+# 100–400. При прежней вершине в 1000 её не достигал никто и никогда — цель, до
+# которой нельзя дойти, азарта не создаёт. 400 берётся месяцем очень хорошей
+# работы, но не даром.
+STEP_POINTS = int(os.getenv("MOUNTAIN_STEP", "10"))
 STEPS = int(os.getenv("MOUNTAIN_STEPS", "40"))
+
+# Путь наверх — не сплошная линейка, а участки с именами: видно, где ты и что
+# следующее. Порог — в баллах, подъём идёт слева направо змейкой (см. фронт).
+STAGES = [
+    (0,   "Подножие"),
+    (80,  "Тропа"),
+    (160, "Первый лагерь"),
+    (240, "Скальный пояс"),
+    (320, "Штурмовой лагерь"),
+    (400, "Вершина"),
+]
+
+
+def _stage(points: int) -> Dict[str, Any]:
+    """Участок пути и сколько до следующего — чтобы подъём читался этапами."""
+    points = max(0, points)          # минус по баллам — это подножие, а не вершина
+    cur = STAGES[0]
+    nxt = STAGES[1] if len(STAGES) > 1 else None
+    for i, (need, name) in enumerate(STAGES):
+        if points >= need:
+            cur = (need, name)
+            nxt = STAGES[i + 1] if i + 1 < len(STAGES) else None
+    return {"name": cur[1], "from": cur[0],
+            "next": nxt[1] if nxt else None,
+            "to_next": max(0, nxt[0] - points) if nxt else 0,
+            "index": [n for n, _ in STAGES].index(cur[0]),
+            "count": len(STAGES)}
 CHECKLIST_POINT = 1        # сданный слот
 CHECKLIST_PENALTY = -1     # пропущенный
 
@@ -120,6 +151,8 @@ def _level(points: int) -> Dict[str, Any]:
     step = max(0, min(STEPS, points // STEP_POINTS))
     return {"step": step, "steps": STEPS,
             "height_pct": round(step / STEPS * 100, 1),
+            "summit": STEPS * STEP_POINTS,
+            "stage": _stage(points),
             "to_next": max(0, (step + 1) * STEP_POINTS - points) if step < STEPS else 0}
 
 
@@ -132,26 +165,167 @@ def _checklist_points_own(prog: Dict[str, Dict[str, int]], org: str) -> Dict[str
             "points": done * CHECKLIST_POINT - missed * abs(CHECKLIST_PENALTY)}
 
 
-def _signals_by_branch(uid: int) -> Dict[str, Dict[str, Any]]:
-    """Показатели филиалов из кэша ассистента. Только из кэша: сбор идёт по всем
-    филиалам и стоит минуты, доска не должна его запускать. Кэш наполняет кнопка
-    «Предложить задачи» и живёт 12 часов."""
+# Показатели для ОЦЕНКИ филиала доска собирает сама. Раньше она читала кэш
+# ассистента: пока никто не нажал «Обновить», критериев не было, вес уходил на
+# двух выживших — и филиал получал 100 из 100 по выручке и списаниям. Кэш на
+# час: сбор по девяти филиалам идёт десятки секунд, на каждый заход его не гоняем.
+SCORE_TTL = timedelta(hours=1)
+_score_key = lambda uid: "mountain-score:%d" % int(uid)
+
+
+async def _collect_score_signals(uid: int, branches: List[Dict[str, str]]) -> Dict[str, Dict[str, Any]]:
+    """Динамика выручки и заказов, опоздания доставок и опоздания сотрудников —
+    по каждому филиалу. Сбой одного филиала не роняет остальные."""
+    import asyncio as _aio
     import api
-    cached = api._get_cached(api._cache_key(uid, "mountain-signals", "all", "month"),
-                             ttl=api.ASSISTANT_TTL)
-    if not cached:
-        return {}
-    return {b.get("name"): b for b in (cached.get("branches") or []) if b.get("name")}
+    month_from = _month_start()[:10]
+    today = datetime.now().date().isoformat()
+    sem = _aio.Semaphore(4)
+
+    async def one(b: Dict[str, str]):
+        org = b["organization_id"]
+        # Креды — ПО ФИЛИАЛУ: у управляющего своих ресторанов нет, и запрос от
+        # его имени подставил бы демо-клиента (грабли из 234.md).
+        owner = api._owner_user_of(org)
+        if not owner:
+            return b["name"], None
+        sig: Dict[str, Any] = {}
+        async with sem:
+            try:
+                sig["changes"] = await api._week_over_week(org, owner)
+            except Exception as e:
+                logger.warning(f"[score] дельты {b['name']}: {e!r}")
+            try:
+                sig["late"] = api._late_signal(
+                    await api.late_deliveries(org, "month", None, None, 1, owner))
+            except Exception as e:
+                logger.warning(f"[score] опоздания заказов {b['name']}: {e!r}")
+            try:
+                sig["rating"] = api._rating_signal(await api.branch_reviews(org, owner))
+            except Exception as e:
+                logger.warning(f"[score] рейтинги {b['name']}: {e!r}")
+            try:
+                sig["shifts"] = api._shifts_signal(
+                    await api.cashshifts_pending(org, 30, owner))
+            except Exception as e:
+                logger.warning(f"[score] непринятые смены {b['name']}: {e!r}")
+            try:
+                sig["plan"] = await api._plan_exec_signal(org, owner)
+            except Exception as e:
+                logger.warning(f"[score] выполнение плана {b['name']}: {e!r}")
+            try:
+                # Заодно наполняет staff_late в базе — экран и уведомления
+                # читают уже посчитанное, а не ходят в iiko второй раз.
+                sl = await api._staff_late_for(org, org, month_from, today, owner)
+                # Филиал, который не задал свой старт смены, судим по общему
+                # 09:00/16:00 — а он почти всегда не тот (Алиева открывается в
+                # 11:00). Такой критерий не «ноль», а молчание: иначе оценка
+                # падает не за опоздания, а за ненастроенность.
+                if sl and sl["configured"] and sl["summary"]["total"]:
+                    sig["staff_late"] = sl["summary"]
+            except Exception as e:
+                logger.warning(f"[score] опоздания сотрудников {b['name']}: {e!r}")
+        return b["name"], sig
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for name, sig in await _aio.gather(*(one(b) for b in branches)):
+        if sig is not None:
+            out[name] = sig
+    api._set_cached(_score_key(uid), out, ttl=SCORE_TTL)
+    return out
 
 
-def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _signals_by_branch(uid: int) -> Dict[str, Dict[str, Any]]:
+    """Готовые показатели из кэша. Пусто — значит сбор ещё не проходил."""
+    import api
+    return api._get_cached(_score_key(uid), ttl=SCORE_TTL) or {}
+
+
+def _owner_of(org_id: str) -> int:
+    """Кому принадлежит филиал. Нужен, чтобы управляющий видел рейтинг СВОЕЙ
+    сети, а не всех клиентов платформы."""
+    from database import get_db
+    conn = get_db()
+    row = conn.execute("SELECT telegram_id FROM restaurants WHERE organization_id = ? LIMIT 1",
+                       (org_id,)).fetchone()
+    conn.close()
+    return int(row[0]) if row and row[0] else 0
+
+
+def _all_branches(owner_uid: int) -> List[Dict[str, str]]:
+    """Точки сети ОДНОГО владельца (без служебных организаций).
+
+    Раньше здесь был SELECT по всей таблице restaurants — она многоарендная, и
+    в рейтинг попал бы чужой клиент, у которого филиал назван «Астана…».
+    Дедуплицируем по organization_id: одна точка бывает заведена под разными
+    аккаунтами и иначе появлялась на горе дважды.
+    """
+    from database import get_db
+    conn = get_db()
+    rows = conn.execute("SELECT organization_id, organization_name FROM restaurants "
+                        "WHERE telegram_id = ?", (int(owner_uid),)).fetchall()
+    conn.close()
+    seen: Dict[str, str] = {}
+    for org, name in rows:
+        if org and org not in seen and _is_branch(name or ""):
+            seen[org] = name or ""
+    return [{"organization_id": o, "name": n} for o, n in seen.items()]
+
+
+def _network_ranking(owner_uid: int) -> List[Dict[str, Any]]:
+    """Место каждого филиала сети по баллам месяца. Считается по базе, без iiko."""
+    from database import checklist_progress
+    branches = _all_branches(owner_uid)
+    orgs = [b["organization_id"] for b in branches]
+    tasks = get_branch_tasks(orgs, since=_month_start())
+    now_hm = datetime.now().strftime("%H:%M")
+    passed = sum(1 for sl in SLOTS if sl <= now_hm)
+    prog = checklist_progress(orgs, _month_start()[:10],
+                              datetime.now().date().isoformat(), slots_passed_today=passed)
+    out = []
+    for b in branches:
+        org = b["organization_id"]
+        done = [t for t in tasks if t["organization_id"] == org and t["status"] == "done"]
+        ch = _checklist_points_own(prog, org)
+        pts = sum(int(t["points"] or 0) for t in done) + ch["points"]
+        out.append({**b, "points": pts, "level": _level(pts), "tasks_done": len(done)})
+    out.sort(key=lambda r: -r["points"])
+    for i, r in enumerate(out):
+        r["place"] = i + 1
+    return out
+
+
+def _ranking_with_scores(ranking: List[Dict[str, Any]],
+                         signals: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Дописывает в рейтинг оценку каждого филиала.
+
+    Управляющему нужен именно этот срез: сравнить себя с другими одним
+    взглядом. Разбор по критериям в рейтинге не даём — чужие слабые места
+    его не касаются, да и владелец их видит у себя.
+    """
+    from database import checklist_progress
+    orgs = [r["organization_id"] for r in ranking]
+    now_hm = datetime.now().strftime("%H:%M")
+    passed = sum(1 for sl in SLOTS if sl <= now_hm)
+    prog = checklist_progress(orgs, _month_start()[:10],
+                              datetime.now().date().isoformat(), slots_passed_today=passed)
+    out = []
+    for r in ranking:
+        ch = _checklist_points_own(prog, r["organization_id"])
+        sc = S.score_branch(signals.get(r["name"]), ch)
+        out.append({**r, "score": sc["score"], "counted": sc.get("counted")})
+    return out
+
+
+def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
+               signals: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     sc = _scope(uid)
     if not sc["role"]:
         return {"error": "нет доступа"}
     orgs = [b["organization_id"] for b in sc["branches"]]
     tasks = get_branch_tasks(orgs, since=_month_start())
     journals = journals or {}
-    signals = _signals_by_branch(uid)      # пусто, пока не считали задачи — это нормально
+    signals = _signals_by_branch(uid) if signals is None else signals
     from database import checklist_progress
     now_hm = datetime.now().strftime("%H:%M")
     passed = sum(1 for sl in SLOTS if sl <= now_hm)      # какие слоты уже прошли сегодня
@@ -177,19 +351,133 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None) -> Dict[str,
             **S.score_branch(signals.get(b["name"]), ch),
         })
     rows.sort(key=lambda r: -r["points"])
+
+    # Рейтинг сети виден ВСЕМ, включая управляющих: соревнование без чужих
+    # результатов не работает. Задачи и чек-листы при этом остаются своими.
+    owner_uid = uid if sc["role"] == "owner" else _owner_of(orgs[0] if orgs else "")
+    ranking = _ranking_with_scores(_network_ranking(owner_uid), signals)
     return {"role": sc["role"], "month": datetime.now().strftime("%Y-%m"),
+            "ranking": ranking,
+            # true — показатели ещё собираются, оценка появится через минуту
+            "score_pending": not signals,
             "scale": {"tasks": TASK_POINTS, "checklist_done": CHECKLIST_POINT,
                       "checklist_missed": CHECKLIST_PENALTY,
                       "step_points": STEP_POINTS, "steps": STEPS},
             "branches": rows}
 
 
-@router.get("/api/mountain/data/{token}")
-async def mountain_data(token: str):
+async def recompute_all_scores() -> int:
+    """Ночной пересчёт оценок по всем владельцам сети. Кладёт снимок дня в
+    branch_scores — из него потом растут вторничная средняя и динамика.
+
+    Считаем по владельцам, а не по филиалам: кэш показателей ключуется на uid,
+    и один проход на владельца греет его же доску.
+    """
+    from database import get_db, save_branch_score
+    import api
+    conn = get_db()
+    uids = [int(r[0]) for r in conn.execute(
+        "SELECT DISTINCT telegram_id FROM restaurants WHERE telegram_id IS NOT NULL").fetchall()]
+    conn.close()
+    day = datetime.now().date().isoformat()
+    saved = 0
+    for uid in uids:
+        sc = _scope(uid)
+        if sc["role"] != "owner" or not sc["branches"]:
+            continue
+        try:
+            signals = await _collect_score_signals(uid, sc["branches"])
+        except Exception as e:
+            logger.warning(f"[scores] сбор для {uid}: {e!r}")
+            continue
+        board = _board_for(uid, signals=signals)
+        for b in board.get("branches") or []:
+            save_branch_score(b["organization_id"], day, b.get("score"),
+                              b.get("counted") or 0, b.get("criteria"))
+            saved += 1
+    return saved
+
+
+def weekly_score_lines(orgs: List[Dict[str, str]]) -> List[str]:
+    """Строки вторничной сводки: средняя за 7 дней, место и куда движется.
+
+    Отдельной функцией, чтобы её можно было проверить тестом, не поднимая
+    ни телеграма, ни планировщика.
+    """
+    from database import branch_score_average
+    ids = [b["organization_id"] for b in orgs]
+    today = datetime.now().date()
+    cur = branch_score_average(ids, (today - timedelta(days=7)).isoformat(), today.isoformat())
+    prev = branch_score_average(ids, (today - timedelta(days=14)).isoformat(),
+                                (today - timedelta(days=8)).isoformat())
+    rows = [(b["name"], cur[b["organization_id"]]) for b in orgs if b["organization_id"] in cur]
+    rows.sort(key=lambda r: -r[1]["avg"])
+    out = []
+    for i, (name, c) in enumerate(rows, 1):
+        org = next(b["organization_id"] for b in orgs if b["name"] == name)
+        was = (prev.get(org) or {}).get("avg")
+        delta = "" if was is None else (f" ({c['avg'] - was:+d} к прошлой неделе)" if c["avg"] != was
+                                        else " (без изменений)")
+        out.append(f"{i}. <b>{name}</b> — {c['avg']} из 100{delta}")
+    return out
+
+
+@router.get("/api/mountain/scores/{token}")
+async def mountain_scores(token: str, days: int = 30):
+    """История оценок: график динамики на доске. Управляющему — только его филиал."""
+    from database import get_branch_scores
     uid = uid_from_token(token)
     if not uid:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    return JSONResponse(_board_for(uid))
+    sc = _scope(uid)
+    orgs = [b["organization_id"] for b in sc["branches"]]
+    today = datetime.now().date()
+    hist = get_branch_scores(orgs, (today - timedelta(days=max(1, days))).isoformat(),
+                             today.isoformat())
+    from database import branch_score_average
+    avg = branch_score_average(orgs, (today - timedelta(days=7)).isoformat(), today.isoformat())
+    return JSONResponse({"branches": [
+        {**b, "history": hist.get(b["organization_id"]) or [],
+         "week_avg": (avg.get(b["organization_id"]) or {}).get("avg")}
+        for b in sc["branches"]]})
+
+
+@router.get("/api/mountain/whoami/{token}")
+async def whoami(token: str):
+    """Кто пришёл по ссылке. Лёгкий запрос: шапке сайта нужна только роль,
+    гонять ради неё всю доску (задачи, чек-листы, рейтинг) незачем."""
+    uid = uid_from_token(token)
+    if not uid:
+        return JSONResponse({"role": None}, status_code=404)
+    sc = _scope(uid)
+    return JSONResponse({"role": sc["role"],
+                         "branch": sc["branches"][0]["name"] if sc["branches"] else ""})
+
+
+@router.get("/api/mountain/data/{token}")
+async def mountain_data(token: str, refresh: int = 0):
+    """Доска. Оценка считается из кэша показателей; если его нет — доска
+    отдаётся сразу, а сбор уходит в фон (score_pending=true). Ждать минуту с
+    белым экраном ради числа в кружке нельзя. refresh=1 — считать сейчас."""
+    import asyncio as _aio
+    uid = uid_from_token(token)
+    if not uid:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    sc = _scope(uid)
+    orgs = [b["organization_id"] for b in sc["branches"]]
+    # Показатели ключуем на ВЛАДЕЛЬЦА сети, а не на того, кто открыл ссылку.
+    # Управляющему нужны оценки чужих филиалов (сравнить себя одним взглядом),
+    # а его собственный кэш знал бы только про его точку. Заодно ночной
+    # пересчёт греет кэш сразу и для управляющих.
+    owner_uid = uid if sc["role"] == "owner" else _owner_of(orgs[0] if orgs else "")
+    network = _all_branches(owner_uid) if owner_uid else sc["branches"]
+    signals = _signals_by_branch(owner_uid or uid)
+    if not signals and network:
+        if refresh:
+            signals = await _collect_score_signals(owner_uid or uid, network)
+        else:
+            _aio.create_task(_collect_score_signals(owner_uid or uid, network))
+    return JSONResponse(_board_for(uid, signals=signals))
 
 
 class AssignPayload(BaseModel):
@@ -379,7 +667,7 @@ async def acts_salmon_calc(token: str, payload: SalmonPayload):
 # Уведомление живёт на сайте, а не в чате: управляющий и так открывает «Гору»
 # каждый день ради задач и чек-листов. Владелец видит, кто прочитал.
 from database import (add_branch_notice, get_branch_notices, mark_notice_read,
-                      notice_read_stats)
+                      notice_is_for, notice_read_stats)
 
 
 class NoticePayload(BaseModel):
@@ -428,9 +716,19 @@ async def notices_list(token: str):
 
 @router.post("/api/mountain/notice/{token}/read/{notice_id}")
 async def notice_read(token: str, notice_id: int):
+    """Отметка «прочитал». Подписи токена мало: владелец по этой отметке судит,
+    дошло ли сообщение до филиала. Раньше любой подписанный uid — в том числе
+    без роли вообще — мог отметить ЛЮБОЕ сообщение, и счётчик «прочитали N»
+    показывал больше, чем есть управляющих. Пускаем только адресата."""
     uid = uid_from_token(token)
     if not uid:
         return JSONResponse({"error": "bad token"}, status_code=404)
+    sc = _scope(uid)
+    if not sc["role"]:
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
+    orgs = [b["organization_id"] for b in sc["branches"]]
+    if not notice_is_for(notice_id, orgs):
+        return JSONResponse({"error": "сообщение не для вас"}, status_code=403)
     mark_notice_read(notice_id, uid)
     return JSONResponse({"ok": True})
 

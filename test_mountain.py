@@ -15,6 +15,7 @@ import mountain_routes as M  # noqa: E402
 import assistant_ai as A  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 import api  # noqa: E402
+import scoring as S  # noqa: E402
 
 client = TestClient(api.app)
 OWNER, MANAGER = 900001, 900002
@@ -71,10 +72,15 @@ def test_points_and_step():
         client.post(f"/api/mountain/close/{M.token_for(OWNER)}", json={"task_id": t["id"]})
     board = client.get(f"/api/mountain/data/{M.token_for(OWNER)}").json()
     a = next(b for b in board["branches"] if b["organization_id"] == ORG_A)
-    assert a["points"] == 150, a          # 3 × «долго» = 150
-    assert a["level"]["step"] == 6, a     # 150 / 25
+    assert a["points"] == 150, a           # 3 × «долго» = 150
+    assert a["level"]["step"] == 15, a     # 150 / 10
     assert a["level"]["steps"] == 40, a
-    print(f"  [OK] 3 задачи «долго» = {a['points']} баллов → ступень {a['level']['step']} из 40")
+    assert a["level"]["summit"] == 400, a  # вершина достижима за месяц хорошей работы
+    # 150 баллов — это ещё «Тропа»: «Первый лагерь» начинается со 160
+    assert a["level"]["stage"]["name"] == "Тропа", a["level"]["stage"]
+    assert a["level"]["stage"]["to_next"] == 10, a["level"]["stage"]
+    print(f"  [OK] 3 задачи «долго» = {a['points']} баллов → {a['level']['stage']['name']}, "
+          f"ступень {a['level']['step']} из 40")
 
 
 def test_manager_closes_only_his_branch():
@@ -137,6 +143,215 @@ def test_service_orgs_are_out():
     print("  [OK] служебные организации отфильтрованы, филиалы остались")
 
 
+def test_summit_is_reachable_in_a_month():
+    """Вершина берётся месяцем очень хорошей работы, но не даром.
+    Идеальные чек-листы дают 360, задачи — ещё 100–400."""
+    assert M.STEPS * M.STEP_POINTS == 400, (M.STEPS, M.STEP_POINTS)
+    perfect_checklists = 4 * 3 * 30
+    assert perfect_checklists < 400, "одними чек-листами вершину брать нельзя"
+    assert perfect_checklists + 4 * 25 >= 400, "с задачами — должна браться"
+    print(f"  [OK] вершина {M.STEPS * M.STEP_POINTS}: чек-листы дают {perfect_checklists}, "
+          f"остальное — задачами")
+
+
+def test_stages_are_ordered_and_named():
+    """Путь разбит на участки: видно, где ты и что следующее."""
+    prev = -1
+    for need, name in M.STAGES:
+        assert need > prev and name, (need, name)
+        prev = need
+    st = M._stage(175)
+    assert st["name"] == "Первый лагерь" and st["next"] == "Скальный пояс" and st["to_next"] == 65, st
+    assert M._stage(400)["next"] is None, M._stage(400)
+    print("  [OK] участки: " + " → ".join(n for _v, n in M.STAGES))
+
+
+def test_ranking_does_not_leak_between_clients():
+    """Рейтинг сети — только свои филиалы. Таблица ресторанов многоарендная,
+    и чужой клиент с филиалом «Астана…» не должен появляться на нашей горе."""
+    _seed()
+    OTHER = 900099
+    db.add_restaurant(OTHER, "login", "org-other", "Астана, Чужой филиал",
+                      iiko_server="", api_password="")
+    mine = {r["organization_id"] for r in M._all_branches(OWNER)}
+    assert mine == {ORG_A, ORG_B}, mine
+    board = client.get(f"/api/mountain/data/{M.token_for(OWNER)}").json()
+    names = {r["name"] for r in board["ranking"]}
+    assert "Астана, Чужой филиал" not in names, names
+    print("  [OK] в рейтинге только свои филиалы, чужой клиент не виден")
+
+
+def test_manager_sees_whole_network_ranking():
+    """Управляющий видит места всех филиалов сети, но задачи — только свои."""
+    _seed()
+    d = client.get(f"/api/mountain/data/{M.token_for(MANAGER)}").json()
+    assert len(d["branches"]) == 1, d["branches"]
+    assert len(d["ranking"]) == 2, d["ranking"]
+    assert all("place" in r for r in d["ranking"]), d["ranking"]
+    print("  [OK] управляющему видна вся сеть в рейтинге, свой филиал — один")
+
+
+def test_negative_points_stay_at_the_foot():
+    """Минус по баллам — подножие, а не вершина: раньше next был None и это
+    читалось как «идти некуда»."""
+    st = M._stage(-26)
+    assert st["name"] == "Подножие" and st["next"] == "Тропа" and st["to_next"] == 80, st
+    print("  [OK] отрицательные баллы → подножие, до «Тропы» 80")
+
+
+def test_plan_tab_shows_the_network_only_to_the_owner():
+    """Вкладка «План»: сеть целиком видит только владелец. У управляющего своя
+    подписанная ссылка — и она главнее флага network в запросе, иначе он
+    подставил бы network=1 и получил чужие филиалы."""
+    _seed()
+    own = api._plan_branches(ORG_B, True, {"id": OWNER})
+    assert {b["organization_id"] for b in own} == {ORG_A, ORG_B}, own
+
+    mt = M.token_for(MANAGER)
+    # даже с network=1 и чужим org в пути — только свой филиал
+    got = api._plan_branches(ORG_A, True, {"id": OWNER}, mt)
+    assert [b["organization_id"] for b in got] == [ORG_B], got
+    print("  [OK] владельцу вся сеть, управляющему по ссылке — только свой филиал")
+
+
+def test_manager_cannot_write_plan_to_a_foreign_branch():
+    """Запись плана ограничена тем же кругом, что и просмотр."""
+    _seed()
+    mt = M.token_for(MANAGER)
+    bad = client.post(f"/api/plan-week/{ORG_B}", json={
+        "week": "2026-W35", "token": mt,
+        "cells": [{"org": ORG_A, "dow": 1, "ch_type": "hall", "planned": 99}]})
+    assert bad.status_code == 403, (bad.status_code, bad.text[:120])
+    ok = client.post(f"/api/plan-week/{ORG_B}", json={
+        "week": "2026-W35", "token": mt,
+        "cells": [{"org": ORG_B, "dow": 1, "ch_type": "hall", "planned": 99}]})
+    assert ok.status_code == 200 and ok.json()["saved"] == 1, ok.text[:150]
+    print("  [OK] в чужой филиал план не записать, в свой — можно")
+
+
+def test_late_orders_signal_is_read_from_the_real_response():
+    """/api/late-deliveries отдаёт late_pct ВЕРХНИМ полем, никакого summary там нет.
+    Код читал ld["summary"]["late_pct"] — и критерий «Опоздавшие заказы» молчал
+    у всех девяти филиалов, хотя данные были (Алиева: 429 доставок, 52 опоздали).
+    Форма ответа снята с живого сервера 25.08."""
+    live = {"delivered": 429, "late": 52, "late_pct": 12, "median_delay": 6,
+            "worst_delay": 373, "suspicious": 3, "by_type": {}, "causes": [],
+            "period": {"from": "2026-08-01", "to": "2026-08-25"}}
+    sig = api._late_signal(live)
+    assert sig == {"late_pct": 12, "deliveries": 429, "late": 52}, sig
+    crit = {c["key"]: c for c in S.score_branch({"late": sig}, {})["criteria"]}
+    assert crit["late"]["counted"] and crit["late"]["value"] == 20, crit["late"]
+    print(f"  [OK] 52 из 429 → {sig['late_pct']}% опозданий, критерий посчитан ({crit['late']['value']})")
+
+
+def test_manager_sees_scores_of_other_branches():
+    """Владелец 25.08: управляющему не нужен разбор по критериям — нужен
+    рейтинг филиалов с оценками, чтобы сравнить себя одним взглядом.
+    Значит и показатели ключуются на владельца сети, а не на того, кто открыл
+    ссылку: свой кэш управляющего знал бы только про его точку."""
+    _seed()
+    d = client.get(f"/api/mountain/data/{M.token_for(MANAGER)}").json()
+    assert d["role"] == "manager"
+    assert {r["organization_id"] for r in d["ranking"]} == {ORG_A, ORG_B}, d["ranking"]
+    assert all("score" in r for r in d["ranking"]), d["ranking"]
+    print(f"  [OK] управляющий видит рейтинг из {len(d['ranking'])} филиалов с полем оценки")
+
+
+def test_weekly_average_ranks_and_shows_movement():
+    """Вторничная сводка: средняя за неделю, порядок по убыванию и куда сдвинулось.
+    Дни без оценки в среднее не идут — иначе филиал «падал» просто потому,
+    что один ночной пересчёт не собрался."""
+    _seed()
+    from datetime import date, timedelta as td
+    today = date.today()
+    for i in range(1, 8):                     # текущая неделя
+        db.save_branch_score(ORG_A, (today - td(days=i)).isoformat(), 80, 5)
+        db.save_branch_score(ORG_B, (today - td(days=i)).isoformat(), 60, 5)
+    db.save_branch_score(ORG_A, (today - td(days=3)).isoformat(), None, 1)   # день не собрался
+    for i in range(8, 15):                    # прошлая неделя
+        db.save_branch_score(ORG_A, (today - td(days=i)).isoformat(), 70, 5)
+        db.save_branch_score(ORG_B, (today - td(days=i)).isoformat(), 60, 5)
+    lines = M.weekly_score_lines([{"organization_id": ORG_A, "name": "Филиал А"},
+                                  {"organization_id": ORG_B, "name": "Филиал Б"}])
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("1. <b>Филиал А</b> — 80 из 100"), lines[0]
+    assert "+10 к прошлой неделе" in lines[0], lines[0]
+    assert "без изменений" in lines[1], lines[1]
+    print(f"  [OK] {lines[0].replace('<b>','').replace('</b>','')}")
+
+
+def test_score_history_is_scoped_like_everything_else():
+    """История оценок: владельцу вся сеть, управляющему только его филиал."""
+    _seed()
+    db.save_branch_score(ORG_A, "2026-08-20", 71, 5)
+    db.save_branch_score(ORG_B, "2026-08-20", 44, 5)
+    o = client.get(f"/api/mountain/scores/{M.token_for(OWNER)}").json()
+    m = client.get(f"/api/mountain/scores/{M.token_for(MANAGER)}").json()
+    assert len(o["branches"]) == 2 and len(m["branches"]) == 1, (o, m)
+    assert m["branches"][0]["organization_id"] == ORG_B, m
+    assert any(h["score"] == 44 for h in m["branches"][0]["history"]), m
+    print("  [OK] историю оценок управляющий видит только по своему филиалу")
+
+
+def test_rating_signal_normalises_wolt_to_five_points():
+    """Wolt отдаёт 8,8 из 10, 2ГИС — 4,6 из 5. Среднее «сырых» чисел дало бы
+    филиалу с Wolt полтора балла форы из воздуха — приводим к пятибалльной."""
+    sig = api._rating_signal({"platforms": [
+        {"platform": "2gis", "rating": 4.6, "scale": 5},
+        {"platform": "wolt", "rating": 8.8, "scale": 10}]})
+    assert sig == {"avg": 4.5, "platforms": 2}, sig      # 4,6 и 8,8/10=4,4 → 4,5
+    assert api._rating_signal({"platforms": []}) is None
+    assert api._rating_signal(None) is None
+    print(f"  [OK] 2ГИС 4,6/5 и Wolt 8,8/10 → средний {sig['avg']} из 5")
+
+
+def test_shifts_signal_separates_zero_from_no_data():
+    assert api._shifts_signal({"count": 0}) == {"pending": 0}
+    assert api._shifts_signal({"count": 3}) == {"pending": 3}
+    assert api._shifts_signal({}) is None and api._shifts_signal(None) is None
+    print("  [OK] ноль непринятых смен — результат, отсутствие ответа — молчание")
+
+
+def test_late_orders_signal_stays_silent_without_deliveries():
+    """Филиал без доставок — не «идеальный»: критерий выпадает, а не даёт 100."""
+    assert api._late_signal({"delivered": 0, "late": 0, "late_pct": None}) is None
+    assert api._late_signal({"error": "iiko недоступен"}) is None
+    assert api._late_signal(None) is None
+    print("  [OK] нет доставок или iiko молчит → критерий выпадает")
+
+
+def test_notice_reaches_the_addressed_branch_only():
+    """Сообщение «всем» видит любой филиал, адресное — только свой."""
+    _seed()
+    to, tm = M.token_for(OWNER), M.token_for(MANAGER)
+    assert client.post(f"/api/mountain/notice/{to}", json={"text": "всем"}).json()["ok"]
+    nid_b = client.post(f"/api/mountain/notice/{to}",
+                        json={"text": "только Б", "org": ORG_B}).json()["id"]
+    nid_a = client.post(f"/api/mountain/notice/{to}",
+                        json={"text": "только А", "org": ORG_A}).json()["id"]
+    texts = [n["text"] for n in client.get(f"/api/mountain/notices/{tm}").json()["notices"]]
+    assert "всем" in texts and "только Б" in texts, texts
+    assert "только А" not in texts, "управляющий Б увидел сообщение чужого филиала"
+    assert client.post(f"/api/mountain/notice/{tm}/read/{nid_b}").status_code == 200
+    assert client.post(f"/api/mountain/notice/{tm}/read/{nid_a}").status_code == 403, \
+        "чужое сообщение нельзя отметить прочитанным"
+    print("  [OK] адресное сообщение видит и закрывает только свой филиал")
+
+
+def test_read_receipt_cannot_be_faked_by_a_stranger():
+    """«Прочитали N» — то, по чему владелец судит, дошло ли сообщение. Подписи
+    токена мало: посторонний uid без роли накручивал счётчик."""
+    _seed()
+    to, tm = M.token_for(OWNER), M.token_for(MANAGER)
+    nid = client.post(f"/api/mountain/notice/{to}", json={"text": "проверка"}).json()["id"]
+    stranger = M.token_for(999999)          # подпись верная, роли нет
+    assert client.post(f"/api/mountain/notice/{stranger}/read/{nid}").status_code == 403
+    assert client.post(f"/api/mountain/notice/{tm}/read/{nid}").status_code == 200
+    stats = {n["id"]: n["read_by"] for n in client.get(f"/api/mountain/notices/{to}").json()["notices"]}
+    assert stats[nid] == 1, f"счётчик прочтений врёт: {stats[nid]}"
+    print("  [OK] отметку «прочитал» ставит только адресат, счётчик не накрутить")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_token_is_signed,
@@ -148,7 +363,23 @@ if __name__ == "__main__":
               test_rules_pick_the_costliest,
               test_low_recipe_coverage_is_not_money,
               test_money_is_capped_by_revenue,
-              test_service_orgs_are_out):
+              test_service_orgs_are_out,
+              test_summit_is_reachable_in_a_month,
+              test_stages_are_ordered_and_named,
+              test_ranking_does_not_leak_between_clients,
+              test_manager_sees_whole_network_ranking,
+              test_negative_points_stay_at_the_foot,
+              test_plan_tab_shows_the_network_only_to_the_owner,
+              test_manager_cannot_write_plan_to_a_foreign_branch,
+              test_late_orders_signal_is_read_from_the_real_response,
+              test_late_orders_signal_stays_silent_without_deliveries,
+              test_manager_sees_scores_of_other_branches,
+              test_weekly_average_ranks_and_shows_movement,
+              test_score_history_is_scoped_like_everything_else,
+              test_rating_signal_normalises_wolt_to_five_points,
+              test_shifts_signal_separates_zero_from_no_data,
+              test_notice_reaches_the_addressed_branch_only,
+              test_read_receipt_cannot_be_faked_by_a_stranger):
         print(f"\n>>> {t.__name__}")
         try:
             t()

@@ -1,4 +1,4 @@
-"""Оценка филиала: критерии логичны, задачи на неё не влияют.
+"""Оценка филиала: критерии логичны, задачи на неё не влияют, пустота не рисует 100.
 
 Запуск:  python3 test_scoring.py
 """
@@ -6,17 +6,15 @@ import scoring as S
 
 GOOD = {
     "name": "Хороший", "revenue": 10_000_000,
-    "changes": {"revenue_pct": 8},
-    "foodcost": {"fact_pct": 29, "norm_pct": 30, "coverage": 85},
-    "writeoffs": {"total": 100000, "pct": 3},
+    "changes": {"revenue_pct": 8, "orders_pct": 7},
     "late": {"late_pct": 2},
+    "staff_late": {"total": 40, "late": 1, "late_pct": 2.5},
 }
 BAD = {
     "name": "Плохой", "revenue": 10_000_000,
-    "changes": {"revenue_pct": -12},
-    "foodcost": {"fact_pct": 41, "norm_pct": 30, "coverage": 90},
-    "writeoffs": {"total": 900000, "pct": 16},
+    "changes": {"revenue_pct": -12, "orders_pct": -15},
     "late": {"late_pct": 20},
+    "staff_late": {"total": 40, "late": 12, "late_pct": 30},
 }
 CH_OK = {"done": 24, "missed": 0}
 CH_BAD = {"done": 6, "missed": -18}
@@ -25,30 +23,47 @@ CH_BAD = {"done": 6, "missed": -18}
 def test_good_beats_bad():
     good = S.score_branch(GOOD, CH_OK)["score"]
     bad = S.score_branch(BAD, CH_BAD)["score"]
-    assert good >= 90 and bad <= 15, (good, bad)
+    assert good >= 85 and bad <= 15, (good, bad)
     print(f"  [OK] порядок в филиале {good} из 100, разруха {bad} из 100")
 
 
 def test_tasks_do_not_affect_score():
     """Задачи в формулу не входят вовсе — закрыть их и «поднять оценку» нельзя."""
-    a = S.score_branch(GOOD, CH_OK)["score"]
-    b = S.score_branch({**GOOD}, CH_OK)["score"]
-    assert a == b
     keys = {c["key"] for c in S.score_branch(GOOD, CH_OK)["criteria"]}
-    assert "tasks" not in keys and keys == {"revenue", "foodcost", "writeoffs", "late", "checklist"}, keys
-    print("  [OK] критериев пять, задач среди них нет")
+    assert "tasks" not in keys, keys
+    assert keys == {"revenue", "orders", "late", "staff_late", "checklist",
+                    "rating", "plan", "shifts"}, keys
+    print(f"  [OK] критериев {len(keys)}, задач среди них нет")
 
 
-def test_missing_data_is_not_a_penalty():
-    """Нет отзывов и техкарт — не штраф: вес уходит на остальные критерии."""
-    thin = {"name": "Без данных", "revenue": 5_000_000, "writeoffs": {"pct": 3},
-            "changes": {"revenue_pct": 10}}      # рост на максимум шкалы
+def test_foodcost_and_writeoffs_are_gone():
+    """Убраны по решению владельца 25.08: данных по ним у филиалов не было."""
+    keys = {c["key"] for c in S.score_branch(GOOD, CH_OK)["criteria"]}
+    assert "foodcost" not in keys and "writeoffs" not in keys, keys
+    assert "foodcost" not in S.WEIGHTS and "writeoffs" not in S.WEIGHTS, S.WEIGHTS
+    print("  [OK] фудкоста и списаний в оценке больше нет")
+
+
+def test_two_maxed_criteria_no_longer_give_100():
+    """Та самая болезнь: выручка и списания на потолке → «100 из 100».
+    Теперь двух критериев мало — вместо числа честное «мало данных»."""
+    thin = {"changes": {"revenue_pct": 10}}          # только выручка + чек-листы
     r = S.score_branch(thin, CH_OK)
-    counted = [c for c in r["criteria"] if c["counted"]]
-    # три критерия из пяти, все на максимуме → 100: пустота не наказывается
-    assert r["score"] == 100, r
-    assert {c["key"] for c in counted} == {"revenue", "writeoffs", "checklist"}, counted
-    print(f"  [OK] считано {len(counted)} критерия из 5, оценка {r['score']} — без наказания за пустоту")
+    assert r["score"] is None and r["counted"] == 2, r
+    assert "мало данных" in r["score_note"], r
+    print(f"  [OK] два критерия → оценки нет: «{r['score_note']}»")
+
+
+def test_threshold_grew_with_the_number_of_criteria():
+    """Критериев восемь — порог посчитанных подняли до четырёх. Три из восьми
+    это снова «сто баллов по четверти данных», ради чего оценку и чинили."""
+    three = S.score_branch({"changes": {"revenue_pct": 10, "orders_pct": 10}}, CH_OK)
+    assert three["score"] is None and three["counted"] == 3, three
+    four = S.score_branch({"changes": {"revenue_pct": 10, "orders_pct": 10},
+                           "shifts": {"pending": 0}}, CH_OK)
+    assert four["score"] == 100 and four["counted"] == 4, four
+    assert "4 критерия из 8" in four["score_note"], four
+    print(f"  [OK] три критерия → оценки нет, четыре → {four['score']} с подписью «{four['score_note']}»")
 
 
 def test_no_data_at_all_gives_none():
@@ -57,18 +72,93 @@ def test_no_data_at_all_gives_none():
     print("  [OK] совсем без данных оценки нет — прочерк, а не ноль")
 
 
+def test_plan_execution_is_counted_but_lightly():
+    """Владелец 25.08: план в оценке нужен, но «не сильно» — вес меньше выручки
+    и заказов, иначе филиал начнёт торговаться за низкий план вместо работы."""
+    assert S.WEIGHTS["plan"] < S.WEIGHTS["revenue"], S.WEIGHTS
+    done = S.score_branch({**GOOD, "plan": {"pct": 105}}, CH_OK)
+    miss = S.score_branch({**GOOD, "plan": {"pct": 70}}, CH_OK)
+    crit = {c["key"]: c for c in done["criteria"]}
+    assert crit["plan"]["value"] == 100, crit["plan"]
+    assert done["score"] > miss["score"], (done["score"], miss["score"])
+    print(f"  [OK] план 105% → {done['score']}, план 70% → {miss['score']}, вес {S.WEIGHTS['plan']}")
+
+
+def test_aggregator_rating_is_a_criterion():
+    """Рейтинги 2ГИС/Wolt/Yandex сайт уже читает — теперь они в оценке.
+    Шкала снята с таблицы владельца: там 4,8 отличный, 3,8 провальный."""
+    hi = S.score_branch({**GOOD, "rating": {"avg": 4.8}}, CH_OK)
+    lo = S.score_branch({**GOOD, "rating": {"avg": 3.8}}, CH_OK)
+    crit = {c["key"]: c for c in hi["criteria"]}
+    assert crit["rating"]["value"] == 100, crit["rating"]
+    assert {c["key"]: c for c in lo["criteria"]}["rating"]["value"] == 0
+    assert hi["score"] > lo["score"], (hi["score"], lo["score"])
+    print(f"  [OK] рейтинг 4,8 → {hi['score']}, 3,8 → {lo['score']}")
+
+
+def test_unaccepted_shifts_lower_the_score():
+    """Непринятые кассовые смены — незакрытый учётный день, чистая дисциплина."""
+    clean = S.score_branch({**GOOD, "shifts": {"pending": 0}}, CH_OK)
+    dirty = S.score_branch({**GOOD, "shifts": {"pending": 6}}, CH_OK)
+    crit = {c["key"]: c for c in clean["criteria"]}
+    assert crit["shifts"]["value"] == 100, crit["shifts"]
+    assert {c["key"]: c for c in dirty["criteria"]}["shifts"]["value"] == 0
+    assert clean["score"] > dirty["score"], (clean["score"], dirty["score"])
+    print(f"  [OK] смен непринятых 0 → {clean['score']}, шесть → {dirty['score']}")
+
+
+def test_zero_is_not_the_same_as_no_data():
+    """Ноль непринятых смен — это 100 баллов, а отсутствие данных — прочерк.
+    Путать нельзя: иначе облачный филиал без касс выглядел бы образцовым."""
+    crit = {c["key"]: c for c in S.score_branch({**GOOD, "shifts": {"pending": 0}}, CH_OK)["criteria"]}
+    assert crit["shifts"]["counted"] and crit["shifts"]["value"] == 100
+    crit2 = {c["key"]: c for c in S.score_branch(GOOD, CH_OK)["criteria"]}
+    assert crit2["shifts"]["counted"] is False and crit2["shifts"]["value"] is None
+    print("  [OK] ноль смен = 100 баллов, отсутствие данных = прочерк")
+
+
 def test_criteria_have_weights_and_sum_to_100():
     assert sum(S.WEIGHTS.values()) == 100, S.WEIGHTS
+    assert S.WEIGHTS["revenue"] == 20 and S.WEIGHTS["orders"] == 20, S.WEIGHTS
+    assert S.WEIGHTS["late"] == 15 and S.WEIGHTS["staff_late"] == 12, S.WEIGHTS
     print(f"  [OK] веса критериев: {S.WEIGHTS}, сумма 100")
 
 
-def test_foodcost_ignored_when_recipes_are_thin():
-    """Покрытие техкарт ниже 60% — фудкост в оценку не идёт: цифра врёт."""
-    thin = {**GOOD, "foodcost": {"fact_pct": 95, "norm_pct": 30, "coverage": 12}}
-    crit = {c["key"]: c for c in S.score_branch(thin, CH_OK)["criteria"]}
-    assert crit["foodcost"]["counted"] is False, crit["foodcost"]
-    assert S.score_branch(thin, CH_OK)["score"] >= 85
-    print("  [OK] фудкост с покрытием 12% не портит оценку")
+def test_orders_are_scored_apart_from_revenue():
+    """Выручку можно вытянуть ценой. Заказы упали — оценка обязана просесть."""
+    same = {**GOOD, "changes": {"revenue_pct": 8, "orders_pct": -12}}
+    assert S.score_branch(same, CH_OK)["score"] < S.score_branch(GOOD, CH_OK)["score"]
+    print("  [OK] рост выручки при падении заказов оценку не спасает")
+
+
+def test_staff_lateness_lowers_the_score():
+    """Главное требование владельца: чем больше опоздавших, тем ниже филиал."""
+    ok = S.score_branch({**GOOD, "staff_late": {"total": 40, "late": 0}}, CH_OK)["score"]
+    bad = S.score_branch({**GOOD, "staff_late": {"total": 40, "late": 10}}, CH_OK)["score"]
+    assert ok > bad, (ok, bad)
+    print(f"  [OK] опоздавших нет → {ok}, опоздал каждый четвёртый → {bad}")
+
+
+def test_late_orders_lower_the_score():
+    fast = S.score_branch({**GOOD, "late": {"late_pct": 0}}, CH_OK)["score"]
+    slow = S.score_branch({**GOOD, "late": {"late_pct": 18}}, CH_OK)["score"]
+    assert fast > slow, (fast, slow)
+    print(f"  [OK] опозданий заказов 0% → {fast}, 18% → {slow}")
+
+
+def test_growth_is_directional():
+    up = S.score_branch({**GOOD, "changes": {"revenue_pct": 12, "orders_pct": 12}}, CH_OK)["score"]
+    down = S.score_branch({**GOOD, "changes": {"revenue_pct": -12, "orders_pct": -12}}, CH_OK)["score"]
+    assert up > down, (up, down)
+    print(f"  [OK] рост +12% → {up}, падение −12% → {down}")
+
+
+def test_staff_late_pct_can_be_derived_from_counts():
+    """Если процент не посчитан, берём его из total/late — не теряем критерий."""
+    crit = {c["key"]: c for c in
+            S.score_branch({**GOOD, "staff_late": {"total": 10, "late": 1}}, CH_OK)["criteria"]}
+    assert crit["staff_late"]["counted"] and crit["staff_late"]["value"] == 50, crit["staff_late"]
+    print("  [OK] 1 опоздавший из 10 = 10% → 50 баллов критерия")
 
 
 def test_zone_criteria_are_short_and_specific():
@@ -79,24 +169,18 @@ def test_zone_criteria_are_short_and_specific():
         f'{d["label"]} — {len(d["items"])}' for d in S.ZONE_CRITERIA.values()))
 
 
-def test_growth_and_lateness_are_directional():
-    """Рост выручки поднимает, опоздания опускают — и наоборот."""
-    up = S.score_branch({**GOOD, "changes": {"revenue_pct": 12}}, CH_OK)["score"]
-    down = S.score_branch({**GOOD, "changes": {"revenue_pct": -12}}, CH_OK)["score"]
-    fast = S.score_branch({**GOOD, "late": {"late_pct": 0}}, CH_OK)["score"]
-    slow = S.score_branch({**GOOD, "late": {"late_pct": 18}}, CH_OK)["score"]
-    assert up > down and fast > slow, (up, down, fast, slow)
-    print(f"  [OK] выручка +12% → {up}, −12% → {down}; опозданий 0% → {fast}, 18% → {slow}")
-
-
 if __name__ == "__main__":
     failed = 0
     for t in (test_good_beats_bad, test_tasks_do_not_affect_score,
-              test_missing_data_is_not_a_penalty, test_no_data_at_all_gives_none,
-              test_criteria_have_weights_and_sum_to_100,
-              test_foodcost_ignored_when_recipes_are_thin,
-              test_zone_criteria_are_short_and_specific,
-              test_growth_and_lateness_are_directional):
+              test_foodcost_and_writeoffs_are_gone,
+              test_two_maxed_criteria_no_longer_give_100, test_threshold_grew_with_the_number_of_criteria,
+              test_no_data_at_all_gives_none, test_criteria_have_weights_and_sum_to_100,
+              test_plan_execution_is_counted_but_lightly, test_aggregator_rating_is_a_criterion,
+              test_unaccepted_shifts_lower_the_score, test_zero_is_not_the_same_as_no_data,
+              test_orders_are_scored_apart_from_revenue, test_staff_lateness_lowers_the_score,
+              test_late_orders_lower_the_score, test_growth_is_directional,
+              test_staff_late_pct_can_be_derived_from_counts,
+              test_zone_criteria_are_short_and_specific):
         print(f"\n>>> {t.__name__}")
         try:
             t()

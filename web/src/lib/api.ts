@@ -27,6 +27,45 @@ export function savePref(key: string, val: string) {
   try { localStorage.setItem(LS_PREFIX + key, val) } catch { /* приватный режим — просто не сохраняем */ }
 }
 
+/* ── Авторизация: один раз на все запросы ──
+   Экранов два десятка, и почти каждый ходит в /api собственным fetch. Прописать
+   заголовок в каждом — гарантированно забыть в одном и поймать 401 на проде,
+   где, в отличие от локали, BOT_TOKEN задан и dev-режим выключен. Поэтому
+   оборачиваем fetch один раз:
+     • внутри Telegram шлём его подпись (X-Telegram-Init-Data);
+     • по личной ссылке ?m=… шлём токен (X-Site-Token) — он подписан на
+       ENCRYPTION_KEY и даёт ровно ту личность, что в нём зашита.
+   Трогаем только свои /api/-запросы: чужие домены обёртка пропускает как есть. */
+type TgWindow = Window & { Telegram?: { WebApp?: { initData?: string } }; __lgAuthPatched?: boolean }
+
+function authHeaders(): Record<string, string> {
+  const h: Record<string, string> = {}
+  if (typeof window === 'undefined') return h
+  try {
+    const init = (window as TgWindow).Telegram?.WebApp?.initData
+    if (init) h['X-Telegram-Init-Data'] = init
+  } catch { /* не в Telegram */ }
+  try {
+    const m = new URLSearchParams(window.location.search).get('m')
+    if (m) h['X-Site-Token'] = m
+  } catch { /* нет доступа к адресу */ }
+  return h
+}
+
+if (typeof window !== 'undefined' && !(window as TgWindow).__lgAuthPatched) {
+  ;(window as TgWindow).__lgAuthPatched = true
+  const orig = window.fetch.bind(window)
+  window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!url.startsWith('/api/')) return orig(input, init)
+    const extra = authHeaders()
+    if (!Object.keys(extra).length) return orig(input, init)
+    const headers = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined))
+    for (const [k, v] of Object.entries(extra)) if (!headers.has(k)) headers.set(k, v)
+    return orig(input, { ...init, headers })
+  }
+}
+
 // ── текущий выбранный филиал (org) + подписка на смену ──
 // В baked — сразу демо. В реальном режиме берём филиал из прошлой сессии; если его
 // нет — стартуем «не выбран» (''), чтобы НЕ мигать демо-данными: useApi ждёт, пока

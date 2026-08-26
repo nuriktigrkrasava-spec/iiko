@@ -5,6 +5,7 @@ import { container } from './ui'
 import { Icon } from './icons'
 import BranchSwitcher from './Branch'
 import DataBadge from './DataBadge'
+import NoticeCenter from './Notices'
 
 /* Экраны грузятся по требованию: раньше все 16 ехали одним куском в 514 kB,
    хотя при заходе виден ровно один. Главная остаётся статичной — она открывается
@@ -21,6 +22,7 @@ const Reputation = lazy(() => import('./Reputation'))
 const Menu = lazy(() => import('./Menu'))
 const Supply = lazy(() => import('./Supply'))
 const Schedule = lazy(() => import('./Schedule'))
+const Shifts = lazy(() => import('./Shifts'))
 const Mountain = lazy(() => import('./Mountain'))
 import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref, type Period } from '../lib/api'
 
@@ -32,6 +34,7 @@ const SECTIONS: Sec[] = [
   { id: 'menu', group: 'Деньги', label: 'Меню · продажи', icon: 'menu', periodic: false, render: Menu },
   { id: 'supply', group: 'Деньги', label: 'Склад · заявки', icon: 'supply', badge: 'var(--red)', periodic: false, render: Supply },
   { id: 'yoy', group: 'Деньги', label: 'Год к году', icon: 'yoy', periodic: false, render: YoY },
+  { id: 'shifts', group: 'Операции', label: 'Кассовые смены', icon: 'yoy', periodic: false, render: Shifts },
   { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: false, render: Staff },
   { id: 'sched', group: 'Операции', label: 'Расписание', icon: 'sched', periodic: false, render: Schedule },
   { id: 'plan', group: 'Операции', label: 'План', icon: 'feed', periodic: false, render: Plan },
@@ -60,8 +63,19 @@ export default function LiquidApp() {
   const setPeriod = (p: Period) => { setPeriodLocal(p); setGlobalPeriod(p) }
   const [dark, setDark] = useState(() => loadPref('theme') === 'dark') // светлый — главная тема (референс Truck&Co)
   const [moreOpen, setMoreOpen] = useState(false) // лист «Ещё» на узких экранах
-  const byLink = typeof window !== 'undefined'
-    && new URLSearchParams(window.location.search).has('m')
+  // Переключатель филиалов нужен ВЛАДЕЛЬЦУ — он смотрит сеть. Прячем его только
+  // у управляющего: его филиал задан ссылкой, а список чужих точек обещал бы
+  // доступ, которого нет. Роль спрашиваем лёгким запросом, не всей доской.
+  const [isManager, setIsManager] = useState(false)
+  const [myBranch, setMyBranch] = useState('')
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('m')
+    if (!t) return
+    fetch(`/api/mountain/whoami/${t}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { setIsManager(d?.role === 'manager'); setMyBranch(d?.branch || '') })
+      .catch(() => {})
+  }, [])
 
   useEffect(() => { savePref('section', active) }, [active])
 
@@ -98,6 +112,11 @@ export default function LiquidApp() {
       <div className="lg-wallpaper" aria-hidden />
       <div className="lg-grain" aria-hidden />
 
+      {/* Сообщения владельца. Живут на уровне приложения, а не внутри «Горы»:
+          управляющий, оставивший сайт на «Главной», не видел их вообще —
+          раздел не смонтирован, опрашивать некому. */}
+      <NoticeCenter />
+
       {/* Основная (на всю ширину — меню ушло в нижний док) */}
       <main style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         {(
@@ -110,7 +129,19 @@ export default function LiquidApp() {
               <DataBadge />
               {/* По личной ссылке (?m=…) филиал уже задан токеном — переключатель
                   сети управляющему только мешает и обещает доступ, которого нет. */}
-              {!byLink && <BranchSwitcher />}
+              {/* Владельцу — выбор филиала, управляющему — та же плашка, но со
+                  своим филиалом и без выпадающего списка: переключать ему нечего. */}
+              {isManager
+                ? <span className="lg-branch-btn" style={{ cursor: 'default' }} title={myBranch || 'ваш филиал'}>
+                    <span className="lg-branch-ic" aria-hidden>◈</span>
+                    {/* Название режем многоточием, как у владельца в BranchSwitcher:
+                        «Астана, ул. Г.Алиева 10 (EXPO)» в одну строку распирало
+                        шапку и вся страница ехала вбок на телефоне. */}
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160 }}>
+                      {myBranch || 'Ваш филиал'}
+                    </span>
+                  </span>
+                : <BranchSwitcher />}
               {sec.periodic && (
                 <div className="lg-seg">
                   {PERIODS.map((p) => (

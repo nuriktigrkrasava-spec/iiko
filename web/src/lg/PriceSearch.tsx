@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { getOrg } from '../lib/api'
+import { useOrg } from '../lib/useApi'
 import { tenge } from '../lib/format'
 
 /* «Поиск цены» — самостоятельный инструмент, как одноимённый экран мини-аппа.
@@ -22,7 +22,7 @@ type PriceStats = {
 const field: React.CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '11px 13px', fontSize: 14, fontFamily: 'inherit', background: 'var(--glass-2)', color: 'var(--hi)', border: '1px solid var(--hair)', borderRadius: 12 }
 
 export default function PriceSearch({ onClose }: { onClose: () => void }) {
-  const org = getOrg()
+  const org = useOrg()
   const [q, setQ] = useState('')
   const [list, setList] = useState<Product[]>([])
   const [picked, setPicked] = useState<Product | null>(null)

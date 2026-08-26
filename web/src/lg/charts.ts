@@ -96,22 +96,34 @@ export function areaChart(data: { l: string; v: number }[], color = acc): string
 
 export function barChart(data: { l: string; v: number }[], hiIdx = -1, color = acc, unit = ''): string {
   const max = Math.max(...data.map((x) => x.v)) || 1
-  const fnum = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1).replace('.', ','))
+  // Крупные суммы пишем полностью и с пробелами между разрядами: «747 213 ₸»
+  // читается однозначно, «0,7 млн» — нет.
+  const fnum = (v: number) => (Number.isInteger(v)
+    ? new Intl.NumberFormat('ru-RU').format(v)
+    : v.toFixed(1).replace('.', ','))
   // стеклянная вертикальная колонка: градиент + свечение + фаска (как горизонтальные бары)
   const glass = `background:linear-gradient(180deg, color-mix(in srgb, ${color} 76%, #fff), ${color});`
     + `box-shadow:0 0 14px color-mix(in srgb, ${color} 45%, transparent), inset 0 1px 0 rgba(255,255,255,.55), inset 0 -3px 6px rgba(0,0,0,.16);`
+  // Полные суммы («747 213 ₸») длиннее, чем колонка на телефоне: семь штук в
+  // ряд наезжали друг на друга. Колонке даём минимум под самую длинную подпись,
+  // а ряду — горизонтальную прокрутку: лучше сдвинуть график пальцем, чем
+  // читать наложенные цифры.
+  const labels = data.map((r) => fnum(r.v) + unit)
+  const longest = labels.reduce((a, b) => (b.length > a.length ? b : a), '')
+  const fs = longest.length > 8 ? 10.5 : 12.5
+  const colMin = Math.ceil(longest.length * fs * 0.62) + 8
   const cols = data.map((r, i) => {
     const h = Math.max(6, (r.v / max) * 100)
     const hot = i === hiIdx
-    return `<div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:8px">
-      <div class="tnum" style="font-size:12.5px;font-weight:700;color:${hot ? 'var(--hi)' : 'var(--lo)'}">${fnum(r.v)}${unit}</div>
+    return `<div style="flex:1 0 ${colMin}px;min-width:${colMin}px;display:flex;flex-direction:column;align-items:center;gap:8px">
+      <div class="tnum" style="font-size:${fs}px;font-weight:700;white-space:nowrap;color:${hot ? 'var(--hi)' : 'var(--lo)'}">${labels[i]}</div>
       <div style="width:100%;height:150px;display:flex;align-items:flex-end;justify-content:center">
         <div style="width:58%;height:${h.toFixed(1)}%;border-radius:8px 8px 4px 4px;${glass};opacity:${hot ? '1' : '.5'}"></div>
       </div>
-      <div style="font-size:11px;color:var(--mute)">${r.l}</div>
+      <div style="font-size:11px;color:var(--mute);white-space:nowrap">${r.l}</div>
     </div>`
   }).join('')
-  return `<div style="display:flex;gap:8px;align-items:flex-end;margin-top:8px">${cols}</div>`
+  return `<div style="overflow-x:auto;margin-top:8px"><div style="display:flex;gap:8px;align-items:flex-end;min-width:100%">${cols}</div></div>`
 }
 
 export function yoyChart(data: { l: string; a: number; b: number }[], unit = ''): string {
