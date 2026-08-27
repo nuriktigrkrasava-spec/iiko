@@ -83,8 +83,18 @@ def _orders(b: Dict[str, Any]) -> Optional[float]:
     return _clamp((float(ch["orders_pct"]) + 10) / 20)
 
 
+# Опоздания сотрудников — единственный критерий, который филиал не может
+# исправить задним числом: люди уже пришли. Раньше 20% опоздавших обнуляли его
+# целиком, а 20% на живых данных — это норма (когда на филиале один старт смены
+# на утро и вечер, «опоздавшими» становятся все вечерние). Филиалы теряли весь
+# критерий и оценка переставала показывать что-либо, кроме опозданий. Решение
+# владельца 27.08: не обнулять, а немного снижать — максимум на 40% веса.
+STAFF_LATE_FLOOR = 0.6
+
+
 def _staff_late(b: Dict[str, Any]) -> Optional[float]:
-    """Опоздания сотрудников: доля опоздавших явок. 0% — единица, 20% — ноль."""
+    """Опоздания сотрудников: доля опоздавших явок. 0% — единица,
+    100% — STAFF_LATE_FLOOR (в ноль критерий не уходит никогда)."""
     sl = b.get("staff_late")
     if not isinstance(sl, dict):
         return None
@@ -94,7 +104,7 @@ def _staff_late(b: Dict[str, Any]) -> Optional[float]:
         if not total:
             return None
         pct = float(late_n or 0) / float(total) * 100
-    return _clamp(1 - float(pct) / 20)
+    return _clamp(1 - (1 - STAFF_LATE_FLOOR) * float(pct) / 100)
 
 
 def _late(b: Dict[str, Any]) -> Optional[float]:

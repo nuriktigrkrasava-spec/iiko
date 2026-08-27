@@ -23,7 +23,10 @@ CH_BAD = {"done": 6, "missed": -18}
 def test_good_beats_bad():
     good = S.score_branch(GOOD, CH_OK)["score"]
     bad = S.score_branch(BAD, CH_BAD)["score"]
-    assert good >= 85 and bad <= 15, (good, bad)
+    # Потолок «разрухи» поднят с 15 до 20: опоздания сотрудников больше не
+    # обнуляются (решение владельца 27.08), и даже у худшего филиала этот
+    # критерий отдаёт свои 60% веса.
+    assert good >= 85 and bad <= 20, (good, bad)
     print(f"  [OK] порядок в филиале {good} из 100, разруха {bad} из 100")
 
 
@@ -157,8 +160,21 @@ def test_staff_late_pct_can_be_derived_from_counts():
     """Если процент не посчитан, берём его из total/late — не теряем критерий."""
     crit = {c["key"]: c for c in
             S.score_branch({**GOOD, "staff_late": {"total": 10, "late": 1}}, CH_OK)["criteria"]}
-    assert crit["staff_late"]["counted"] and crit["staff_late"]["value"] == 50, crit["staff_late"]
-    print("  [OK] 1 опоздавший из 10 = 10% → 50 баллов критерия")
+    assert crit["staff_late"]["counted"] and crit["staff_late"]["value"] == 96, crit["staff_late"]
+    print("  [OK] 1 опоздавший из 10 = 10% → 96 баллов критерия")
+
+
+def test_staff_lateness_never_zeroes_the_criterion():
+    """Решение владельца 27.08: опоздания снижают оценку, но не обнуляют критерий.
+    Даже когда опоздали все, филиал не теряет его целиком."""
+    crit = {c["key"]: c for c in
+            S.score_branch({**GOOD, "staff_late": {"total": 10, "late": 10}}, CH_OK)["criteria"]}
+    v = crit["staff_late"]["value"]
+    assert v == round(S.STAFF_LATE_FLOOR * 100), v
+    half = {c["key"]: c for c in
+            S.score_branch({**GOOD, "staff_late": {"total": 10, "late": 5}}, CH_OK)["criteria"]}
+    assert half["staff_late"]["value"] > v, (half["staff_late"]["value"], v)
+    print(f"  [OK] опоздали все → {v} баллов критерия, половина → {half['staff_late']['value']}")
 
 
 def test_zone_criteria_are_short_and_specific():
@@ -180,6 +196,7 @@ if __name__ == "__main__":
               test_orders_are_scored_apart_from_revenue, test_staff_lateness_lowers_the_score,
               test_late_orders_lower_the_score, test_growth_is_directional,
               test_staff_late_pct_can_be_derived_from_counts,
+              test_staff_lateness_never_zeroes_the_criterion,
               test_zone_criteria_are_short_and_specific):
         print(f"\n>>> {t.__name__}")
         try:
