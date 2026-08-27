@@ -78,6 +78,37 @@ def test_wins_name_what_actually_got_better():
     print("  [OK] " + " · ".join(f'{w["label"]} {w["from"]}→{w["to"]}' for w in wins))
 
 
+def test_losses_name_what_got_worse_by_the_same_rule():
+    """На собрании называют обе стороны. Пороги те же, что у поздравления —
+    иначе один и тот же дребезг попадал бы и в улучшения, и в просадки."""
+    losses = api.plan_losses(PREV, NOW)          # поменяли местами: стало хуже
+    keys = {w["key"] for w in losses}
+    assert keys == {"kitchen", "late_pct", "rating", "orders"}, keys
+    k = next(w for w in losses if w["key"] == "kitchen")
+    assert k["from"] == 18 and k["to"] == 24 and k["worse"] == 6, k
+    assert api.plan_losses(NOW, PREV) == [], "улучшение просадкой не притворяется"
+    print("  [OK] " + " · ".join(f'{w["label"]} {w["from"]}→{w["to"]}' for w in losses))
+
+
+def test_tiny_wobble_is_not_a_loss():
+    assert api.plan_losses({"kitchen": 18.4, "rating": 4.50, "late_pct": 8.0},
+                           {"kitchen": 18, "rating": 4.51, "late_pct": 7.6}) == []
+    print("  [OK] дрожь в пределах порога просадкой не считается")
+
+
+def test_staff_lateness_is_a_week_metric():
+    """Опоздания сотрудников — такой же показатель недели, как кухня и дорога:
+    меньше значит лучше, и он попадает и в улучшения, и в просадки."""
+    keys = [m[0] for m in api.PLAN_METRICS]
+    assert "staff_late_pct" in keys, keys
+    win = api.plan_wins({"staff_late_pct": 12.0}, {"staff_late_pct": 40.0})
+    assert [w["key"] for w in win] == ["staff_late_pct"], win
+    loss = api.plan_losses({"staff_late_pct": 40.0}, {"staff_late_pct": 12.0})
+    assert [w["key"] for w in loss] == ["staff_late_pct"], loss
+    assert api.plan_wins({"staff_late_pct": 12.0}, {"staff_late_pct": 14.0}) == [], "2 п.п. — шум"
+    print("  [OK] опоздания сотрудников считаются наравне с кухней и дорогой")
+
+
 def test_getting_worse_is_never_a_win():
     wins = api.plan_wins(PREV, NOW)      # поменяли местами: стало хуже
     assert wins == [], wins
@@ -306,6 +337,49 @@ def test_future_week_asks_iiko_for_nothing():
     print("  [OK] будущая неделя: ни данных, ни запросов в iiko")
 
 
+def test_unconfigured_branch_does_not_report_staff_lateness():
+    """Живой случай 27.08: восемь филиалов из девяти не задали старт смены, и
+    сравнение шло с дефолтом 09:00 — а смена там начинается в 10:40. Получалось
+    «опоздали 100%», хотя это про ненастроенность, а не про людей. Такой
+    показатель не должен попадать ни в сравнение, ни в среднее по сети."""
+    import inspect
+    src = inspect.getsource(api.plan_week_metrics)
+    assert 'ref["configured"]' in src, "процент явок обязан зависеть от того, задан ли эталон"
+    assert '"starts": ref["starts"]' in src, "экран должен видеть, с чем сравнивали"
+    print("  [OK] филиал без старта смены не отдаёт долю опоздавших")
+
+
+def test_cause_window_is_a_full_week_ending_on_the_meeting_day():
+    """Решение владельца 27.08: неделя заканчивается во ВТОРНИК, в день собрания.
+
+    Во вторник ISO-неделя закрыта на один день, и причина опозданий считалась бы
+    по одному понедельнику. Берём семь дней до последнего закрытого дня — ту
+    самую неделю, которую на собрании и подводят.
+    """
+    from datetime import date
+    mon = date(2026, 8, 24)
+    # собрание во вторник: закрыт только понедельник
+    assert api.cause_window(mon, 1) == (date(2026, 8, 18), date(2026, 8, 24))
+    a, z = api.cause_window(mon, 1)
+    assert (z - a).days == 6, "окно обязано быть недельным, а не однодневным"
+    # четверг: закрыты пн-ср, окно всё равно недельное
+    assert api.cause_window(mon, 3) == (date(2026, 8, 20), date(2026, 8, 26))
+    # неделя закрыта целиком — окно совпадает с ISO, второй запрос не нужен
+    assert api.cause_window(mon, 7) == (mon, date(2026, 8, 30))
+    # неделя не начиналась — окна нет, а не «минус шесть дней»
+    assert api.cause_window(mon, 0) == (mon, mon)
+    print("  [OK] причина опозданий считается за неделю, а не за закрытые дни")
+
+
+def test_cause_window_is_used_by_metrics():
+    """Окно должно реально применяться, а не лежать рядом с эндпоинтом."""
+    import inspect
+    src = inspect.getsource(api.plan_week_metrics)
+    assert "cause_window(d_from, done)" in src, src[:200]
+    assert "cause_from != d_from" in src, "при закрытой неделе второго запроса быть не должно"
+    print("  [OK] эндпоинт считает причину по недельному окну")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_wins_name_what_actually_got_better, test_getting_worse_is_never_a_win,
@@ -324,7 +398,12 @@ if __name__ == "__main__":
               test_closed_days_are_read_from_the_snapshot_not_from_iiko,
               test_today_is_never_returned_or_cached,
               test_day_without_orders_is_not_refetched_forever,
-              test_future_week_asks_iiko_for_nothing):
+              test_future_week_asks_iiko_for_nothing,
+              test_losses_name_what_got_worse_by_the_same_rule, test_tiny_wobble_is_not_a_loss,
+              test_staff_lateness_is_a_week_metric,
+              test_unconfigured_branch_does_not_report_staff_lateness,
+              test_cause_window_is_a_full_week_ending_on_the_meeting_day,
+              test_cause_window_is_used_by_metrics):
         print(f"\n>>> {t.__name__}")
         try:
             t()

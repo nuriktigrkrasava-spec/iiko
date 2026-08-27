@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, lazy, Suspense, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, lazy, Suspense, type CSSProperties } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
 import { isoWeekOf, shiftWeek } from './planWeek'
@@ -36,6 +36,9 @@ type Win = { key: string; label: string; unit: string; from: number; to: number;
 type MetricRow = {
   organization_id: string; name: string
   now: Record<string, number | null>; prev: Record<string, number | null>; wins: Win[]
+  /* что просело — теми же порогами, что и wins; и счётчики явок за неделю */
+  losses?: Win[]
+  staff?: { total: number; late: number; late_pct: number; late_minutes: number } | null
 }
 type MetricsData = {
   week: string
@@ -405,6 +408,28 @@ export default function Plan() {
       .catch(() => setIsManager(false))
   }, [])
 
+  /* Оценки филиалов для экрана собрания.
+
+     Владелец открывает сайт без ?m= — токен у него берётся так же, как на
+     «Горе»: из своей личной ссылки. Без этого колонка «Оценка» и «Топ по
+     оценке» стояли пустыми ровно у того, для кого экран и сделан.
+
+     Оценка собирается в фоне (десятки секунд на девять филиалов): если сервер
+     сказал score_pending, один раз перезапрашиваем — как на «Горе». */
+  const scoreTimer = useRef<number | null>(null)
+  const loadScores = useCallback((t: string, again = true) => {
+    fetch(`/api/mountain/data/${t}`, { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('scores'))))
+      .then((d: { ranking?: ScoreRow[]; score_pending?: boolean }) => {
+        setScores(d.ranking || [])
+        if (d.score_pending && again) {
+          scoreTimer.current = window.setTimeout(() => loadScores(t, false), 25000)
+        }
+      })
+      .catch(() => {})   // без оценок экран живёт: топ по движению остаётся
+  }, [])
+  useEffect(() => () => { if (scoreTimer.current) clearTimeout(scoreTimer.current) }, [])
+
   const load = useCallback(() => {
     if (!org || isManager === null) return
     setData(null); setErr(null)
@@ -601,11 +626,15 @@ export default function Plan() {
 
   function openProgress() {
     setShowProgress(true)
-    if (scores.length || !token) return
-    fetch(`/api/mountain/data/${token}`, { headers: { Accept: 'application/json' } })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('scores'))))
-      .then((d: { ranking?: ScoreRow[] }) => setScores(d.ranking || []))
-      .catch(() => {})   // без оценок экран живёт: топ по движению остаётся
+    if (scores.length) return
+    if (token) { loadScores(token); return }
+    fetch('/api/mountain/links', { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('links'))))
+      .then((d: { owner?: { link?: string } }) => {
+        const t = (d.owner?.link || '').split('/m/')[1]
+        if (t) loadScores(t)
+      })
+      .catch(() => {})
   }
 
   return (
@@ -724,7 +753,8 @@ export default function Plan() {
             <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--hi)' }}>Прогресс и динамика</div>
               <div style={{ marginTop: 2, fontSize: 12, color: 'var(--mute)' }}>
-                Заказы, опоздания, кухня и дорога — и кто наверху. Для собрания.
+                План и факт по филиалам, графики недели, что улучшилось и что просело.
+                Во весь экран — для собрания.
               </div>
             </div>
             <button onClick={openProgress}
@@ -741,7 +771,7 @@ export default function Plan() {
       <AnimatePresence>
         {showProgress && metrics && (
           <Suspense fallback={null}>
-            <Progress key="progress" data={metrics} scores={scores}
+            <Progress key="progress" data={metrics} scores={scores} plan={data}
               onClose={() => setShowProgress(false)} />
           </Suspense>
         )}

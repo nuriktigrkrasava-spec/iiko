@@ -7706,9 +7706,30 @@ PLAN_METRICS = [
     ("road", "Курьер в дороге", "мин", True, 2.0, False),
     ("idle", "Ожидание курьера", "мин", True, 2.0, False),
     ("late_pct", "Опоздавших заказов", "%", True, 2.0, False),
+    # Опоздания сотрудников берутся из нашей же базы (снимок явок), а не из
+    # iiko: лишних запросов на филиал не добавляют, а на собрании это второй
+    # вопрос после заказов — «кто приходит вовремя».
+    ("staff_late_pct", "Опозданий сотрудников", "%", True, 3.0, False),
     ("rating", "Рейтинг агрегаторов", "", False, 0.1, False),
     ("orders", "Заказов за неделю", "", False, 10.0, True),
 ]
+
+
+def cause_window(d_from: date, done: int) -> Tuple[date, date]:
+    """Окно, за которое считаем ПРИЧИНУ опозданий: семь дней до последнего
+    закрытого дня.
+
+    Неделя владельца заканчивается во вторник — в день собрания, а не в
+    воскресенье. Во вторник ISO-неделя закрыта ровно на один день, и «причина
+    опозданий» посчиталась бы по одному понедельнику: это не причина, это один
+    вечер. Скользящие семь дней дают ту самую неделю, которая на собрании и
+    подводится. Когда неделя закрыта целиком, окно совпадает с ISO-неделей —
+    и второй запрос в iiko не нужен.
+    """
+    if not done:
+        return d_from, d_from
+    to = d_from + timedelta(days=done - 1)
+    return to - timedelta(days=6), to
 
 
 def plan_wins(now: Dict[str, Any], prev: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -7732,6 +7753,31 @@ def plan_wins(now: Dict[str, Any], prev: Dict[str, Any]) -> List[Dict[str, Any]]
         out.append({"key": key, "label": label, "unit": unit,
                     "from": round(float(b), 2), "to": round(float(a), 2),
                     "better": round(diff, 2),
+                    "pct": round(diff / float(b) * 100) if float(b) else None})
+    out.sort(key=lambda w: -(w["pct"] or 0))
+    return out
+
+
+def plan_losses(now: Dict[str, Any], prev: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Что стало хуже — теми же порогами, что и plan_wins.
+
+    На собрании называют обе стороны. Считать «ухудшения» отдельным правилом
+    нельзя: на одних порогах филиал попадал бы и в улучшившиеся, и в
+    просевшие по одной и той же дрожи в полминуты.
+    """
+    out: List[Dict[str, Any]] = []
+    for key, label, unit, lower_better, eps, rel in PLAN_METRICS:
+        a, b = now.get(key), prev.get(key)
+        if a is None or b is None:
+            continue
+        diff = (float(a) - float(b)) if lower_better else (float(b) - float(a))
+        if diff <= 0:
+            continue
+        if diff < (abs(float(b)) * eps / 100 if rel else eps):
+            continue
+        out.append({"key": key, "label": label, "unit": unit,
+                    "from": round(float(b), 2), "to": round(float(a), 2),
+                    "worse": round(diff, 2),
                     "pct": round(diff / float(b) * 100) if float(b) else None})
     out.sort(key=lambda w: -(w["pct"] or 0))
     return out
@@ -8572,6 +8618,7 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
     now_to = d_from + timedelta(days=done - 1) if done else d_from
     prev_from = d_from - timedelta(days=7)
     prev_to = prev_from + timedelta(days=done - 1) if done else prev_from
+    cause_from, _cause_to = cause_window(d_from, done)
     branches = _plan_branches(org_id, bool(network), user, token)
     if not done:
         # Неделя только началась: сравнивать нечего, и врать нулями не будем.
@@ -8579,13 +8626,25 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
                 "done_days": 0,
                 "metrics": [{"key": k, "label": lb, "unit": u, "lower_better": low}
                             for k, lb, u, low, _e, _r in PLAN_METRICS],
-                "branches": [{**b, "now": {}, "prev": {}, "wins": []} for b in branches]}
+                "branches": [{**b, "now": {}, "prev": {}, "wins": [], "losses": []}
+                             for b in branches]}
+
+    # Опоздания сотрудников — из нашей базы (снимок явок кладёт оценка филиала),
+    # одним запросом на всю сеть за каждую из двух недель. В iiko за ними не
+    # ходим: девять филиалов на девяти серверах, и на собрании это ждать нельзя.
+    from database import staff_late_progress
+    _org_ids = [b["organization_id"] for b in branches]
+    sl_now = staff_late_progress(_org_ids, d_from.isoformat(), now_to.isoformat())
+    sl_prev = staff_late_progress(_org_ids, prev_from.isoformat(), prev_to.isoformat())
 
     async def one(b: Dict[str, str]):
         org = b["organization_id"]
 
-        async def week_metrics(a: date, z: date) -> Dict[str, Any]:
+        # meta — то, что не число: причина опозданий, медиана задержки. В now/prev
+        # им не место, там только сравнимые показатели.
+        async def week_metrics(a: date, z: date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             m: Dict[str, Any] = {}
+            meta: Dict[str, Any] = {}
             try:
                 ld = await late_deliveries(org, "custom", a.isoformat(), z.isoformat(), 1, user)
                 if isinstance(ld, dict) and not ld.get("error"):
@@ -8598,6 +8657,12 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
                     if ld.get("late_pct") is not None:
                         m["late_pct"] = ld["late_pct"]
                     m["deliveries"] = ld.get("delivered")
+                    # Главный вывод по опозданиям — не «сколько», а «из-за чего».
+                    # Считается тем же запросом, вторым походом в iiko не платим.
+                    meta["late_cause"] = ld.get("top_cause")
+                    meta["late_causes"] = (ld.get("causes") or [])[:3]
+                    meta["median_delay"] = ld.get("median_delay")
+                    meta["late_orders"] = ld.get("late")
             except Exception as e:
                 logger.warning(f"[plan-metrics] опоздания {b['name']}: {e!r}")
             try:
@@ -8607,10 +8672,19 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
                                   (await _orders_cached(org, a, z, user)).values())
             except Exception as e:
                 logger.warning(f"[plan-metrics] заказы {b['name']}: {e!r}")
-            return m
+            return m, meta
 
-        now, prev = await asyncio.gather(week_metrics(d_from, now_to),
-                                         week_metrics(prev_from, prev_to))
+        (now, meta), (prev, _prev_meta) = await asyncio.gather(
+            week_metrics(d_from, now_to), week_metrics(prev_from, prev_to))
+        # Причина опозданий — за ПОЛНУЮ неделю, а не за закрытые дни ISO-недели.
+        # Собрание по вторникам, а во вторник ISO-неделя закрыта на один день:
+        # «причина за понедельник» — это не причина, это один вечер. Берём
+        # скользящие семь дней до последнего закрытого дня — ровно ту неделю,
+        # которая на собрании и заканчивается.
+        if cause_from != d_from:
+            _cm, cause_meta = await week_metrics(cause_from, now_to)
+            meta = {**meta, **{k: v for k, v in cause_meta.items() if v is not None}}
+        meta["cause_period"] = {"from": cause_from.isoformat(), "to": now_to.isoformat()}
         try:
             # Рейтинг агрегаторов — снимок «сейчас», истории по неделям у нас нет,
             # поэтому в сравнение он попадает только когда обе цифры есть.
@@ -8619,7 +8693,25 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
                 now["rating"] = rt["avg"]
         except Exception as e:
             logger.warning(f"[plan-metrics] рейтинг {b['name']}: {e!r}")
-        return {**b, "now": now, "prev": prev, "wins": plan_wins(now, prev)}
+        # Опоздания сотрудников считаются от старта смены филиала. Если филиал
+        # его не задал, сравнение идёт с дефолтом 09:00/16:00 — а смена там
+        # начинается в 10:40, и «опоздали 100%» это про ненастроенность, а не
+        # про людей. Такой показатель в сравнение НЕ пускаем: он утащил бы за
+        # собой и среднее по сети, и «что ухудшилось».
+        ref = _late_reference(org)
+        if ref["configured"]:
+            if org in sl_now:
+                now["staff_late_pct"] = sl_now[org]["late_pct"]
+            if org in sl_prev:
+                prev["staff_late_pct"] = sl_prev[org]["late_pct"]
+        staff = dict(sl_now.get(org) or {})
+        staff.update({"configured": ref["configured"], "starts": ref["starts"]})
+        return {**b, "now": now, "prev": prev,
+                "wins": plan_wins(now, prev), "losses": plan_losses(now, prev),
+                # счётчики рядом с процентом: «12% опоздавших» на собрании
+                # спрашивают «это сколько человек?»
+                "staff": staff if sl_now.get(org) or not ref["configured"] else None,
+                **meta}
 
     rows = list(await asyncio.gather(*(one(b) for b in branches)))
     return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
