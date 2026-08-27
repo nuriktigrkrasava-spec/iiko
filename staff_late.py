@@ -99,13 +99,16 @@ def late_rows(arrivals: List[Dict[str, Any]],
     out: List[Dict[str, Any]] = []
     for (eid, day), a in first.items():
         arrival = a["start"]
+        # Явка ещё не закрыта — человек прямо сейчас на смене. Для опоздания это
+        # ничего не меняет (считаем по приходу), но экран должен это показывать.
+        on_shift = bool(a.get("open"))
         planned = pick_planned(arrival, sched.get((eid, day)), starts)
         if planned is None:
             # Эталона нет — не «вовремя» и не «опоздал»: критерий по этому
             # человеку молчит, а не выдумывает результат.
             out.append({"employee_id": eid, "name": a.get("name") or eid[:8], "date": day,
                         "arrival": arrival, "planned": None, "late_min": 0,
-                        "status": "noplan"})
+                        "status": "noplan", "open": on_shift})
             continue
         late = _lateness(to_min(arrival), to_min(planned))  # type: ignore[arg-type]
         if late > max_late_min:
@@ -113,14 +116,65 @@ def late_rows(arrivals: List[Dict[str, Any]],
             # опоздание в полсмены.
             out.append({"employee_id": eid, "name": a.get("name") or eid[:8], "date": day,
                         "arrival": arrival, "planned": None, "late_min": 0,
-                        "status": "noplan"})
+                        "status": "noplan", "open": on_shift})
             continue
         out.append({"employee_id": eid, "name": a.get("name") or eid[:8], "date": day,
                     "arrival": arrival, "planned": planned,
                     "late_min": late if late > grace_min else 0,
-                    "status": "late" if late > grace_min else "ontime"})
+                    "status": "late" if late > grace_min else "ontime",
+                    "open": on_shift})
     out.sort(key=lambda r: (r["date"], r["arrival"], r["name"]))
     return out
+
+
+def by_employee(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Кто чаще опаздывает за период: одна строка на сотрудника.
+
+    Знаменатель — только дни с эталоном (как в summarize): «вне графика» не
+    делает человека ни хорошим, ни плохим. Сортировка по числу опозданий, потом
+    по минутам — владельцу нужен не тот, кто разово опоздал на час, а тот, кто
+    опаздывает каждый день.
+    """
+    agg: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        eid = r["employee_id"]
+        e = agg.setdefault(eid, {"employee_id": eid, "name": r.get("name") or eid[:8],
+                                 "days": 0, "late_days": 0, "late_minutes": 0,
+                                 "worst_min": 0, "last_late": None, "noplan": 0})
+        if r["status"] == "noplan":
+            e["noplan"] += 1
+            continue
+        e["days"] += 1
+        if r["status"] == "late":
+            e["late_days"] += 1
+            e["late_minutes"] += r["late_min"]
+            if r["late_min"] > e["worst_min"]:
+                e["worst_min"] = r["late_min"]
+            if not e["last_late"] or r["date"] > e["last_late"]:
+                e["last_late"] = r["date"]
+    out = []
+    for e in agg.values():
+        e["late_pct"] = round(e["late_days"] / e["days"] * 100, 1) if e["days"] else None
+        e["avg_late_min"] = round(e["late_minutes"] / e["late_days"]) if e["late_days"] else 0
+        out.append(e)
+    out.sort(key=lambda e: (-e["late_days"], -e["late_minutes"], e["name"]))
+    return out
+
+
+def by_day(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """История по дням: [{date, total, late, late_minutes}] — чтобы было видно,
+    это разовый провал или так каждый день."""
+    days: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        if r["status"] == "noplan":
+            continue
+        d = days.setdefault(r["date"], {"date": r["date"], "total": 0, "late": 0,
+                                        "late_minutes": 0})
+        d["total"] += 1
+        if r["status"] == "late":
+            d["late"] += 1
+            d["late_minutes"] += r["late_min"]
+    return [days[k] for k in sorted(days)]
 
 
 def summarize(rows: List[Dict[str, Any]]) -> Dict[str, Any]:

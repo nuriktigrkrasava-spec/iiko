@@ -3,6 +3,7 @@ import { useApi, useOrg } from '../lib/useApi'
 import { Glass } from './ui'
 import { tenge } from '../lib/format'
 import StaffOnShift from './StaffOnShift'
+import LateHistory from './LateHistory'
 
 /* Кассовые смены — то, по чему сверяются с кассой.
 
@@ -15,11 +16,15 @@ import StaffOnShift from './StaffOnShift'
    висят непринятыми — по ним не закрыт учётный день. */
 
 type Edit = { sum_was: number; sum_now: number; type?: string; time?: string; account_changed?: boolean }
+type Pay = { name: string; sum: number }
 type Shift = {
   number: number; cash_reg: number; cashier: string; open: string; close: string
   cash: number; card: number; credit: number; total: number
   pay_in: number; pay_out: number; cash_diff: number; counted?: number
   status: string; edits?: Edit[]
+  /* точные типы оплат из платёжных записей смены: «Терминал Kaspi», «КАСПИ
+     онлайн», «Kaspi для QR», «Wolt Онлайн», «БАЛЛЫ» — а не общее «карта» */
+  pay_breakdown?: Pay[]
 }
 type DayT = { date: string; shifts: Shift[] }
 type Pending = { count: number; items: { date: string; number: number; status: string; open_now?: boolean }[] }
@@ -68,6 +73,18 @@ export default function Shifts() {
   const shifts = day?.shifts ?? []
   const sum = (k: keyof Shift) => shifts.reduce((a, s) => a + (Number(s[k]) || 0), 0)
   const diffTotal = shifts.reduce((a, s) => a + (Number(s.cash_diff) || 0), 0)
+
+  /* Типы оплат за день: складываем разбивки всех смен. «Карта» в таблице — это
+     сумма десятка разных типов (Kaspi терминал, Kaspi QR, Kaspi онлайн, Wolt,
+     Glovo, Яндекс, баллы), и по ней нельзя понять, где на самом деле деньги. */
+  const payDay = (() => {
+    const acc = new Map<string, number>()
+    for (const s of shifts) for (const p of s.pay_breakdown || []) acc.set(p.name, (acc.get(p.name) || 0) + p.sum)
+    const rows = [...acc].map(([name, v]) => ({ name, sum: v })).filter((p) => p.sum)
+    rows.sort((a, b) => b.sum - a.sum)
+    return rows
+  })()
+  const payTotal = payDay.reduce((a, p) => a + p.sum, 0)
 
   return (
     <>
@@ -149,6 +166,42 @@ export default function Shifts() {
           </div>
         )}
 
+        {/* Точные типы оплат: колонка «Карта» — это Kaspi терминал, Kaspi QR,
+            Kaspi онлайн, Wolt, Glovo, Яндекс и баллы в одной куче. Здесь видно,
+            сколько где на самом деле, и сходится ли разбивка с итогом смены. */}
+        {!!payDay.length && (
+          <div style={{ marginTop: 16 }}>
+            <Eyebrow t="Типы оплат" hint={shifts.length > 1 ? `по ${shifts.length} сменам дня` : 'за день'} />
+            <div style={{ marginTop: 9, display: 'grid', gap: 7 }}>
+              {payDay.map((p) => {
+                const pct = payTotal ? (p.sum / payTotal) * 100 : 0
+                return (
+                  <div key={p.name}>
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'baseline', fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--hi)', fontWeight: 650 }}>{p.name}</span>
+                      <span className="tnum" style={{ marginLeft: 'auto', color: 'var(--hi)', fontWeight: 700 }}>{tenge(p.sum)}</span>
+                      <span className="tnum" style={{ color: 'var(--mute)', minWidth: 44, textAlign: 'right' }}>
+                        {pct >= 0.1 ? pct.toFixed(1) : '<0.1'}%
+                      </span>
+                    </div>
+                    <div style={{ marginTop: 4, height: 4, borderRadius: 3, background: 'var(--hair-2)' }}>
+                      <div style={{ width: `${Math.max(1, pct)}%`, height: '100%', borderRadius: 3, background: 'var(--acc)', opacity: 0.75 }} />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            {/* Если разбивка не сошлась с payOrders — молчать нельзя: значит часть
+                оплат прошла типом, которого нет в платёжных записях смены. */}
+            {Math.abs(payTotal - sum('total')) > 1 && (
+              <div style={{ marginTop: 9, fontSize: 12, color: 'var(--amb)' }}>
+                Разбивка {tenge(payTotal)} против итога смен {tenge(sum('total'))} —
+                расхождение {tenge(payTotal - sum('total'))}.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Правки платежей при приёмке: их видно только здесь, в выручке они уже учтены */}
         {shifts.some((s) => (s.edits || []).length) && (
           <div style={{ marginTop: 14 }}>
@@ -170,6 +223,9 @@ export default function Shifts() {
 
       {/* Кто пришёл на смену и кто опоздал — за тот же день, что выбран сверху */}
       <StaffOnShift date={date} />
+
+      {/* А это уже история: кто опаздывает регулярно, а не сегодня */}
+      <LateHistory date={date} />
 
       {/* Непринятые смены: по ним не закрыт учётный день */}
       <Glass span={12}>

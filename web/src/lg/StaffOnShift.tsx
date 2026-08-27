@@ -16,6 +16,8 @@ type Row = {
   employee_id: string; name: string; date: string
   arrival: string; planned: string | null; late_min: number
   status: 'late' | 'ontime' | 'noplan'
+  /* явка ещё не закрыта — человек прямо сейчас на смене */
+  open?: boolean
 }
 type Summary = { total: number; late: number; late_pct: number | null; late_minutes: number; noplan: number }
 type Data = {
@@ -114,8 +116,16 @@ export default function StaffOnShift({ date }: { date: string }) {
                   <span style={{ fontSize: 12, color: 'var(--mute)', fontWeight: 600 }}> · {s.late_minutes} мин суммарно</span>
                 )}
               </span>
+            ) : rows.length ? (
+              /* Люди отметились, но ни один приход не лёг ни на один старт смены:
+                 «явок нет» тут было бы враньём — явки есть, эталона нет. */
+              <span style={{ fontSize: 13, color: 'var(--mute)' }}>
+                Отметились {rows.length} — все вне графика, опоздания по ним не считаем.
+              </span>
             ) : (
-              <span style={{ fontSize: 13, color: 'var(--mute)' }}>За этот день явок нет.</span>
+              <span style={{ fontSize: 13, color: 'var(--mute)' }}>
+                За этот день явок нет{date >= new Date().toISOString().slice(0, 10) ? ' — ещё никто не отметился на терминале' : ''}.
+              </span>
             )}
             {!!s?.noplan && (
               <span style={{ fontSize: 11.5, color: 'var(--amb)' }}>{s.noplan} вне графика — не в счёт</span>
@@ -183,7 +193,12 @@ export default function StaffOnShift({ date }: { date: string }) {
                     <tr key={r.employee_id + r.date}>
                       <td style={td}>
                         <div style={{ fontWeight: 650, color: 'var(--hi)' }}>{r.name}</div>
-                        <div style={{ fontSize: 11, color: st.c, fontWeight: 650 }}>{st.t}</div>
+                        <div style={{ fontSize: 11, color: st.c, fontWeight: 650 }}>
+                          {st.t}
+                          {/* Явка без закрытия = человек ещё на смене. Именно из-за
+                              таких строк день раньше выглядел пустым. */}
+                          {r.open && <span style={{ color: 'var(--acc)' }}> · на смене</span>}
+                        </div>
                       </td>
                       <td className="tnum" style={{ ...td, textAlign: 'right', color: 'var(--hi)', fontWeight: 650 }}>{r.arrival}</td>
                       <td className="tnum" style={{ ...td, textAlign: 'right', color: 'var(--mute)' }}>{r.planned || '—'}</td>

@@ -110,6 +110,51 @@ def test_broken_time_is_skipped_not_crashed():
     print("  [OK] строка с битым временем выброшена, остальные посчитаны")
 
 
+def test_ranking_puts_the_regular_latecomer_first():
+    """Кто чаще опаздывает: важна регулярность, а не один рекордный час."""
+    rows = SL.late_rows(
+        [att("e1", "Регулярный", "11:30", "2026-08-20"),
+         att("e1", "Регулярный", "11:25", "2026-08-21"),
+         att("e1", "Регулярный", "11:20", "2026-08-22"),
+         att("e2", "Разовый", "12:30", "2026-08-21"),
+         att("e3", "Пунктуальный", "10:55", "2026-08-21")],
+        branch_starts=("11:00",))
+    top = SL.by_employee(rows)
+    assert [e["name"] for e in top[:2]] == ["Регулярный", "Разовый"]
+    first = top[0]
+    assert first["late_days"] == 3 and first["days"] == 3 and first["late_pct"] == 100.0
+    assert first["late_minutes"] == 30 + 25 + 20 and first["worst_min"] == 30
+    assert first["avg_late_min"] == 25 and first["last_late"] == "2026-08-22"
+    punctual = [e for e in top if e["name"] == "Пунктуальный"][0]
+    assert punctual["late_days"] == 0 and punctual["late_pct"] == 0.0
+
+
+def test_ranking_ignores_offschedule_arrivals():
+    """«Вне графика» не делает человека ни хорошим, ни плохим — он вне знаменателя."""
+    rows = SL.late_rows([att("e1", "Вечерний", "19:30", "2026-08-20")],
+                        branch_starts=("11:00",))
+    e = SL.by_employee(rows)[0]
+    assert e["days"] == 0 and e["noplan"] == 1 and e["late_pct"] is None
+
+
+def test_history_by_day_is_sorted_and_counts_people():
+    rows = SL.late_rows(
+        [att("e1", "А", "11:30", "2026-08-21"), att("e2", "Б", "10:50", "2026-08-21"),
+         att("e1", "А", "10:59", "2026-08-20")],
+        branch_starts=("11:00",))
+    hist = SL.by_day(rows)
+    assert [d["date"] for d in hist] == ["2026-08-20", "2026-08-21"]
+    assert hist[1] == {"date": "2026-08-21", "total": 2, "late": 1, "late_minutes": 30}
+
+
+def test_on_shift_flag_survives_to_the_row():
+    """Незакрытая явка = человек сейчас на смене; на опоздание это не влияет."""
+    a = att("e1", "На смене", "11:30")
+    a["open"] = True
+    row = SL.late_rows([a], branch_starts=("11:00",))[0]
+    assert row["open"] is True and row["late_min"] == 30
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_grace_does_not_make_a_latecomer, test_late_beyond_grace_is_counted_in_full,
@@ -117,7 +162,9 @@ if __name__ == "__main__":
               test_evening_shift_matches_evening_start, test_schedule_overrides_branch_start,
               test_earliest_arrival_wins, test_early_arrival_is_never_late,
               test_night_shift_across_midnight, test_no_reference_means_silence_not_ontime,
-              test_summary_counts_people_not_intervals, test_broken_time_is_skipped_not_crashed):
+              test_summary_counts_people_not_intervals, test_broken_time_is_skipped_not_crashed,
+              test_ranking_puts_the_regular_latecomer_first, test_ranking_ignores_offschedule_arrivals,
+              test_history_by_day_is_sorted_and_counts_people, test_on_shift_flag_survives_to_the_row):
         print(f"\n>>> {t.__name__}")
         try:
             t()

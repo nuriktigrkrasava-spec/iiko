@@ -7556,33 +7556,61 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
 
 def _attendance_journal(attendance: List[Dict[str, Any]],
                         employees: Dict[str, str],
-                        org_name: str = "") -> List[Dict[str, Any]]:
+                        org_name: str = "",
+                        day_from: Optional[str] = None,
+                        day_to: Optional[str] = None) -> List[Dict[str, Any]]:
     """Явки iiko → строки приход/уход по (сотрудник, день). Пересекающиеся
     интервалы (задвоенные роли на терминале) сливаются, чтобы часы не удваивались.
-    Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours."""
+    Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours, open.
+
+    Явку, которая ЕЩЁ ИДЁТ, iiko отдаёт без dateTo: конец пишется только когда
+    смену закрывают (у Алиева это ~00:07). Такие строки раньше молча выпадали —
+    и весь рабочий день экран уверял, что «за этот день явок нет», а к ночи
+    всё появлялось. Незакрытая явка = человек на смене: конец берём «сейчас»,
+    строку помечаем open.
+
+    day_from/day_to обязательны именно из-за этого: незакрытые явки iiko отдаёт
+    в ответ на ЛЮБОЙ период (у Алиева висят с 2024-го), и без фильтра по дате
+    они превратились бы в «сотрудник на смене второй год».
+    """
     by_emp_day: Dict[Any, list] = {}
     org_key = org_name.strip().lower()
+    now = local_now()
     for a in attendance:
         if org_key and (a.get("departmentName") or "").strip().lower() != org_key:
             continue
         try:
             df = datetime.fromisoformat(a["dateFrom"])
-            dt_ = datetime.fromisoformat(a["dateTo"])
         except Exception:
             continue
+        raw_to = a.get("dateTo")
+        open_ = not raw_to
+        if open_:
+            # «Сейчас» в поясе самой явки, иначе aware и naive не вычитаются.
+            dt_ = now.astimezone(df.tzinfo) if df.tzinfo else now.replace(tzinfo=None)
+        else:
+            try:
+                dt_ = datetime.fromisoformat(raw_to)
+            except Exception:
+                continue
         if dt_ <= df:
-            continue
-        by_emp_day.setdefault((a["employeeId"], df.date()), []).append((df, dt_))
+            # Закрытая явка нулевой длины — мусор. Открытая: человек отметился
+            # только что, часов ещё нет, но на смене он уже есть.
+            if not open_:
+                continue
+            dt_ = df
+        by_emp_day.setdefault((a["employeeId"], df.date()), []).append((df, dt_, open_))
     rows: List[Dict[str, Any]] = []
     for (eid, _day), ivs in by_emp_day.items():
         ivs.sort()
         merged = [list(ivs[0])]
-        for df, dt_ in ivs[1:]:
+        for df, dt_, op in ivs[1:]:
             if df <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], dt_)
+                if dt_ >= merged[-1][1]:
+                    merged[-1][1], merged[-1][2] = dt_, op
             else:
-                merged.append([df, dt_])
-        for a0, b0 in merged:
+                merged.append([df, dt_, op])
+        for a0, b0, op in merged:
             rows.append({
                 "employee_id": eid,
                 "name": employees.get(eid, eid[:8]),
@@ -7590,7 +7618,11 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
                 "start": a0.strftime("%H:%M"),
                 "end": b0.strftime("%H:%M"),
                 "hours": round((b0 - a0).total_seconds() / 3600, 2),
+                "open": op,
             })
+    if day_from or day_to:
+        lo, hi = day_from or "0000-00-00", day_to or "9999-99-99"
+        rows = [r for r in rows if lo <= r["date"] <= hi]
     rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
     return rows
 
@@ -8800,7 +8832,7 @@ async def attendance(org_id: str,
             k = (a.get("employeeId"), a.get("dateFrom"))
             if k not in seen:
                 att.append(a); seen.add(k)
-    rows = _attendance_journal(att, employees, info.get("org_name", ""))
+    rows = _attendance_journal(att, employees, info.get("org_name", ""), from_, to)
     # роспись филиала = сотрудники, у кого есть явки/график в этом филиале за период
     branch_ids = {r["employee_id"] for r in rows}
     emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
@@ -8832,7 +8864,7 @@ async def _attendance_rows(org_id: str, real_org: str, day_from: str, day_to: st
     except Exception as e:
         logger.warning(f"[staff-late] явки {real_org}: {e!r}")
         return None
-    return _attendance_journal(att, employees, info.get("org_name", ""))
+    return _attendance_journal(att, employees, info.get("org_name", ""), day_from, day_to)
 
 
 def _late_reference(real_org: str) -> Dict[str, Any]:
@@ -8857,7 +8889,10 @@ async def _staff_late_for(org_id: str, real_org: str, day_from: str, day_to: str
     ref = _late_reference(real_org)
     calc = SL.late_rows(rows, sched, ref["starts"], ref["grace_min"])
     save_staff_late(real_org, calc)
-    return {"rows": calc, "summary": SL.summarize(calc), **ref}
+    # top/by_day считаем здесь же: для периода это те же строки, второй запрос в
+    # iiko ради рейтинга «кто чаще опаздывает» был бы платой ни за что.
+    return {"rows": calc, "summary": SL.summarize(calc),
+            "top": SL.by_employee(calc), "by_day": SL.by_day(calc), **ref}
 
 
 @app.get("/api/staff-late/{org_id}")
@@ -8868,12 +8903,20 @@ async def staff_late_day(org_id: str, date: Optional[str] = None,
     day_from = date or local_now().date().isoformat()
     day_to = to or day_from
     real_org = _get_org_id(org_id, user)
+    # Экран смен просит день, месяц и историю сразу — без кеша это три похода в
+    # iiko за одними и теми же явками.
+    cache_key = f"staff_late:{real_org}:{day_from}:{day_to}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
     res = await _staff_late_for(org_id, real_org, day_from, day_to, user)
     if res is None:
         return {"available": False,
                 "reason": "Явки доступны только на самохостед iiko",
-                "rows": [], "summary": SL.summarize([])}
-    return {"available": True, "date": day_from, **res}
+                "rows": [], "summary": SL.summarize([]), "top": [], "by_day": []}
+    resp = {"available": True, "date": day_from, "from": day_from, "to": day_to, **res}
+    _set_cached(cache_key, resp)
+    return resp
 
 
 class ShiftStartsIn(BaseModel):
