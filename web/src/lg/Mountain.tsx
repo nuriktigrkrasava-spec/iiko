@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import { Glass } from './ui'
 import SalmonAct from './SalmonAct'
@@ -66,25 +67,82 @@ const monogram = (name: string) => {
 }
 const scoreColor = (n: number) => (n >= 70 ? 'var(--grn)' : n >= 45 ? 'var(--amb)' : 'var(--red)')
 
+/** Куда положить всплывающий разбор оценки, чтобы он поместился целиком.
+
+    Кольцо стоит у края карточки, а критериев восемь: разбор и уезжал за
+    правый край, и не влезал по высоте. Считаем от кольца, зажимаем по
+    горизонтали в окно и раскрываем в ту сторону, где места больше, отдавая
+    ровно столько высоты, сколько там есть.
+*/
+export function popoverBox(host: { getBoundingClientRect(): DOMRect } | null,
+                           win = typeof window === 'undefined' ? null : window): React.CSSProperties {
+  if (!host || !win) return { position: 'absolute', bottom: 'calc(100% + 8px)', left: '50%', transform: 'translateX(-50%)', minWidth: 190 }
+  const r = host.getBoundingClientRect()
+  const M = 8                                   // поля от краёв окна
+  const w = Math.min(280, win.innerWidth - M * 2)
+  const left = Math.min(Math.max(M, r.left + r.width / 2 - w / 2), win.innerWidth - w - M)
+  const above = r.top - M * 2
+  const below = win.innerHeight - r.bottom - M * 2
+  return below >= above
+    ? { position: 'fixed', left, top: r.bottom + M, width: w, maxHeight: Math.max(120, below) }
+    : { position: 'fixed', left, bottom: win.innerHeight - r.top + M, width: w, maxHeight: Math.max(120, above) }
+}
+
 /* Кольцо оценки: дуга по величине балла + разбор по критериям при наведении. */
-function ScoreRing({ score, criteria, note }: {
+export function ScoreRing({ score, criteria, note }: {
   score: number | null
   criteria?: { label: string; value: number | null; weight: number; counted?: boolean }[]
   note?: string | null
 }) {
   const [open, setOpen] = useState(false)
-  // Разбор открывался только ВВЕРХ — у первых строк списка он уезжал за верхний
-  // край карточки, и лидеры сети своей раскладки не видели вообще. Смотрим,
-  // сколько места сверху, и при нехватке разворачиваем вниз.
-  const [below, setBelow] = useState(false)
+  /* Разбор висел внутри строки: absolute + translateX(-50%) от кольца, а кольцо
+     стоит у правого края карточки — половина разбора уезжала за экран, и с
+     восемью критериями он ещё и не помещался по высоте.
+
+     Теперь это слой поверх страницы (position: fixed), привязанный к кольцу:
+     • по горизонтали центрируем по кольцу и ЗАЖИМАЕМ в окно — за край не уйдёт;
+     • по вертикали раскрываем в ту сторону, где места больше, и задаём
+       maxHeight ровно по этому месту: не влезло — прокручивается внутри себя,
+       а не обрезается;
+     • держимся за bottom, а не за top, когда раскрываемся вверх: так высоту
+       разбора знать заранее не нужно.
+     Прокрутка страницы разбор закрывает — иначе он «отклеился» бы от кольца. */
+  const [box, setBox] = useState<React.CSSProperties | null>(null)
   const hostRef = useRef<HTMLSpanElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
   const show = (v: boolean) => {
-    if (v) {
-      const top = hostRef.current?.getBoundingClientRect().top ?? 999
-      setBelow(top < 260)          // ~высота всплывающего разбора с запасом
-    }
+    if (v) setBox(popoverBox(hostRef.current))
     setOpen(v)
   }
+  /* Уводя мышь с кольца на сам разбор, курсор пересекает пустоту: закрывать
+     сразу — значит не дать до разбора доехать. Даём фору, её снимает вход в
+     разбор. */
+  const grace = useRef<number | null>(null)
+  const hideSoon = () => {
+    if (grace.current) clearTimeout(grace.current)
+    grace.current = window.setTimeout(() => setOpen(false), 160)
+  }
+  const keep = () => { if (grace.current) { clearTimeout(grace.current); grace.current = null } }
+  useEffect(() => {
+    if (!open) return
+    const close = () => setOpen(false)
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    const outside = (e: PointerEvent) => {
+      const t = e.target as Node
+      if (!hostRef.current?.contains(t) && !popRef.current?.contains(t)) setOpen(false)
+    }
+    window.addEventListener('scroll', close, true)
+    window.addEventListener('resize', close)
+    window.addEventListener('keydown', esc)
+    document.addEventListener('pointerdown', outside, true)
+    return () => {
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('keydown', esc)
+      document.removeEventListener('pointerdown', outside, true)
+      keep()
+    }
+  }, [open])
   const size = 36, r = 14, C = 2 * Math.PI * r
   const val = score ?? 0
   const col = scoreColor(val)
@@ -93,7 +151,7 @@ function ScoreRing({ score, criteria, note }: {
       role="button" tabIndex={0} aria-expanded={open}
       onClick={(e) => { e.stopPropagation(); show(!open) }}
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); show(!open) } }}
-      onMouseEnter={() => show(true)} onMouseLeave={() => setOpen(false)}>
+      onMouseEnter={() => { keep(); show(true) }} onMouseLeave={hideSoon}>
       <svg width={size} height={size} style={{ display: 'block' }} aria-label={`оценка ${score ?? '—'} из 100`}>
         <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--hair)" strokeWidth={3.5} />
         {score != null && (
@@ -106,15 +164,16 @@ function ScoreRing({ score, criteria, note }: {
           {score ?? '—'}
         </text>
       </svg>
-      {open && criteria && (
-        <span style={{
-          position: 'absolute',
-          ...(below ? { top: 'calc(100% + 8px)' } : { bottom: 'calc(100% + 8px)' }),
-          left: '50%', transform: 'translateX(-50%)',
-          zIndex: 8, minWidth: 190, padding: '10px 12px', borderRadius: 12, textAlign: 'left',
-          background: 'var(--card)', border: '1px solid var(--hair)',
-          boxShadow: '0 16px 34px -14px rgba(20,40,80,.5)', display: 'block',
-        }}>
+      {open && criteria && createPortal((
+        <div ref={popRef} onMouseEnter={keep} onMouseLeave={() => setOpen(false)}
+          style={{
+            ...box,
+            zIndex: 60, padding: '10px 12px', borderRadius: 12, textAlign: 'left',
+            background: 'var(--card)', border: '1px solid var(--hair)',
+            boxShadow: '0 16px 34px -14px rgba(20,40,80,.5)', display: 'block',
+            overflowY: 'auto', overscrollBehavior: 'contain',
+            font: '400 13px/1.4 var(--font-ui, inherit)', color: 'var(--hi)',
+          }}>
           <span style={{ display: 'block', fontSize: 10.5, color: 'var(--mute)', fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase' }}>
             из чего сложилась
           </span>
@@ -131,8 +190,8 @@ function ScoreRing({ score, criteria, note }: {
               </span>
             </span>
           ))}
-        </span>
-      )}
+        </div>
+      ), document.body)}
     </span>
   )
 }
