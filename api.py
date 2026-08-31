@@ -7606,8 +7606,12 @@ def _attendance_journal(attendance: List[Dict[str, Any]],
         merged = [list(ivs[0])]
         for df, dt_, op in ivs[1:]:
             if df <= merged[-1][1]:
-                if dt_ >= merged[-1][1]:
-                    merged[-1][1], merged[-1][2] = dt_, op
+                merged[-1][1] = max(merged[-1][1], dt_)
+                # Незакрытая явка означает «человек на смене» независимо от того,
+                # чем кончаются соседние интервалы. Раньше флаг брался у того,
+                # кто кончается позже: сотрудник с закрытой явкой до 12:00 и
+                # открытой с 11:10 до полудня числился ушедшим.
+                merged[-1][2] = merged[-1][2] or op
             else:
                 merged.append([df, dt_, op])
         for a0, b0, op in merged:

@@ -82,6 +82,19 @@ def test_range_filter_drops_neighbour_day():
     assert [r["employee_id"] for r in rows] == ["e2"]
 
 
+def test_open_shift_survives_a_longer_closed_record():
+    """Флаг «на смене» брался у интервала, который кончается позже. Утром, когда
+    открытая явка ещё короче закрытой, сотрудник числился ушедшим со смены.
+    Незакрытая явка означает «на смене» независимо от соседей."""
+    today = api.local_now().date().isoformat()
+    att = [{"employeeId": "e1", "dateFrom": f"{today}T11:00:00",
+            "dateTo": f"{today}T23:00:00", "departmentName": "Демо"},
+           {"employeeId": "e1", "dateFrom": f"{today}T11:10:00", "dateTo": None,
+            "departmentName": "Демо"}]
+    rows = api._attendance_journal(att, {}, "Демо", today, today)
+    assert len(rows) == 1 and rows[0]["open"] is True, rows
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
