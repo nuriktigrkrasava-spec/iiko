@@ -106,8 +106,11 @@ describe('сдано ещё не значит чисто', () => {
     mock({ done, reviews: dirty, criteria: { hall: { label: 'Зал',
       items: ['Пол под столами и у входа', 'Урна не переполнена'] } } })
     render(<ChecklistUpload token="btok.sig" />)
-    await screen.findByText('Сдать чек-лист')
-    expect(screen.getByText(/но разбор нашёл замечания/)).toBeTruthy()
+    // Ждём текст, который рисуется ИЗ ЗАГРУЖЕННОГО разбора. «Сдать чек-лист»
+    // появляется сразу, ещё до ответа fetch, и синхронная проверка следом
+    // выигрывала гонку только на незанятой машине: под нагрузкой (например,
+    // когда рядом идёт сборка) тест падал, хотя код исправен.
+    expect(await screen.findByText(/но разбор нашёл замечания/)).toBeTruthy()
     expect(screen.getByText('есть замечания')).toBeTruthy()
     // критерий с провалом показан текстом замечания
     expect(screen.getByText(/урна с горкой/)).toBeTruthy()
