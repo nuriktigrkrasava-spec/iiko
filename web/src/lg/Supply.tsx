@@ -53,10 +53,15 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
   ]
   const cells: (Inv | null)[] = Array.from({ length: 12 }, (_, i) => invoices[i] ?? null)
   const active = sel != null ? invoices[sel] : null
+  // Отсеков всегда 12, а поставок за неделю бывает и 26 — не делаем вид, что
+  // показали всё: подпись говорит, сколько было и сколько влезло в кузов.
+  const hint = invoices.length > cells.length
+    ? `за последнюю неделю ${invoices.length} накладных · в кузове 12 свежих · нажми для деталей`
+    : 'накладные за последнюю неделю · ячейка = поставка · нажми для деталей'
 
   return (
     <Glass span={12}>
-      <Eyebrow t="Склад · борт" hint="ячейка = поставка по накладной · наведи · нажми для деталей" />
+      <Eyebrow t="Склад · борт" hint={hint} />
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 14 }}>
         {badges.map((b) => (
           <div key={b.k} style={{ display: 'inline-flex', alignItems: 'center', gap: 9, padding: '9px 14px', borderRadius: 13, border: '1px solid var(--hair)', background: 'var(--glass-2)' }}>
@@ -121,6 +126,14 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
           </div>
         </div>
       </div>
+
+      {/* Пустой кузов сам по себе читается как поломка — говорим прямо, что
+          за неделю поставок не было, а не оставляем 12 серых ячеек молчать. */}
+      {!invoices.length && (
+        <div style={{ marginTop: 10, textAlign: 'center', fontSize: 12.5, color: 'var(--mute)' }}>
+          За последнюю неделю накладных не было
+        </div>
+      )}
 
       {driver && <PriceSearch onClose={() => setDriver(false)} />}
 
@@ -246,8 +259,13 @@ export default function Supply() {
   const cn = useApi<Cancels>('cancels', { period: 'month' })
   const wd = useApi<Withdrawals>('withdrawals', { period: 'month' })
   const inv = useApi<Invoices>('invoices', { period: 'month' })
+  /* Фура показывает ПОСЛЕДНЮЮ НЕДЕЛЮ: в кузове 12 отсеков, и за месяц свежие
+     поставки вытеснялись старыми — борт переставал отвечать на вопрос «что
+     приехало». Отдельный запрос, а не фильтр по месячному: «Закуп по
+     поставщикам» ниже считается за месяц и терять его окно нельзя. */
+  const invWeek = useApi<Invoices>('invoices', { period: 'week' })
 
-  if (stock.loading || wo.loading || cn.loading || wd.loading || inv.loading) return <Note>Сводим склад и закупки…</Note>
+  if (stock.loading || wo.loading || cn.loading || wd.loading || inv.loading || invWeek.loading) return <Note>Сводим склад и закупки…</Note>
   if (!stock.data || !wo.data || !cn.data || !wd.data) return <Note>Не удалось собрать данные склада: {stock.error || wo.error || cn.error || wd.error}</Note>
 
   const items = stock.data.items
@@ -286,7 +304,7 @@ export default function Supply() {
   return (
     <>
       {/* 0 · Герой-фура — отсеки = поставки по накладным (референс Truck&Co) */}
-      <TruckHero wo={wo.data} total={stock.data.total} outN={outN} lowN={lowN} invoices={invs} />
+      <TruckHero wo={wo.data} total={stock.data.total} outN={outN} lowN={lowN} invoices={invWeek.data?.invoices ?? []} />
 
       {/* 1 · Герой — списания + доля + остатки */}
       <Glass span={5} spot>

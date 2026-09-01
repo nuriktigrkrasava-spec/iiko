@@ -2990,6 +2990,21 @@ async def expenses(org_id: str, period: str = "week", user: Dict = Depends(get_c
     return {"total": round(sum(op["amount"] for op in operations)), "operations": operations, "categories": categories}
 
 
+def _inv_date_key(date_str: str) -> str:
+    """Дата накладной → сортируемый ключ ГГГГ-ММ-ДД.
+
+    В одном списке лежат два формата: из iiko приходит «15.01.2026» (_fmt_date),
+    у своих накладных — «2026-01-15». Сортировка строк по такому винегрету
+    ставила все iiko-накладные ниже своих независимо от дня. Фура на «Складе»
+    показывает только первые 12 ячеек — значит в кузове оказывались не самые
+    свежие поставки.
+    """
+    d = (date_str or "").strip()[:10]
+    if len(d) == 10 and d[2] == "." and d[5] == ".":
+        return f"{d[6:10]}-{d[3:5]}-{d[0:2]}"
+    return d
+
+
 def _own_position(it: Dict[str, Any]) -> Dict[str, Any]:
     """Позиция своей накладной → строка состава для карточки.
 
@@ -3108,7 +3123,7 @@ async def invoices(org_id: str, period: str = "week", user: Dict = Depends(get_c
     except Exception as e:
         print(f"[invoices] bot invoices failed: {e}")
 
-    result_list.sort(key=lambda x: x["date"], reverse=True)
+    result_list.sort(key=lambda x: _inv_date_key(x["date"]), reverse=True)
     total_amount = round(sum(float(x.get("amount") or 0) for x in result_list))
     result = {"invoices": result_list, "total_amount": total_amount, "count": len(result_list)}
     _set_cached(key, result)
