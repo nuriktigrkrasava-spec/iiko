@@ -5,6 +5,7 @@ import { Glass, Chart, Delta, Orb, Insight, PlanFallback } from './ui'
 import { hbar, bar } from './charts'
 import { tenge, num } from '../lib/format'
 import InvoicePunch from './InvoicePunch'
+import MatchMemory from './MatchMemory'
 import PriceSearch from './PriceSearch'
 
 /* ── Формы данных (подтверждены curl) ── */
@@ -139,6 +140,11 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
 
       {/* «Пробить накладную»: фото → распознавание → наше автосопоставление */}
       <InvoicePunch />
+
+      {/* Справочник соответствий — чем живёт автосопоставление. Стоит сразу под
+          пробивкой: связка появляется здесь ровно тогда, когда оператор выбрал
+          товар выше, и искать её в другом разделе неоткуда. */}
+      <MatchMemory />
 
       {/* раскрытие: деталь накладной по клику */}
       {active && (

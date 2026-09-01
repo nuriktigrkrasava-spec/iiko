@@ -33,6 +33,7 @@ import uvicorn
 from database import (
     init_db, get_user, create_user, set_demo_mode,
     save_iiko_products, load_iiko_products, iiko_products_synced_at,
+    list_invoice_match_memory, forget_invoice_match,
     iiko_products_stats, remember_invoice_match, get_invoice_match_memory,
     get_demo_invoice_count, inc_demo_invoice_count,
     start_demo_trial, get_demo_trial,
@@ -4578,6 +4579,66 @@ async def nomenclature_search(org_id: str, q: str = Query("", max_length=100),
     ]}
 
 
+class MatchMemoryPayload(BaseModel):
+    name: str                       # строка накладной как её напечатал поставщик
+    product_id: str
+    product_name: Optional[str] = None
+
+
+def _memory_source_key(org_id: str, user: Dict) -> Tuple[str, Any]:
+    """Ключ справочника соответствий = ключ справочника номенклатуры.
+
+    У сети свой iiko-сервер почти на каждый филиал, и id товара с одного на
+    другом невалиден: память обязана жить в тех же границах, что номенклатура.
+    """
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    return _catalog_key(client, real_org), client
+
+
+@app.get("/api/invoice/match-memory/{org_id}")
+async def match_memory_list(org_id: str, user: Dict = Depends(get_current_user)):
+    """Справочник «строка поставщика → товар iiko» этого сервера."""
+    if _use_demo_data(user, org_id):
+        return {"entries": [], "demo": True}
+    key, _client = _memory_source_key(org_id, user)
+    return {"entries": list_invoice_match_memory(key), "source_key": key}
+
+
+@app.post("/api/invoice/match-memory/{org_id}")
+async def match_memory_remember(org_id: str, payload: MatchMemoryPayload,
+                                user: Dict = Depends(get_current_user)):
+    """Запомнить выбор оператора СРАЗУ, не дожидаясь отправки накладной в iiko.
+
+    Так делает сам iiko со своим прайс-листом поставщика. Раньше мы запоминали
+    только после успешной отправки: оператор мог поправить десять строк и не
+    отправить накладную — вся работа пропадала, и следующая накладная того же
+    поставщика снова приходила несопоставленной.
+    """
+    if _use_demo_data(user, org_id):
+        return {"ok": False, "error": "демо-режим"}
+    name_key = _match_memory_key(payload.name or "")
+    if not name_key or not payload.product_id:
+        # Строка вроде «М/КОР 3,2% 1Л» сворачивается в пустой ключ («м» короче
+        # двух букв, «кор» — стоп-слово). Запоминать нечего, но и не ошибка.
+        return {"ok": False, "remembered": False, "reason": "пустой ключ строки"}
+    key, _client = _memory_source_key(org_id, user)
+    remember_invoice_match(key, name_key, payload.product_id,
+                           payload.product_name or "", name_raw=payload.name or "")
+    return {"ok": True, "remembered": True, "name_norm": name_key}
+
+
+@app.delete("/api/invoice/match-memory/{org_id}")
+async def match_memory_forget(org_id: str, name_norm: str = Query(..., min_length=1),
+                              user: Dict = Depends(get_current_user)):
+    """Убрать ошибочное соответствие из справочника."""
+    if _use_demo_data(user, org_id):
+        return {"ok": False, "error": "демо-режим"}
+    key, _client = _memory_source_key(org_id, user)
+    return {"ok": True, "removed": forget_invoice_match(key, name_norm)}
+
+
 @app.get("/api/stores/{org_id}")
 async def stores_list(org_id: str, user: Dict = Depends(get_current_user)):
     """Склады филиала из iiko (для выбора склада накладной в редакторе)."""
@@ -6152,7 +6213,9 @@ def remember_invoice_matches(client, org_id: str, items: List[Dict[str, Any]]):
         if not pid or not name_key or it.get("needs_review"):
             continue
         try:
-            remember_invoice_match(key, name_key, pid, it.get("iiko_product_name") or "")
+            remember_invoice_match(key, name_key, pid,
+                                   it.get("iiko_product_name") or "",
+                                   name_raw=it.get("name") or "")
         except Exception as e:
             logger.warning(f"[invoice-match] память {key}: {e!r}")
 

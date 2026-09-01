@@ -1983,6 +1983,11 @@ def _ensure_nomenclature(conn):
         PRIMARY KEY (source_key, name_norm)
     );
     """)
+    # name_raw добавлен позже: ключ name_norm — это токены («м кор»), и показывать
+    # его оператору бессмысленно. Держим рядом исходную строку накладной.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(invoice_match_memory)").fetchall()}
+    if "name_raw" not in cols:
+        conn.execute("ALTER TABLE invoice_match_memory ADD COLUMN name_raw TEXT")
 
 
 def save_iiko_products(source_key: str, products: List[Dict[str, Any]], fetched: int = 0):
@@ -2074,22 +2079,54 @@ def touch_iiko_products_sync(source_key: str, stale: bool = False,
 
 
 def remember_invoice_match(source_key: str, name_norm: str, product_id: str,
-                           product_name: str = ""):
-    """Запоминает выбор оператора: строка накладной → товар iiko."""
+                           product_name: str = "", name_raw: str = ""):
+    """Запоминает выбор оператора: строка накладной → товар iiko.
+
+    Повторный вызов с тем же ключом ПЕРЕПРИВЯЗЫВАЕТ запись, а не плодит вторую:
+    оператор, поправивший ошибочную привязку, ждёт именно этого.
+    """
     if not (source_key and name_norm and product_id):
         return
     conn = get_db()
     _ensure_nomenclature(conn)
     conn.execute(
         "INSERT INTO invoice_match_memory (source_key, name_norm, product_id, product_name, "
-        "hits, updated_at) VALUES (?, ?, ?, ?, 1, ?) "
+        "name_raw, hits, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?) "
         "ON CONFLICT(source_key, name_norm) DO UPDATE SET "
         "  product_id = excluded.product_id, product_name = excluded.product_name, "
+        "  name_raw = COALESCE(NULLIF(excluded.name_raw, ''), invoice_match_memory.name_raw), "
         "  hits = invoice_match_memory.hits + 1, updated_at = excluded.updated_at",
-        (source_key, name_norm, product_id, product_name or "", datetime.now().isoformat())
+        (source_key, name_norm, product_id, product_name or "", name_raw or "",
+         datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
+
+
+def list_invoice_match_memory(source_key: str) -> List[Dict[str, Any]]:
+    """Справочник соответствий одного iiko-сервера, свежие сверху."""
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    rows = conn.execute(
+        "SELECT name_norm, name_raw, product_id, product_name, hits, updated_at "
+        "FROM invoice_match_memory WHERE source_key = ? "
+        "ORDER BY updated_at DESC", (source_key,)).fetchall()
+    conn.close()
+    return [{"name_norm": r["name_norm"], "name_raw": r["name_raw"] or r["name_norm"],
+             "product_id": r["product_id"], "product_name": r["product_name"] or "",
+             "hits": int(r["hits"] or 0), "updated_at": r["updated_at"] or ""} for r in rows]
+
+
+def forget_invoice_match(source_key: str, name_norm: str) -> bool:
+    """Убирает запись. False — записи не было (повторное удаление не ошибка)."""
+    conn = get_db()
+    _ensure_nomenclature(conn)
+    cur = conn.execute("DELETE FROM invoice_match_memory "
+                       "WHERE source_key = ? AND name_norm = ?", (source_key, name_norm))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return bool(n)
 
 
 def get_invoice_match_memory(source_key: str) -> Dict[str, Dict[str, Any]]:

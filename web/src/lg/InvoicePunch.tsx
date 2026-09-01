@@ -278,6 +278,7 @@ export default function InvoicePunch() {
   }
 
   function applyProduct(idx: number, p: Product) {
+    const line = items[idx]?.name || p.name
     setItems((prev) => prev.map((it, i) => i === idx
       ? {
           ...it, iiko_product_id: p.id, iiko_product_name: p.name,
@@ -288,6 +289,15 @@ export default function InvoicePunch() {
         }
       : it))
     setOpenRow(null)
+    /* Запоминаем выбор СРАЗУ — так же делает iiko со своим прайс-листом
+       поставщика. Раньше соответствие писалось только после успешной отправки
+       накладной: оператор мог разобрать десять строк и не отправить, и вся
+       работа пропадала — следующая накладная приходила такой же пустой.
+       Ответ не ждём: справочник — побочная польза, разбор важнее. */
+    fetch(`/api/invoice/match-memory/${org}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: line, product_id: p.id, product_name: p.name }),
+    }).catch(() => {})
   }
 
   async function send() {
