@@ -51,18 +51,24 @@ type HallTable = { id: string; section: string; number?: number; seats: number; 
 type Hall = { connected: boolean; branch?: string; tables?: HallTable[]; sections?: string[]; has_reservations?: boolean; reserved?: number; channels?: { name: string; count: number }[]; guests?: number; open_orders?: number; load?: number }
 type Sales = { channels: { name: string; revenue: number; orders: number }[] }
 
-/* Каналы iiko → 3 типа заказов. Порядок проверок важен: сначала агрегаторы
-   (по бренду), затем доставка (по «достав»), остальное — зал/вынос. */
-type ChTag = 'hall' | 'delivery' | 'agg'
+/* Каналы → 4 типа заказов, те же, что в «Плане» и в карточке «Каналы продаж».
+   /api/sales уже отдаёт их сгруппированными (_classify_channel на бэкенде), но
+   правило повторено здесь на случай сырых названий: демо-данные и старые
+   закэшированные ответы приходят с «Wolt» и «Сайт доставка» вместо групп.
+   Порядок проверок важен: сначала агрегаторы (по бренду), затем самовывоз —
+   «Сайт самовывоз» это вынос, а не доставка. */
+type ChTag = 'hall' | 'pickup' | 'delivery' | 'agg'
 function classifyChannel(name: string): ChTag {
   const s = name.toLowerCase()
-  if (/wolt|glovo|яндекс|yandex/.test(s)) return 'agg'
+  if (/агрегатор|wolt|волт|glovo|глово|яндекс|yandex|choco|чоко/.test(s)) return 'agg'
+  if (/самовывоз|вынос/.test(s)) return 'pickup'
   if (/достав/.test(s)) return 'delivery'
-  return 'hall' // «Обычный заказ», зал, вынос, самовывоз и прочее
+  return 'hall' // «Зал», «Обычный заказ» и всё, что съели на месте
 }
 const TYPE_META: { key: ChTag; name: string; c: string }[] = [
   { key: 'hall', name: 'Зал', c: 'var(--grn)' },
   { key: 'delivery', name: 'Доставка', c: 'var(--acc)' },
+  { key: 'pickup', name: 'Самовывоз', c: 'var(--amb)' },
   { key: 'agg', name: 'Агрегаторы', c: '#7b5cff' },
 ]
 
@@ -218,7 +224,7 @@ export default function Home() {
   // т.к. это открытые заказы, а не итоги дня). Демо — прежние демо-каналы.
   const salesCh = sales.data?.channels || []
   const grouped: Record<ChTag, { o: number; r: number }> = {
-    hall: { o: 0, r: 0 }, delivery: { o: 0, r: 0 }, agg: { o: 0, r: 0 },
+    hall: { o: 0, r: 0 }, pickup: { o: 0, r: 0 }, delivery: { o: 0, r: 0 }, agg: { o: 0, r: 0 },
   }
   for (const c of salesCh) {
     const g = grouped[classifyChannel(c.name)]
@@ -235,7 +241,7 @@ export default function Home() {
           Плитки «Гости сейчас / Открытые заказы / Загрузка зала» ушли вниз —
           они живут только в час-пик, а в остальное время это ряд нулей и прочерков. */}
       <Glass span={12}>
-        <div className="eyebrow"><span>Заказы по типам · сегодня</span><span className="hint">Зал · Доставка · агрегаторы</span></div>
+        <div className="eyebrow"><span>Заказы по типам · сегодня</span><span className="hint">Зал · Доставка · Самовывоз · Агрегаторы</span></div>
         <div style={{ display: 'flex', gap: 12, marginTop: 14, overflowX: 'auto', paddingBottom: 4 }}>
           {chList.map((ch) => (
             <div key={ch.name} style={{

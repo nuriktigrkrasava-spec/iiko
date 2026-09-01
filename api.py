@@ -2042,25 +2042,41 @@ async def revenue(org_id: str, response: Response, period: str = "today",
     return resp
 
 
-# ── Индивидуальная поправка каналов «для дяди» ──────────────────────────────
-# SaaS для всех остаётся как есть, но для конкретного клиента «сайтовые» каналы
-# склеиваются с обычными по имени: «Сайт Доставка» → «Доставка»,
-# «Сайт Самовывоз» → «Самовывоз». Применяется ТОЛЬКО для его telegram_id.
-# TODO: проставить реальный telegram_id дяди (придёт позже) — пока None = выключено.
-# Если в его iiko каналы названы иначе — поправить ключи в UNCLE_CHANNEL_MERGE.
-UNCLE_TELEGRAM_ID: Optional[int] = None
-
-UNCLE_CHANNEL_MERGE: Dict[str, str] = {
-    "Сайт Доставка":  "Доставка",
-    "Сайт Самовывоз": "Самовывоз",
+# ── Каналы продаж: девять типов заказа iiko → четыре канала ─────────────────
+# Смысла в типах заказа четыре: зал, самовывоз, доставка, агрегаторы. Карточка
+# показывала девять сырых долек («Доставка» и «Сайт доставка» отдельно, каждый
+# агрегатор своей), и по ней нельзя было ответить «сколько даёт доставка».
+# Группируем ТЕМ ЖЕ _classify_channel, что и «План», — правило одно на продукт.
+CHANNEL_GROUP_RU: Dict[str, str] = {
+    "hall": "Зал", "pickup": "Самовывоз",
+    "delivery": "Доставка", "agg": "Агрегаторы",
 }
 
 
-def _normalize_channel_name(name: str, user: Dict) -> str:
-    """Для дяди склеивает сайтовые каналы с обычными. Остальным — без изменений."""
-    if UNCLE_TELEGRAM_ID is not None and user.get("id") == UNCLE_TELEGRAM_ID:
-        return UNCLE_CHANNEL_MERGE.get(name.strip(), name)
-    return name
+def _group_sales_channels(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Строки OLAP по OrderType.Name → каналы карточки, по убыванию выручки.
+
+    Это чистая перегруппировка: сумма по каналам равна выручке, как и до неё.
+    Пустые группы не показываем — филиалу без агрегаторов пустая долька в
+    легенде только мешает.
+    """
+    agg: Dict[str, Dict[str, float]] = {}
+    for row in rows:
+        name = row.get("OrderType.Name") or row.get("OrderTypeName", "")
+        if not name:
+            continue
+        key = _classify_channel(name)
+        cell = agg.setdefault(key, {"revenue": 0.0, "guests": 0.0, "orders": 0.0})
+        cell["revenue"] += float(row.get("DishDiscountSumInt", 0) or 0)
+        cell["guests"] += float(row.get("GuestNum", 0) or 0)
+        cell["orders"] += float(row.get("OrdersCount", 0) or 0)
+    out = [{
+        "name": CHANNEL_GROUP_RU[k], "key": k,
+        "revenue": v["revenue"], "guests": int(v["guests"]), "orders": int(v["orders"]),
+        "avg_check": v["revenue"] / v["guests"] if v["guests"] else 0, "top": True,
+    } for k, v in agg.items()]
+    out.sort(key=lambda x: x["revenue"], reverse=True)
+    return out
 
 
 # ── Тип оплаты → счёт (куда ушли деньги) ────────────────────────────────────
@@ -2152,23 +2168,7 @@ async def sales(org_id: str, period: str = "today",
         pay_rows      = [r for t in per_org for r in t[3].get("data", [])]
 
         # Дедупликация по имени для каналов (несколько филиалов могут вернуть один и тот же канал)
-        ch_agg: Dict[str, Dict[str, float]] = {}
-        for row in channels_rows:
-            name = row.get("OrderType.Name") or row.get("OrderTypeName", "")
-            if not name:
-                continue
-            name = _normalize_channel_name(name, user)
-            if name not in ch_agg:
-                ch_agg[name] = {"revenue": 0.0, "guests": 0, "orders": 0}
-            ch_agg[name]["revenue"] += float(row.get("DishDiscountSumInt", 0) or 0)
-            ch_agg[name]["guests"]  += int(row.get("GuestNum", 0) or 0)
-            ch_agg[name]["orders"]  += int(float(row.get("OrdersCount", 0) or 0))
-        channels = [{
-            "name": n, "revenue": v["revenue"], "guests": int(v["guests"]),
-            "orders": int(v["orders"]),
-            "avg_check": v["revenue"] / v["guests"] if v["guests"] else 0, "top": True
-        } for n, v in ch_agg.items()]
-        channels.sort(key=lambda x: x["revenue"], reverse=True)
+        channels = _group_sales_channels(channels_rows)
         total_orders = sum(c["orders"] for c in channels)
 
         # Дедупликация по названию блюда
@@ -3515,6 +3515,30 @@ async def retention(org_id: str, user: Dict = Depends(get_current_user)):
     return {"clients": 0, "orders": 0, "cohorts": [], "frequency": []}
 
 
+def _olap_revenue(row: Dict[str, Any]) -> float:
+    """Выручка из строки OLAP. DishDiscountSumInt — реально оплачено, сходится
+    с кассой; DishAmountSum — сумма до скидок, она её завышает (на живом
+    филиале за 2026 год 184,2 млн против 170,2 млн). Берём кассовую, а если
+    сервер её не отдаёт — сумму до скидок: пустой экран хуже завышенного.
+    """
+    paid = float(row.get("DishDiscountSumInt") or 0)
+    return paid or float(row.get("DishAmountSum") or 0)
+
+
+def _prev_year_cutoff(today: date) -> date:
+    """Тот же день год назад — граница окна прошлого года.
+
+    Текущий год обрывается сегодняшним днём, а прошлый брался целиком по
+    месяцам: сентябрь из одного дня сравнивался с целым сентябрём год назад и
+    рост выходил +14,5% вместо честных +26,4%. Сравнивать надо равное с равным.
+    29 февраля в невисокосном году не существует — съезжаем на 28-е.
+    """
+    try:
+        return today.replace(year=today.year - 1)
+    except ValueError:
+        return today.replace(year=today.year - 1, day=28)
+
+
 @app.get("/api/comparison/{org_id}")
 async def comparison(org_id: str,
                      org_ids: Optional[str] = Query(None),
@@ -3527,26 +3551,29 @@ async def comparison(org_id: str,
 
     from datetime import date as date_cls
 
-    async def fetch_year_for_org(real_org: str, year: int):
+    async def fetch_year_for_org(real_org: str, year: int, end: str):
         info = _get_restaurant_info(real_org, user)
         client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         start = f"{year}-01-01"
-        end = f"{year}-12-31"
         try:
             result = await client.olap_report(
                 _olap_dept(real_org, info), start, end,
                 group_by=["OpenDate.Typed", "OrderType.Name"],
-                aggregates=["DishAmountSum", "OrdersCount"]
+                aggregates=["DishDiscountSumInt", "DishAmountSum", "OrdersCount"]
             )
             return result.get("data", [])
         except Exception as e:
             logger.warning(f"[comparison] {real_org}/{year}: {e}")
             return []
 
-    cur_year = local_now().year
+    today = local_now().date()
+    cur_year = today.year
+    # Прошлый год обрезаем тем же днём: иначе незакрытый месяц текущего года
+    # сравнивается с целым месяцем прошлого и рост занижается.
+    prev_end = _prev_year_cutoff(today).isoformat()
     cur_batches, prev_batches = await asyncio.gather(
-        asyncio.gather(*(fetch_year_for_org(o, cur_year) for o in orgs)),
-        asyncio.gather(*(fetch_year_for_org(o, cur_year - 1) for o in orgs)),
+        asyncio.gather(*(fetch_year_for_org(o, cur_year, today.isoformat()) for o in orgs)),
+        asyncio.gather(*(fetch_year_for_org(o, cur_year - 1, prev_end) for o in orgs)),
     )
     cur_rows  = [r for batch in cur_batches  for r in batch]
     prev_rows = [r for batch in prev_batches for r in batch]
@@ -3562,7 +3589,7 @@ async def comparison(org_id: str,
             except Exception:
                 continue
             channel = row.get("OrderType.Name", "Прочее") or "Прочее"
-            rev = float(row.get("DishAmountSum", 0) or 0)
+            rev = _olap_revenue(row)
             orders = int(row.get("OrdersCount", 0) or 0)
 
             if by == "week":
@@ -3602,6 +3629,9 @@ async def comparison(org_id: str,
         "channels": sorted(all_channels),
         "cur_year": cur_year,
         "prev_year": cur_year - 1,
+        # до какого дня посчитан каждый год — экран подписывает этим текущий месяц
+        "as_of": today.isoformat(),
+        "prev_as_of": prev_end,
     }
 
 
@@ -8259,18 +8289,24 @@ PLAN_TYPES = ["hall", "pickup", "delivery", "agg"]
 # Версия классификатора каналов. Снимок факта (plan_day_facts) считается ПО НЕЙ,
 # поэтому при её смене старые строки надо выбросить: до v2 вынос лежал внутри
 # зала, и сравнение «эта неделя против прошлой» смешивало бы два разных правила.
-PLAN_FACTS_VER = "2"
+PLAN_FACTS_VER = "3"
 
 
 def _classify_channel(name: str) -> str:
     """Тип заказа iiko → канал плана.
 
     Реальные значения OrderType.Name у сети: «Обычный заказ», «Самовывоз»,
-    «Сайт самовывоз», «Доставка», «Сайт доставка», «Wolt», «Яндекс Еда».
-    Самовывоз проверяем ДО доставки: «Сайт самовывоз» — это вынос, а не доставка.
+    «Сайт самовывоз», «Доставка», «Сайт доставка», Wolt, Glovo, Chocofood,
+    «Яндекс Еда». Самовывоз проверяем ДО доставки: «Сайт самовывоз» — это
+    вынос, а не доставка. Chocofood в правило не был записан вовсе и молча
+    падал в зал — выручка агрегатора считалась залом.
+
+    Это единственное правило группировки каналов в продукте: по нему живут и
+    «План», и карточка «Каналы продаж».
     """
     s = (name or "").lower()
-    if any(k in s for k in ("wolt", "glovo", "яндекс", "yandex")):
+    if any(k in s for k in ("wolt", "волт", "glovo", "глово",
+                            "яндекс", "yandex", "choco", "чоко")):
         return "agg"
     if "самовывоз" in s or "вынос" in s:
         return "pickup"

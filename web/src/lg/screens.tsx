@@ -250,7 +250,7 @@ export function Inv() {
 
 /* ─────────── Год к году — живой /api/comparison ─────────── */
 type CmpRow = { key: string; label: string; year: number; total_rev: number; total_orders: number }
-type CmpT = { months: { current: CmpRow[]; previous: CmpRow[] }; cur_year: number; prev_year: number }
+type CmpT = { months: { current: CmpRow[]; previous: CmpRow[] }; cur_year: number; prev_year: number; as_of?: string; prev_as_of?: string }
 export function YoY() {
   const { data, error, loading } = useApi<CmpT>('comparison', { period: 'month' })
   if (loading) return <Note>Сравниваю год к году…</Note>
@@ -271,8 +271,8 @@ export function YoY() {
   return (
     <>
       <Glass span={5} spot warp>
-        <Hero eyebrow="Год к году" hint={`${data.cur_year} против ${data.prev_year}`} value={<Trend v={growth} />}
-          note={`${tenge(curSum)} против ${tenge(prevSum)} год назад · ${plus} из ${m.length} месяцев в плюсе.`} />
+        <Hero eyebrow="Год к году" hint={`${data.cur_year} против ${data.prev_year} · день в день`} value={<Trend v={growth} />}
+          note={`${tenge(curSum)} против ${tenge(prevSum)} год назад · ${plus} из ${m.length} месяцев в плюсе. Прошлый год посчитан по то же число, что и текущий, — иначе незакрытый месяц сравнивался бы с целым.`} />
       </Glass>
       <Glass span={7}>
         <Eyebrow t="Выручка по месяцам, млн ₸" hint={`бледное — ${data.prev_year} · акцент — ${data.cur_year}`} />
