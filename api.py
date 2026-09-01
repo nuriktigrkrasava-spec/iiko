@@ -4383,6 +4383,64 @@ class RecognizePayload(BaseModel):
     images: List[RecognizeImage] = Field(default_factory=list, max_length=10)
 
 
+# ── Поставщик с фото ────────────────────────────────────────────────────────
+# Имя поставщика Claude с накладной читает, но списком из трёхсот позиций
+# оператор всё равно пользовался руками. Подбираем id здесь.
+#
+# Справочник живой и грязный: ведущие пробелы и кавычки (« Ер-Амаль»), дубли
+# латиницей и кириллицей («AFOOD-Афуд» / «Afood-Афуд»), казахские буквы
+# («Айғаным» рядом с «Айганым»), приписки «поставщик», склады филиалов.
+_SUPPLIER_NOISE = {
+    "тоо", "ооо", "ип", "зао", "оао", "ао", "жшс", "кх", "чп", "фх",
+    "llp", "ltd", "llc", "inc", "co", "company",
+    "поставщик", "поставщика", "склад",
+}
+# Казахские буквы к ближайшим русским: «Айғаным» и «Айганым» — один поставщик.
+_KZ_FOLD = str.maketrans({"ғ": "г", "қ": "к", "ң": "н", "ө": "о", "ұ": "у",
+                          "ү": "у", "һ": "х", "і": "и", "ә": "а"})
+
+
+def _supplier_tokens(name: str) -> List[str]:
+    """Имя поставщика → значимые слова.
+
+    В отличие от товаров числа НЕ выбрасываем: у «7 морей» цифра — часть имени,
+    и без неё от поставщика ничего не остаётся.
+    """
+    s = (name or "").lower().replace("ё", "е").translate(_KZ_FOLD)
+    s = re.sub(r"[^a-zа-я0-9]+", " ", s)
+    return [w for w in s.split() if w not in _SUPPLIER_NOISE and len(w) > 1 or w.isdigit()]
+
+
+def _supplier_score(recognized: str, candidate: str) -> float:
+    """0..1 — насколько поставщик из iiko похож на прочитанного с фото."""
+    a, b = _supplier_tokens(recognized), _supplier_tokens(candidate)
+    if not a or not b:
+        return 0.0
+    hit = sum(1 for x in a if _word_hit(x, b)) / len(a)
+    ratio = SequenceMatcher(None, " ".join(a), " ".join(b)).ratio()
+    return 0.6 * hit + 0.4 * ratio
+
+
+# Порог намеренно выше товарного: накладная, проведённая на ЧУЖОГО поставщика,
+# — ошибка в учёте, которую потом ищут руками. Сомневаемся — выбирает оператор.
+_SUPPLIER_MIN_SCORE = float(os.getenv("INVOICE_SUPPLIER_MIN", "0.72"))
+
+
+def _best_supplier_match(suppliers: List[Dict[str, Any]], recognized: str
+                         ) -> Tuple[Optional[Dict[str, Any]], float]:
+    """Лучший поставщик под имя с фото, либо (None, score) — если не уверены."""
+    if not recognized or not _supplier_tokens(recognized):
+        return None, 0.0
+    best, best_s = None, 0.0
+    for sup in suppliers or []:
+        sc = _supplier_score(recognized, sup.get("name") or "")
+        if sc > best_s:
+            best, best_s = sup, sc
+    if best_s < _SUPPLIER_MIN_SCORE:
+        return None, best_s
+    return best, best_s
+
+
 @app.post("/api/invoice/recognize/{org_id}")
 async def invoice_recognize(org_id: str, payload: RecognizePayload,
                             user: Dict = Depends(get_current_user)):
@@ -4418,6 +4476,8 @@ async def invoice_recognize(org_id: str, payload: RecognizePayload,
     items = result.get("items") or []
 
     matched = unmatched = 0
+    supplier_id = ""
+    supplier_matched = ""
     if not _use_demo_data(user, org_id):
         real_org = _get_org_id(org_id, user)
         info = _get_restaurant_info(real_org, user)
@@ -4428,9 +4488,25 @@ async def invoice_recognize(org_id: str, payload: RecognizePayload,
         except Exception as e:
             logger.warning(f"[invoice-recognize] сопоставление {org_id}: {e!r}")
         matched = sum(1 for it in items if it.get("iiko_product_id"))
+        # Поставщик — отдельным шагом и в своём try: справочник поставщиков может
+        # не ответить, но разбор позиций из-за этого терять нельзя.
+        try:
+            sup, score = _best_supplier_match(
+                await client.get_suppliers(real_org), result.get("supplier") or "")
+            if sup:
+                supplier_id = sup.get("id") or ""
+                supplier_matched = sup.get("name") or ""
+                logger.info(f"[invoice-recognize] поставщик «{result.get('supplier')}» "
+                            f"→ «{supplier_matched}» ({score:.2f})")
+        except Exception as e:
+            logger.warning(f"[invoice-recognize] поставщик {org_id}: {e!r}")
     return {
         "ok": True,
         "supplier": result.get("supplier"),
+        # id поставщика из iiko — редактор ставит его в выпадающий список сразу.
+        # Пусто = не уверены, выбирает оператор (см. _SUPPLIER_MIN_SCORE).
+        "supplier_id": supplier_id,
+        "supplier_matched": supplier_matched,
         "date": result.get("date"),
         "total_amount": result.get("total_amount", 0),
         "vat_amount": result.get("vat_amount", 0),

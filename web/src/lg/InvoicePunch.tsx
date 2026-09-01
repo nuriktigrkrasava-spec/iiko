@@ -21,6 +21,7 @@ type Item = {
 }
 type Recognized = {
   ok: boolean; error?: string; supplier?: string; date?: string
+  supplier_id?: string; supplier_matched?: string
   total_amount?: number; vat_amount?: number
   items?: Item[]; matched?: number; unmatched?: number; needs_review?: number
 }
@@ -256,8 +257,16 @@ export default function InvoicePunch() {
       fetch(`/api/suppliers/${org}`).then((x) => x.json()).then((x: { suppliers?: Supplier[] }) => {
         const list = x.suppliers ?? []
         setSuppliers(list)
-        const g = guessSupplier(list, d.supplier)
-        if (g) setSupplierId(g.id)
+        // Поставщика подбирает бэкенд по справочнику iiko (_best_supplier_match):
+        // он видит настоящие имена со всей их грязью — кавычками, ТОО, казахскими
+        // буквами. Здешний guessSupplier остаётся страховкой на случай, когда
+        // бэкенд не уверен: подставить кандидата лучше, чем пустой список.
+        if (d.supplier_id && list.some((s) => s.id === d.supplier_id)) {
+          setSupplierId(d.supplier_id)
+        } else {
+          const g = guessSupplier(list, d.supplier)
+          if (g) setSupplierId(g.id)
+        }
       }).catch(() => {})
       fetch(`/api/stores/${org}`).then((x) => x.json()).then((x: { stores?: Store[] }) => setStores(x.stores ?? [])).catch(() => {})
     } catch (e) {
@@ -366,6 +375,12 @@ export default function InvoicePunch() {
             style={{ marginTop: 14, border: '1px solid var(--hair)', borderRadius: 16, padding: '16px 18px', background: 'var(--glass-2)' }}>
             <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', alignItems: 'baseline' }}>
               <div style={{ fontSize: 14.5, fontWeight: 700, color: 'var(--hi)' }}>{rec.supplier || (manual ? 'Ручная накладная' : 'Поставщик не распознан')}</div>
+              {/* Что именно подставлено в iiko: с фото приходит «ТОО "Ер-Амаль"»,
+                  а в справочнике он заведён как « Ер-Амаль» — показываем обоих,
+                  иначе непонятно, почему в списке выбрано другое название. */}
+              {rec.supplier_matched && rec.supplier_matched !== rec.supplier && (
+                <div style={{ fontSize: 11.5, color: 'var(--grn)', fontWeight: 600 }}>✓ в iiko: {rec.supplier_matched}</div>
+              )}
               <div style={{ fontSize: 12, color: 'var(--mute)' }}>{rec.date || 'без даты'}</div>
               <div className="tnum" style={{ marginLeft: 'auto', fontSize: 16, fontWeight: 700, color: 'var(--hi)' }}>{tenge(manual ? rowsTotal : (rec.total_amount || 0))}</div>
             </div>
