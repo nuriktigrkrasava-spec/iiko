@@ -726,6 +726,50 @@ def get_journal_range(since: str, until: str) -> List[Dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def mark_paper_journal(org_id: str, day: str, key: str, telegram_id: int,
+                       on: bool = True, slot: str = "11:00") -> bool:
+    """Галочка «бумажный журнал заполнен». Живёт в journal_entries как
+    kind='paper': скелет тот же (филиал + день + слот + кто), а заводить рядом
+    четвёртую почти такую же таблицу — потом джойнить её в каждом отчёте.
+
+    Снятие галочки — удаление строки, а не status='off': «отметку поставили и
+    сняли» в истории значит ровно то же, что «не отмечали», и лишний статус
+    только заставил бы каждый отчёт про него помнить.
+    """
+    conn = get_db()
+    _ensure_journals(conn)
+    if on:
+        conn.execute(
+            """INSERT INTO journal_entries
+                 (organization_id, telegram_id, kind, zone, slot, day, payload,
+                  status, note, created_at)
+               VALUES (?, ?, 'paper', ?, ?, ?, '', 'ok', '', ?)
+               ON CONFLICT(organization_id, kind, zone, slot, day) DO UPDATE SET
+                 telegram_id = excluded.telegram_id, created_at = excluded.created_at""",
+            (org_id, int(telegram_id or 0), key, slot, day, datetime.now().isoformat()))
+    else:
+        conn.execute("DELETE FROM journal_entries WHERE organization_id = ? AND kind = 'paper' "
+                     "AND zone = ? AND slot = ? AND day = ?", (org_id, key, slot, day))
+    conn.commit()
+    conn.close()
+    return bool(on)
+
+
+def get_paper_journals(org_ids: List[str], since: str, until: str) -> List[Dict[str, Any]]:
+    """Отметки по бумажным журналам за период — для панели и истории недели."""
+    if not org_ids:
+        return []
+    conn = get_db()
+    _ensure_journals(conn)
+    rows = conn.execute(
+        f"SELECT organization_id, zone AS journal, day, telegram_id, created_at "
+        f"FROM journal_entries WHERE kind = 'paper' AND day >= ? AND day <= ? "
+        f"AND organization_id IN ({','.join('?' * len(org_ids))})",
+        [since, until] + list(org_ids)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def seen_photo(sha: str, org_id: str) -> Optional[Dict[str, Any]]:
     """Присылали ли уже это фото. Совпадение = попытка сдать старый кадр."""
     conn = get_db()

@@ -10293,6 +10293,41 @@ async def _journal_send_slot(slot: str) -> int:
     return sent
 
 
+async def _paper_journals_remind() -> int:
+    """Напоминание про бумажные журналы — тем филиалам, где сегодня не отмечено.
+
+    Шлём один раз в день в PAPER_SLOT и только по недостающим: филиалу, который
+    уже всё заполнил, письмо «заполни журналы» объясняет лишь то, что система
+    его не видит.
+    """
+    import journals as J
+    from database import get_paper_journals
+    from journal_routes import in_journals
+    if not BOT_TOKEN:
+        return 0
+    day = local_now().date().isoformat()
+    rests = {r["organization_id"]: r for r in get_all_restaurants()
+             if in_journals(r.get("organization_name"))}
+    marks = {(r["organization_id"], r["journal"])
+             for r in get_paper_journals(list(rests), day, day)}
+    sent = 0
+    for m in get_branch_managers():
+        org = m["organization_id"]
+        if org not in rests:
+            continue
+        missing = [k for k in J.PAPER_KEYS if (org, k) not in marks]
+        if not missing:
+            continue
+        try:
+            await _tg_send(int(m["telegram_id"]),
+                           J.paper_task_text(missing)
+                           + f"\n\n<i>{rests[org].get('organization_name')}</i>")
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[journal] бумага → {m['telegram_id']}: {e!r}")
+    return sent
+
+
 async def _journal_scheduler():
     """Напоминания по слотам. Каждый слот шлём один раз в день — метка в app_state."""
     import journals as J
@@ -10300,6 +10335,19 @@ async def _journal_scheduler():
         try:
             now = local_now()
             today = now.date().isoformat()
+            # Бумажные журналы: один раз утром, тем же правилом «не рассылать
+            # давно просроченное», что и слоты, — иначе рестарт днём поднимет
+            # утреннее напоминание, когда журналы уже подписаны.
+            paper_key = f"journal_paper_sent:{today}"
+            if J.slot_is_due(J.PAPER_SLOT, now) and not get_app_state(paper_key):
+                late = now.hour * 60 + now.minute - J._hm(J.PAPER_SLOT)
+                if late > JOURNAL_LATE_MIN:
+                    set_app_state(paper_key, "skipped")
+                else:
+                    n = await _paper_journals_remind()
+                    set_app_state(paper_key, str(n))
+                    if n:
+                        logger.info(f"[journal] бумажные журналы: напомнили {n} филиалам")
             for slot in sorted(set(J.CLEAN_SLOTS + J.TEMP_SLOTS), key=lambda s: J._hm(s)):
                 if not J.slot_is_due(slot, now):
                     continue

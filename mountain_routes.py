@@ -918,6 +918,77 @@ async def acts_salmon_network(token: str, date_from: Optional[str] = None,
                          "total": A.summarize(rows), "trim_price": A.TRIM_PRICE})
 
 
+# ── Бумажные журналы: галочки и неделя истории ───────────────────────────────
+# Три тетради, которые спрашивает проверка: температурный, бракеражный, уборки.
+# Сами данные бот собирает отдельно (фото зон, замеры камер) — здесь отмечают
+# факт заполнения бумаги. Экран живёт рядом с чек-листами: заполняют их одни и
+# те же люди в один и тот же заход, разносить по вкладкам незачем.
+import journals as J
+
+
+class JournalPayload(BaseModel):
+    org: Optional[str] = None
+    journal: str                   # temp | brak | clean
+    on: bool = True                # снятие галочки — тоже действие человека
+
+
+def _journal_week(orgs: List[str], today) -> Dict[str, Any]:
+    """Неделя истории: семь дней, включая сегодня."""
+    from database import get_paper_journals
+    days = [(today - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
+    rows = get_paper_journals(orgs, days[0], days[-1])
+    done = {(r["organization_id"], r["day"], r["journal"]): r for r in rows}
+    return {"days": days, "done": done}
+
+
+@router.get("/api/mountain/journals/{token}")
+async def journals_panel(token: str, org: Optional[str] = None):
+    """Что отмечено сегодня и как было всю неделю. Владелец видит все филиалы —
+    ему важно «кто не заполняет», управляющий свой."""
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    if not sc["role"]:
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
+    branches = sc["branches"]
+    pick = sc["org"] or org
+    if pick:
+        branches = [b for b in branches if b["organization_id"] == pick]
+        if not branches:
+            return JSONResponse({"error": "чужой филиал"}, status_code=403)
+    orgs = [b["organization_id"] for b in branches]
+    today = local_now().date()
+    week = _journal_week(orgs, today)
+    rows = []
+    for b in branches:
+        o = b["organization_id"]
+        rows.append({
+            "organization_id": o, "name": b["name"],
+            "days": [{"day": d, "done": [k for k in J.PAPER_KEYS
+                                         if (o, d, k) in week["done"]]} for d in week["days"]],
+            "today": {k: bool((o, today.isoformat(), k) in week["done"]) for k in J.PAPER_KEYS},
+        })
+    return JSONResponse({"role": sc["role"], "journals": J.PAPER, "slot": J.PAPER_SLOT,
+                         "today": today.isoformat(), "days": week["days"], "branches": rows})
+
+
+@router.post("/api/mountain/journals/{token}")
+async def journals_mark(token: str, payload: JournalPayload):
+    from database import mark_paper_journal
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or payload.org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    if payload.journal not in J.PAPER_KEYS:
+        return JSONResponse({"error": "неизвестный журнал"}, status_code=400)
+    day = local_now().date().isoformat()
+    mark_paper_journal(b["organization_id"], day, payload.journal, sc["uid"],
+                       on=payload.on, slot=J.PAPER_SLOT)
+    return JSONResponse({"ok": True, "journal": payload.journal, "on": payload.on, "day": day})
+
+
 # ── Консоль владельца: сообщение управляющим ─────────────────────────────────
 # Уведомление живёт на сайте, а не в чате: управляющий и так открывает «Гору»
 # каждый день ради задач и чек-листов. Владелец видит, кто прочитал.

@@ -5,6 +5,7 @@ import { Glass } from './ui'
 import SalmonAct from './SalmonAct'
 import ChecklistUpload from './ChecklistUpload'
 import ChecklistBoard from './ChecklistBoard'
+import Journals from './Journals'
 import { tenge } from '../lib/format'
 import type { Notice } from './Notices'
 
@@ -739,6 +740,10 @@ export default function Mountain() {
           ему нужна картина «кто сдал, кто нет» — она ниже. */}
       {token && !owner && <ChecklistUpload token={token} />}
       {token && owner && <ChecklistBoard token={token} branches={rows.map((r) => r.name)} />}
+
+      {/* Бумажные журналы — здесь же: их заполняет тот же человек и в тот же
+          заход, что и чек-лист. Отдельная вкладка ради трёх галочек не нужна. */}
+      {token && <Journals token={token} />}
 
     </>
   )
