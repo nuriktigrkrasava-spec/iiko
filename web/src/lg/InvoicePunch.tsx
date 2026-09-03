@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { getBranches } from '../lib/api'
 import { useOrg } from '../lib/useApi'
 import { tenge } from '../lib/format'
+import InvoicePrices from './InvoicePrices'
+import PickSupplier from './PickSupplier'
 
 /* «Пробить накладную» — весь путь на сайте, без телеграма:
    1 фото → 2 распознавание → 3 сопоставление → 4 отправка в iiko → 5 проведение.
@@ -300,6 +302,19 @@ export default function InvoicePunch() {
     }).catch(() => {})
   }
 
+  const recentKey = `inv-suppliers:${org}`
+  const [recent, setRecent] = useState<string[]>([])
+  useEffect(() => {
+    try { setRecent(JSON.parse(localStorage.getItem(recentKey) || '[]')) } catch { setRecent([]) }
+  }, [recentKey])
+
+  function rememberSupplier(id: string) {
+    // список короткий: пять последних, свежие сверху, без повторов
+    const next = [id, ...recent.filter((x) => x !== id)].slice(0, 5)
+    setRecent(next)
+    try { localStorage.setItem(recentKey, JSON.stringify(next)) } catch { /* приватный режим */ }
+  }
+
   async function send() {
     if (!supplierId) { setErr('Выбери поставщика'); return }
     if (unmatched) { setErr(`Не сопоставлено ${unmatched} позиций — выбери товар для каждой`); return }
@@ -325,6 +340,7 @@ export default function InvoicePunch() {
       })
       const s = await sr.json()
       if (!sr.ok || !s.ok) { setErr(s.error || s.detail || `HTTP ${sr.status}`); return }
+      rememberSupplier(supplierId)
       setSent({ number: s.iiko_doc_number, id: s.iiko_doc_id, invoiceId: d.invoice_id })
     } catch (e) {
       setErr(String((e as Error).message || e))
@@ -461,13 +477,14 @@ export default function InvoicePunch() {
               </span>
             </div>
 
+            {/* Сколько эта накладная стоила лишнего — одним числом, до отправки */}
+            <InvoicePrices org={org} items={items} />
+
             {/* шаг 4: поставщик, склад, комментарий — как в редакторе мини-аппа */}
             <div style={{ marginTop: 16, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))' }}>
               <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Поставщик
-                <select value={supplierId} onChange={(e) => setSupplierId(e.target.value)} style={{ ...field, marginTop: 5 }}>
-                  <option value="">— выбрать —</option>
-                  {suppliers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+                <PickSupplier suppliers={suppliers} value={supplierId} onChange={setSupplierId}
+                  recent={recent} field={field} />
               </label>
               <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Склад
                 <select value={storeId} onChange={(e) => setStoreId(e.target.value)} style={{ ...field, marginTop: 5 }}>

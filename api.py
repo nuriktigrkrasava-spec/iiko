@@ -3138,6 +3138,29 @@ _price_stats_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _PRICE_STATS_TTL_SECONDS = 3600
 
 
+async def _invoice_rows(real_org: str, info: Dict[str, Any], days: int
+                        ) -> Tuple[List[Dict[str, Any]], bool]:
+    """Строки приходных накладных филиала за `days` дней + признак «iiko ответил».
+
+    Кэш общий с карточкой товара: разбор накладной на 30 позиций иначе тянул бы
+    один и тот же OLAP тридцать раз.
+    """
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    date_to = local_now().strftime("%Y-%m-%d")
+    date_from = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cache_key = f"{real_org}|{days}"
+    cached = _price_stats_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _PRICE_STATS_TTL_SECONDS:
+        return cached[1], True
+    try:
+        rows = await client.get_invoice_items_olap([_olap_dept(real_org, info)], date_from, date_to)
+        _price_stats_cache[cache_key] = (time.time(), rows)
+        return rows, True
+    except Exception as e:
+        logger.warning(f"[price_stats] iiko fetch failed: {e}")
+        return [], False
+
+
 @app.get("/api/price-stats/{org_id}")
 async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
                        days: int = Query(60, ge=1, le=365),
@@ -3145,31 +3168,12 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
     """Агрегат цен товара по поставщикам за `days` дней.
     Источник: iiko export invoice_incoming + локальные bot_invoices.
     """
-    import time
     if _use_demo_data(user, org_id):
         return _demo_price_stats(product_id, days)
 
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-
-    date_to = local_now().strftime("%Y-%m-%d")
-    date_from = (local_now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
-    cache_key = f"{real_org}|{days}"
-    now_ts = time.time()
-    cached = _price_stats_cache.get(cache_key)
-    iiko_ok = True
-    if cached and (now_ts - cached[0]) < _PRICE_STATS_TTL_SECONDS:
-        rows = cached[1]
-    else:
-        try:
-            rows = await client.get_invoice_items_olap([_olap_dept(real_org, info)], date_from, date_to)
-            _price_stats_cache[cache_key] = (now_ts, rows)
-        except Exception as e:
-            logger.warning(f"[price_stats] iiko fetch failed: {e}")
-            rows = []
-            iiko_ok = False
+    rows, iiko_ok = await _invoice_rows(real_org, info, days)
 
     product_name = "—"
     product_unit = ""
@@ -3232,6 +3236,77 @@ async def price_stats(org_id: str, product_id: str = Query(..., min_length=1),
         "stats": {"purchases": purchases_count, "days": days},
         "iiko_ok": iiko_ok,
     }
+
+
+# ── Разбор цен целой накладной ───────────────────────────────────────────────
+# Экран пробития спрашивал цены по одному товару за раз: тридцать позиций —
+# тридцать запросов, и ни одного ответа на главный вопрос «сколько мы на этой
+# накладной потеряли». Здесь всё сразу и одним числом.
+
+class InvoicePricesPayload(BaseModel):
+    product_ids: List[str] = Field(default_factory=list)
+    items: List[Dict[str, Any]] = Field(default_factory=list)   # позиции накладной
+    days: int = 60
+    network: bool = False        # сравнивать со всей сетью, а не только со своим
+
+
+# Сколько филиалов опрашиваем в сетевом сравнении. Каждый — свой OLAP; без
+# потолка «сравнить по сети» на двадцати трёх филиалах превращается в минуту
+# ожидания. Кэш на час делает второй заход мгновенным.
+NETWORK_BRANCH_LIMIT = int(os.getenv("PRICE_NETWORK_LIMIT", "8"))
+
+
+@app.post("/api/invoice-prices/{org_id}")
+async def invoice_prices(org_id: str, payload: InvoicePricesPayload,
+                         user: Dict = Depends(get_current_user)):
+    """Лучшие цены по всем позициям накладной и итог переплаты.
+
+    network=true — ищем и по соседним филиалам: «у кого-то дешевле» чаще всего
+    значит «у соседа», а не «у другого поставщика в этом же филиале». Филиал,
+    который не ответил, просто не участвует: сравнение из семи филиалов лучше,
+    чем ошибка из-за одного упавшего сервера.
+    """
+    import price_compare as PC
+    real_org = _get_org_id(org_id, user)
+    items = payload.items or []
+    pids = [p for p in (payload.product_ids or
+                        [i.get("iiko_product_id") or "" for i in items]) if p]
+    if not pids:
+        return {"best": {}, "overpay": PC.overpay([], {}), "scope": "branch", "branches": []}
+
+    days = max(1, min(int(payload.days or 60), 365))
+    info = _get_restaurant_info(real_org, user)
+    rows, iiko_ok = await _invoice_rows(real_org, info, days)
+    mine_name = info.get("organization_name") or "мой филиал"
+    parts = [PC.best_by_product(rows, pids, branch=mine_name)]
+    asked = [mine_name]
+
+    if payload.network:
+        others = [r for r in (get_restaurants(user.get("id") or 0) or [])
+                  if r["organization_id"] != real_org]
+        sem = asyncio.Semaphore(4)
+
+        async def one(rest: Dict[str, Any]):
+            async with sem:
+                try:
+                    o_info = _get_restaurant_info(rest["organization_id"], user)
+                    o_rows, ok = await _invoice_rows(rest["organization_id"], o_info, days)
+                    if not ok:
+                        return None
+                    name = rest.get("organization_name") or "филиал"
+                    asked.append(name)
+                    return PC.best_by_product(o_rows, pids, branch=name)
+                except Exception as e:
+                    logger.warning(f"[invoice-prices] {rest.get('organization_name')}: {e!r}")
+                    return None
+
+        got = await asyncio.gather(*[one(r) for r in others[:NETWORK_BRANCH_LIMIT]])
+        parts += [g for g in got if g]
+
+    best = PC.merge_best(parts)
+    return {"best": best, "overpay": PC.overpay(items, best), "days": days,
+            "scope": "network" if payload.network else "branch",
+            "branches": asked, "iiko_ok": iiko_ok}
 
 
 @app.get("/api/writeoffs/{org_id}")
