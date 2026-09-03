@@ -768,34 +768,154 @@ async def acts_salmon_get(token: str, org: Optional[str] = None):
 class SalmonPayload(BaseModel):
     org: Optional[str] = None
     weight_raw: float                        # сколько П/Ф стейка пошло в разбор
-    weight_trim: float                       # сколько вышло обрезков
-    weight_waste: float = 0.0                # отход: кости и кожа, себестоимость 0 ₸
+    weight_slice: float                      # сколько вышло нарезки
+    weight_trim: float = 0.0                 # сколько вышло обрезков
     price_per_kg: Optional[float] = None     # переопределение цены, если закуп разовый
+    note: Optional[str] = ""                 # чем разбор отличался, если отличался
+
+
+NO_PRICE = ("Нет цены П/Ф стейка: в накладных за 60 дней его не было. "
+            "Впиши цену вручную.")
 
 
 @router.post("/api/acts/salmon/{token}")
 async def acts_salmon_calc(token: str, payload: SalmonPayload):
-    """Считает акт. В iiko пока не отправляет: схему productionDocument
-    выясняем по ошибкам сервера, и отправлять «наугад» в учёт нельзя."""
+    """Считает разбор, ничего не записывая: цифры на экране пересчитываются на
+    каждый ввод, а фиксация — отдельным действием человека."""
     sc = scope_of_token(token)
-    uid = sc["uid"]
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
+    # по ссылке филиала разбор делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
     ctx = await _salmon_context(sc, sc["org"] or payload.org)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
     if price <= 0:
-        return JSONResponse({"ok": False,
-                             "error": "Нет цены П/Ф стейка: в накладных за 60 дней его не было. "
-                                      "Впиши цену вручную."})
-    res = A.split_salmon(price, payload.weight_raw, payload.weight_trim,
-                         payload.weight_waste)
+        return JSONResponse({"ok": False, "error": NO_PRICE})
+    res = A.split_salmon(price, payload.weight_raw, payload.weight_slice,
+                         payload.weight_trim)
     res["products"] = ctx["products"]
     res["branch"] = ctx["branch"]
     return JSONResponse(res)
+
+
+@router.post("/api/acts/salmon/{token}/save")
+async def acts_salmon_save(token: str, payload: SalmonPayload):
+    """Фиксирует разбор в нашей базе. В iiko поштучно не уходит: администратор
+    заносит один сводный акт за период руками, и второй документ на тот же вес
+    задвоил бы списание. Считаем здесь заново — числам из браузера не верим."""
+    from database import add_salmon_act
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    ctx = await _salmon_context(sc, sc["org"] or payload.org)
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
+    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
+    if price <= 0:
+        return JSONResponse({"ok": False, "error": NO_PRICE})
+    calc = A.split_salmon(price, payload.weight_raw, payload.weight_slice,
+                          payload.weight_trim)
+    if not calc.get("ok"):
+        return JSONResponse(calc)
+    aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, price,
+                         A.TRIM_PRICE, payload.note or "")
+    return JSONResponse({**calc, "saved": True, "id": aid})
+
+
+def _period_bounds(date_from: Optional[str], date_to: Optional[str]) -> Dict[str, str]:
+    """Пусто = текущий месяц: чаще всего свод заносят именно за него."""
+    today = local_now().date()
+    return {"from": date_from or today.replace(day=1).isoformat(),
+            "to": date_to or today.isoformat()}
+
+
+def _all_branch_names() -> Dict[str, str]:
+    """Имена ВСЕХ филиалов сети, а не только своих: публичная таблица без имён
+    ничего не подсказывает — управляющему не с кем себя сравнить."""
+    from database import get_db
+    conn = get_db()
+    rows = conn.execute("SELECT organization_id, organization_name FROM restaurants").fetchall()
+    conn.close()
+    return {r[0]: (r[1] or "Филиал") for r in rows if r[0]}
+
+
+@router.get("/api/acts/salmon/{token}/period")
+async def acts_salmon_period(token: str, org: Optional[str] = None,
+                             date_from: Optional[str] = None, date_to: Optional[str] = None,
+                             only_open: bool = False):
+    """Журнал разборов филиала и свод за период — то, что администратор заносит
+    в iiko одним актом. only_open — только ещё не занесённые."""
+    from database import get_salmon_acts
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    p = _period_bounds(date_from, date_to)
+    rows = get_salmon_acts([b["organization_id"]], p["from"], p["to"], only_open=only_open)
+    return JSONResponse({"branch": b, "period": p, "only_open": only_open,
+                         "acts": rows, "total": A.summarize(rows),
+                         "trim_price": A.TRIM_PRICE})
+
+
+class SalmonPostedPayload(BaseModel):
+    org: Optional[str] = None
+    ids: List[int]                 # ровно те разборы, что человек видел в своде
+
+
+@router.post("/api/acts/salmon/{token}/posted")
+async def acts_salmon_posted(token: str, payload: SalmonPostedPayload):
+    """«Свод занесён в iiko вручную» — закрывает пачку разборов."""
+    from database import mark_salmon_posted
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or payload.org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    n = mark_salmon_posted(payload.ids, [b["organization_id"]], sc["uid"])
+    return JSONResponse({"ok": True, "closed": n})
+
+
+@router.post("/api/acts/salmon/{token}/delete/{act_id}")
+async def acts_salmon_delete(token: str, act_id: int, org: Optional[str] = None):
+    """Убрать ошибочный разбор — пока свод не занесён в iiko. После этого нельзя:
+    сумма на экране разошлась бы с уже проведённым документом."""
+    from database import delete_salmon_act
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    ok = delete_salmon_act(act_id, [b["organization_id"]])
+    return JSONResponse({"ok": ok} if ok else
+                        {"ok": False, "error": "разбор уже занесён в iiko или не ваш"})
+
+
+@router.get("/api/acts/salmon/{token}/network")
+async def acts_salmon_network(token: str, date_from: Optional[str] = None,
+                              date_to: Optional[str] = None):
+    """Публичная таблица по сети: себестоимость нарезки и % отхода по каждому
+    филиалу. Видна любому филиалу — сравнить себя не с кем, если показывать
+    только собственные числа."""
+    from database import get_salmon_acts, all_salmon_orgs
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    if not sc["role"]:
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
+    p = _period_bounds(date_from, date_to)
+    rows = get_salmon_acts(all_salmon_orgs(), p["from"], p["to"], limit=5000)
+    mine = {b["organization_id"] for b in sc["branches"]}
+    branches = A.by_branch(rows, _all_branch_names())
+    for r in branches:
+        r["mine"] = r["organization_id"] in mine
+    return JSONResponse({"period": p, "branches": branches,
+                         "total": A.summarize(rows), "trim_price": A.TRIM_PRICE})
 
 
 # ── Консоль владельца: сообщение управляющим ─────────────────────────────────
@@ -866,100 +986,6 @@ async def notice_read(token: str, notice_id: int):
         return JSONResponse({"error": "сообщение не для вас"}, status_code=403)
     mark_notice_read(notice_id, uid)
     return JSONResponse({"ok": True})
-
-
-class SalmonSendPayload(SalmonPayload):
-    store_id: Optional[str] = None       # склад разбора; пусто — где лежит вход
-
-
-@router.get("/api/acts/salmon/{token}/stores")
-async def acts_salmon_stores(token: str, org: Optional[str] = None):
-    """Склады филиала + подсказка, на каком реально лежит входной П/Ф."""
-    import api
-    sc = scope_of_token(token)
-    uid = sc["uid"]
-    if not sc["valid"]:
-        return JSONResponse({"error": "bad token"}, status_code=404)
-    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
-    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or org)
-    if ctx.get("error"):
-        return JSONResponse(ctx, status_code=403)
-    real_org = ctx["branch"]["organization_id"]
-    info = _rest_by_org(real_org)
-    client = api.get_client(info.get("api_login"), info.get("iiko_server"), info.get("api_password"))
-    stores, suggest = [], ""
-    try:
-        stores = [{"id": s["id"], "name": s["name"]} for s in await client.get_stores(info.get("org_name", ""))]
-    except Exception as e:
-        logger.warning(f"[acts] склады {real_org}: {e!r}")
-    raw = (ctx.get("products") or {}).get("raw") or {}
-    if raw.get("id") and hasattr(client, "get_store_balances"):
-        try:
-            for b in await client.get_store_balances():
-                if b.get("product") == raw["id"] and float(b.get("amount") or 0) > 0:
-                    suggest = b.get("store") or ""
-                    break
-        except Exception:
-            pass
-    return JSONResponse({"stores": stores, "suggest": suggest})
-
-
-@router.post("/api/acts/salmon/{token}/send")
-async def acts_salmon_send(token: str, payload: SalmonSendPayload):
-    """Отправка акта в iiko. Пишет в учёт, поэтому считаем здесь заново, а не
-    доверяем числам из браузера: подменённый вес не должен попасть в документ."""
-    import api
-    sc = scope_of_token(token)
-    uid = sc["uid"]
-    if not sc["valid"]:
-        return JSONResponse({"error": "bad token"}, status_code=404)
-    # по ссылке филиала акт делается только по СВОЕМУ филиалу:
-    # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or payload.org)
-    if ctx.get("error"):
-        return JSONResponse(ctx, status_code=403)
-    prods = ctx["products"]
-    if not (prods.get("raw") and prods.get("trim") and prods.get("slice")):
-        return JSONResponse({"ok": False, "error": "В номенклатуре нет позиций разбора"})
-    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
-    if price <= 0:
-        return JSONResponse({"ok": False, "error": "Нет цены входа — впиши вручную"})
-    calc = A.split_salmon(price, payload.weight_raw, payload.weight_trim,
-                          payload.weight_waste)
-    if not calc.get("ok"):
-        return JSONResponse(calc)
-
-    real_org = ctx["branch"]["organization_id"]
-    info = _rest_by_org(real_org)
-    client = api.get_client(info.get("api_login"), info.get("iiko_server"), info.get("api_password"))
-    if not hasattr(client, "create_production_act"):
-        return JSONResponse({"ok": False, "error": "Этот филиал на облачном iiko — акт недоступен"})
-    store = payload.store_id
-    if not store:
-        try:
-            stores = await client.get_stores(info.get("org_name", ""))
-            store = stores[0]["id"] if stores else ""
-        except Exception as e:
-            return JSONResponse({"ok": False, "error": f"Не получил склады: {e}"})
-    produced = [{"productId": prods["trim"]["id"], "amount": calc["trim"]["weight"]},
-                {"productId": prods["slice"]["id"], "amount": calc["slice"]["weight"]}]
-    # Отход кладём в документ, только если его взвесили и он есть в номенклатуре:
-    # пустая строка с нулевым весом ломает проводку.
-    if calc.get("waste", {}).get("weight") and (prods.get("waste") or {}).get("id"):
-        produced.append({"productId": prods["waste"]["id"], "amount": calc["waste"]["weight"]})
-    try:
-        account = await client.get_account_for_production()
-        resp = await client.create_production_act(
-            store_from=store, store_to=store, account_to=account,
-            consumed=[{"productId": prods["raw"]["id"], "amount": calc["raw"]["weight"]}],
-            produced=produced,
-        )
-    except Exception as e:
-        logger.warning(f"[acts] отправка {real_org}: {e!r}")
-        return JSONResponse({"ok": False, "error": str(e)[:200]})
-    return JSONResponse({**calc, "sent": resp.get("ok"), "number": resp.get("number"),
-                         "send_error": resp.get("error")})
 
 
 # ── Сдача чек-листа с сайта ──────────────────────────────────────────────────

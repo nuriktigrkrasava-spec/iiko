@@ -1,14 +1,22 @@
 import { useEffect, useState } from 'react'
+import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { Glass } from './ui'
 import { tenge } from '../lib/format'
+import { Button, Eyebrow, PHOTO, Tile, field, kg, pc, td, tdR, th, wasteTone } from './salmonKit'
+import SalmonPeriod from './SalmonPeriod'
+import SalmonNetwork from './SalmonNetwork'
 
 /* «Акты и разборы» — рядом с горой, на тех же ссылках.
 
-   Три позиции, больше ничего: П/Ф стейк (вход, цена из накладных), П/Ф обрезки
-   (константа) и П/Ф нарезка (остаток веса и остаток денег). Оператор вводит
-   два веса — сколько стейка разобрал и сколько вышло обрезков.
+   Взвешивают то, что держат в руках: стейк на входе, нарезку и обрезки на
+   выходе. Отход (кости и кожа) не взвешивают — он остаток веса, и его процент
+   и есть оценка разбора.
 
-   Цену можно переписать руками — бывает разовый закуп по другой цене, и
+   В iiko поштучно ничего не уходит: каждый разбор фиксируется у нас, а за
+   период администратор заносит ОДИН сводный акт руками. Два документа на один
+   и тот же вес задвоили бы списание.
+
+   Цену входа можно переписать руками — бывает разовый закуп по другой цене, и
    заставлять человека верить истории накладных в таком случае неправильно. */
 
 type Prod = { id: string; name: string; unit?: string } | null
@@ -17,7 +25,7 @@ type Ctx = {
   role?: 'owner' | 'manager'
   branch?: { organization_id: string; name: string }
   branches?: { organization_id: string; name: string }[]
-  products?: { raw: Prod; trim: Prod; slice: Prod }
+  products?: { raw: Prod; trim: Prod; slice: Prod; waste: Prod }
   price_per_kg?: number
   price_from?: string
   trim_price?: number
@@ -25,41 +33,23 @@ type Ctx = {
 type Line = { weight: number; price_per_kg: number; sum: number }
 type Calc = {
   ok: boolean; error?: string
-  raw?: Line; trim?: Line; slice?: Line; waste?: Line
-  trim_pct?: number; check?: number
-  sent?: boolean; number?: string; send_error?: string
-}
-type Store = { id: string; name: string }
-
-const field: React.CSSProperties = {
-  width: '100%', boxSizing: 'border-box', padding: '9px 11px', fontSize: 13.5,
-  fontFamily: 'inherit', fontVariantNumeric: 'tabular-nums',
-  background: 'var(--glass-2)', color: 'var(--hi)',
-  border: '1px solid var(--hair)', borderRadius: 11,
-}
-const td: React.CSSProperties = { padding: '9px 0', borderBottom: '1px solid var(--hair-2)', fontSize: 13 }
-const tdR: React.CSSProperties = { ...td, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
-const th: React.CSSProperties = {
-  fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)',
-  fontWeight: 600, textAlign: 'left', padding: '0 0 9px', borderBottom: '1px solid var(--hair)',
-}
-
-function Eyebrow({ t, hint }: { t: string; hint?: string }) {
-  return <div className="eyebrow"><span>{t}</span>{hint && <span className="hint">{hint}</span>}</div>
+  raw?: Line; slice?: Line; trim?: Line; waste?: Line
+  slice_pct?: number; trim_pct?: number; waste_pct?: number; check?: number
+  saved?: boolean; id?: number
 }
 
 export default function SalmonAct({ token }: { token: string }) {
   const [ctx, setCtx] = useState<Ctx | null>(null)
   const [org, setOrg] = useState<string>('')
   const [raw, setRaw] = useState('')
+  const [slice, setSlice] = useState('')
   const [trim, setTrim] = useState('')
-  const [waste, setWaste] = useState('')   // отход: кости и кожа, 0 ₸
   const [price, setPrice] = useState('')          // пусто = цена из накладных
   const [calc, setCalc] = useState<Calc | null>(null)
-  const [stores, setStores] = useState<Store[]>([])
-  const [store, setStore] = useState('')
-  const [sending, setSending] = useState(false)
-  const [sent, setSent] = useState<{ number?: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState<Calc | null>(null)
+  const [reload, setReload] = useState(0)         // счётчик: обновить свод и сеть
+  const still = useReducedMotion()
 
   useEffect(() => {
     fetch(`/api/acts/salmon/${token}${org ? `?org=${org}` : ''}`)
@@ -68,196 +58,201 @@ export default function SalmonAct({ token }: { token: string }) {
       .catch((e) => setCtx({ error: String(e.message || e) }))
   }, [token, org])
 
-  useEffect(() => {
-    if (!org) return
-    fetch(`/api/acts/salmon/${token}/stores?org=${org}`).then((r) => r.json())
-      .then((d: { stores?: Store[]; suggest?: string }) => {
-        setStores(d.stores || [])
-        if (d.suggest) setStore(d.suggest)      // склад, где реально лежит вход
-      }).catch(() => {})
-  }, [token, org])
-
   // считаем на сервере: там же лежат тесты на эту арифметику
   useEffect(() => {
     const wr = Number(raw.replace(',', '.')) || 0
-    const wt = Number(trim.replace(',', '.')) || 0
+    const ws = Number(slice.replace(',', '.')) || 0
     if (!wr) { setCalc(null); return }
     const t = setTimeout(() => {
       fetch(`/api/acts/salmon/${token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          org, weight_raw: wr, weight_trim: wt,
-          weight_waste: Number(waste.replace(',', '.')) || 0,
+          org, weight_raw: wr, weight_slice: ws,
+          weight_trim: Number(trim.replace(',', '.')) || 0,
           price_per_kg: price ? Number(price.replace(',', '.')) : null,
         }),
       }).then((r) => r.json()).then(setCalc).catch(() => setCalc(null))
     }, 250)
     return () => clearTimeout(t)
-  }, [raw, trim, waste, price, org, token])
+  }, [raw, slice, trim, price, org, token])
 
-  async function send() {
+  async function save() {
     if (!calc?.ok) return
-    // Запись в учёт — спрашиваем прямо, потом уже не отменить через API.
-    const q = `Провести акт: ${calc.raw?.weight} кг → обрезки ${calc.trim?.weight}`
-      + (calc.waste?.weight ? ` + отход ${calc.waste.weight}` : '')
-      + ` + нарезка ${calc.slice?.weight}?`
-    if (!window.confirm(q)) return
-    setSending(true)
+    setSaving(true)
     try {
-      const r = await fetch(`/api/acts/salmon/${token}/send`, {
+      const r = await fetch(`/api/acts/salmon/${token}/save`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          org, store_id: store || null,
+          org,
           weight_raw: Number(raw.replace(',', '.')) || 0,
+          weight_slice: Number(slice.replace(',', '.')) || 0,
           weight_trim: Number(trim.replace(',', '.')) || 0,
-          weight_waste: Number(waste.replace(',', '.')) || 0,
           price_per_kg: price ? Number(price.replace(',', '.')) : null,
         }),
       })
       const d: Calc = await r.json()
-      if (d.sent) setSent({ number: d.number })
-      else setCalc({ ...(calc as Calc), send_error: d.send_error || d.error || `HTTP ${r.status}` })
-    } finally { setSending(false) }
+      if (d.saved) {
+        setSaved(d)
+        setRaw(''); setSlice(''); setTrim(''); setCalc(null)
+        setReload((n) => n + 1)
+        setTimeout(() => setSaved(null), 6000)
+      } else {
+        setCalc({ ...(calc as Calc), error: d.error || `HTTP ${r.status}`, ok: false })
+      }
+    } finally { setSaving(false) }
   }
 
   if (!ctx) return <Glass span={12}><div style={{ padding: 12, fontSize: 13, color: 'var(--mute)' }}>Гружу справочник…</div></Glass>
   if (ctx.error) return <Glass span={12}><div style={{ padding: 12, fontSize: 13, color: 'var(--red)' }}>{ctx.error}</div></Glass>
 
-  const p = ctx.products || { raw: null, trim: null, slice: null }
+  const p = ctx.products || { raw: null, trim: null, slice: null, waste: null }
   const missing = !p.raw || !p.trim || !p.slice
+  const w = calc?.ok ? calc : null
 
   return (
-    <Glass span={12}>
-      <Eyebrow t="Акты и разборы · лосось"
-        hint={`вход ${p.raw?.name || '—'} · обрезки по ${tenge(ctx.trim_price || 8800)}/кг`} />
+    <>
+      <Glass span={12}>
+        <Eyebrow t="Разбор лосося"
+          hint={`вход ${p.raw?.name || '—'} · обрезки по ${tenge(ctx.trim_price || 8800)}/кг`} />
 
-      {missing && (
-        <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--amb)' }}>
-          В номенклатуре этого филиала нет одной из позиций разбора — акт не собрать.
-        </div>
-      )}
-
-      <div style={{ marginTop: 12, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(170px,1fr))' }}>
-        {ctx.role === 'owner' && (
-          <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Филиал
-            <select value={org} onChange={(e) => { setOrg(e.target.value); setCalc(null) }} style={{ ...field, marginTop: 5 }}>
-              {(ctx.branches || []).map((b) => (
-                <option key={b.organization_id} value={b.organization_id}>{b.name}</option>
-              ))}
-            </select>
-          </label>
+        {missing && (
+          <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--amb)' }}>
+            В номенклатуре этого филиала нет одной из позиций разбора — акт не собрать.
+          </div>
         )}
-        <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>П/Ф стейк в разбор, кг
-          <input value={raw} inputMode="decimal" placeholder="10"
-            onChange={(e) => setRaw(e.target.value)} style={{ ...field, marginTop: 5 }} />
-        </label>
-        <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Обрезки, кг
-          <input value={trim} inputMode="decimal" placeholder="2"
-            onChange={(e) => setTrim(e.target.value)} style={{ ...field, marginTop: 5 }} />
-        </label>
-        <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Отход (кости, кожа), кг
-          <input value={waste} inputMode="decimal" placeholder="0"
-            onChange={(e) => setWaste(e.target.value)} style={{ ...field, marginTop: 5 }} />
-        </label>
-        <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Склад
-          <select value={store} onChange={(e) => setStore(e.target.value)} style={{ ...field, marginTop: 5 }}>
-            <option value="">по умолчанию</option>
-            {stores.map((st) => <option key={st.id} value={st.id}>{st.name}</option>)}
-          </select>
-        </label>
-        <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Цена стейка, ₸/кг
-          <input value={price} inputMode="decimal"
-            placeholder={ctx.price_per_kg ? String(ctx.price_per_kg) : 'нет в накладных'}
-            onChange={(e) => setPrice(e.target.value)} style={{ ...field, marginTop: 5 }} />
-        </label>
-      </div>
 
-      <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
-        {ctx.price_per_kg
-          ? <>Цена из накладных: <b style={{ color: 'var(--hi)' }}>{tenge(ctx.price_per_kg)}/кг</b>{ctx.price_from ? ` · ${ctx.price_from}` : ''}. Поле можно переписать.</>
-          : <>В накладных этого филиала П/Ф стейка нет за 60 дней — впиши цену вручную.</>}
-      </div>
+        {/* Вход и три выхода. Отход не вводят: он остаток веса. */}
+        <div style={{ marginTop: 14, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(158px,1fr))' }}>
+          <Tile photo={PHOTO.raw} label="Стейк в разбор" hint="вход" value={raw}
+            onChange={setRaw} placeholder="10"
+            foot={ctx.price_per_kg ? `${tenge(ctx.price_per_kg)}/кг` : 'цена не найдена'} />
+          <Tile photo={PHOTO.slice} label="Нарезка" hint="выход" value={slice}
+            onChange={setSlice} placeholder="8"
+            foot={w ? `${pc(w.slice_pct)} · ${tenge(w.slice!.price_per_kg)}/кг` : undefined} />
+          <Tile photo={PHOTO.trim} label="Обрезки" hint={`по ${tenge(ctx.trim_price || 8800)}`}
+            value={trim} onChange={setTrim} placeholder="2"
+            foot={w ? `${pc(w.trim_pct)} веса` : undefined} />
+          <Tile photo={PHOTO.waste} label="Отход" hint="кости, кожа" readOnly
+            value={w ? kg(w.waste!.weight) : ''}
+            tone={w ? wasteTone(w.waste_pct || 0) : undefined}
+            foot={w
+              ? <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)} отхода</b>
+              : 'стейк − нарезка − обрезки'} />
+        </div>
 
-      {calc && !calc.ok && (
-        <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{calc.error}</div>
-      )}
+        <div style={{ marginTop: 12, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))' }}>
+          {ctx.role === 'owner' && (
+            <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Филиал
+              <select value={org} onChange={(e) => { setOrg(e.target.value); setCalc(null) }} style={{ ...field, marginTop: 5 }}>
+                {(ctx.branches || []).map((b) => (
+                  <option key={b.organization_id} value={b.organization_id}>{b.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Цена стейка, ₸/кг
+            <input value={price} inputMode="decimal"
+              placeholder={ctx.price_per_kg ? String(ctx.price_per_kg) : 'нет в накладных'}
+              onChange={(e) => setPrice(e.target.value)} style={{ ...field, marginTop: 5 }} />
+          </label>
+        </div>
 
-      {calc?.ok && calc.raw && calc.trim && calc.slice && (
-        <>
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16 }}>
-            <thead><tr>
-              <th style={th}>Позиция</th>
-              <th style={{ ...th, textAlign: 'right' }}>Вес, кг</th>
-              <th style={{ ...th, textAlign: 'right' }}>₸ / кг</th>
-              <th style={{ ...th, textAlign: 'right' }}>Сумма</th>
-            </tr></thead>
-            <tbody>
-              <tr>
-                <td style={td}>{p.raw?.name} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· вход</span></td>
-                <td style={tdR}>{calc.raw.weight}</td>
-                <td style={tdR}>{tenge(calc.raw.price_per_kg)}</td>
-                <td style={tdR}>{tenge(calc.raw.sum)}</td>
-              </tr>
-              <tr>
-                <td style={{ ...td, color: 'var(--amb)' }}>{p.trim?.name} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· константа</span></td>
-                <td style={tdR}>{calc.trim.weight}</td>
-                <td style={tdR}>{tenge(calc.trim.price_per_kg)}</td>
-                <td style={tdR}>{tenge(calc.trim.sum)}</td>
-              </tr>
-              {!!calc.waste?.weight && (
+        <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
+          {ctx.price_per_kg
+            ? <>Цена из накладных: <b style={{ color: 'var(--hi)' }}>{tenge(ctx.price_per_kg)}/кг</b>{ctx.price_from ? ` · ${ctx.price_from}` : ''}. Поле можно переписать.</>
+            : <>В накладных этого филиала П/Ф стейка нет за 60 дней — впиши цену вручную.</>}
+        </div>
+
+        {calc && !calc.ok && (
+          <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{calc.error}</div>
+        )}
+
+        {w && (
+          <>
+            <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16 }}>
+              <thead><tr>
+                <th style={th}>Позиция</th>
+                <th style={{ ...th, textAlign: 'right' }}>Вес, кг</th>
+                <th style={{ ...th, textAlign: 'right' }}>₸ / кг</th>
+                <th style={{ ...th, textAlign: 'right' }}>Сумма</th>
+              </tr></thead>
+              <tbody>
                 <tr>
-                  <td style={{ ...td, color: 'var(--mute)' }}>Отход лосося <span style={{ fontSize: 11 }}>· по нулю</span></td>
-                  <td style={tdR}>{calc.waste.weight}</td>
+                  <td style={td}>{p.raw?.name} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· вход</span></td>
+                  <td style={tdR}>{kg(w.raw!.weight)}</td>
+                  <td style={tdR}>{tenge(w.raw!.price_per_kg)}</td>
+                  <td style={tdR}>{tenge(w.raw!.sum)}</td>
+                </tr>
+                <tr>
+                  <td style={{ ...td, color: 'var(--grn)', fontWeight: 650 }}>{p.slice?.name} <span style={{ color: 'var(--mute)', fontSize: 11, fontWeight: 400 }}>· остаток стоимости</span></td>
+                  <td style={tdR}><b>{kg(w.slice!.weight)}</b></td>
+                  <td style={tdR}><b>{tenge(w.slice!.price_per_kg)}</b></td>
+                  <td style={tdR}><b>{tenge(w.slice!.sum)}</b></td>
+                </tr>
+                <tr>
+                  <td style={{ ...td, color: 'var(--amb)' }}>{p.trim?.name} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· константа</span></td>
+                  <td style={tdR}>{kg(w.trim!.weight)}</td>
+                  <td style={tdR}>{tenge(w.trim!.price_per_kg)}</td>
+                  <td style={tdR}>{tenge(w.trim!.sum)}</td>
+                </tr>
+                <tr>
+                  <td style={{ ...td, color: 'var(--mute)' }}>{p.waste?.name || 'Отход лосося'} <span style={{ fontSize: 11 }}>· по нулю</span></td>
+                  <td style={tdR}>{kg(w.waste!.weight)}</td>
                   <td style={tdR}>0</td>
                   <td style={tdR}>0</td>
                 </tr>
-              )}
-              <tr>
-                <td style={{ ...td, color: 'var(--grn)', fontWeight: 650 }}>{p.slice?.name} <span style={{ color: 'var(--mute)', fontSize: 11, fontWeight: 400 }}>· остаток</span></td>
-                <td style={tdR}><b>{calc.slice.weight}</b></td>
-                <td style={tdR}><b>{tenge(calc.slice.price_per_kg)}</b></td>
-                <td style={tdR}><b>{tenge(calc.slice.sum)}</b></td>
-              </tr>
-            </tbody>
-          </table>
+              </tbody>
+            </table>
 
-          <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
-            <span>В обрезки ушло <b style={{ color: 'var(--hi)' }}>{calc.trim_pct}%</b></span>
-            <span>
-              Сходимость:&nbsp;
-              <b style={{ color: Math.abs((calc.check || 0) - calc.raw.sum) < 0.01 ? 'var(--grn)' : 'var(--red)' }}>
-                {tenge(calc.check || 0)} из {tenge(calc.raw.sum)}
-              </b>
-            </span>
-            <span style={{ marginLeft: 'auto' }}>
-              себестоимость нарезки — <b style={{ color: 'var(--hi)' }}>{tenge(calc.slice.price_per_kg)}/кг</b>
-            </span>
-          </div>
-
-          {calc.send_error && (
-            <div style={{ marginTop: 12, fontSize: 12.5, color: 'var(--red)' }}>iiko не принял: {calc.send_error}</div>
-          )}
-          {sent ? (
-            <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 13, border: '1px solid var(--hair)', background: 'var(--glass-2)' }}>
-              <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--grn)' }}>
-                Акт создан в iiko{sent.number ? ` · №${sent.number}` : ''}
-              </div>
-              <div style={{ marginTop: 5, fontSize: 12.5, color: 'var(--mute)' }}>
-                Это <b style={{ color: 'var(--hi)' }}>черновик</b>: остатки сдвинутся после проводки.
-                Проведи в iikoOffice — «Склад → Акты приготовления». API этой версии
-                iiko документ проводить не умеет: эндпоинта смены статуса нет, а
-                прочитать акт обратно (чтобы переимпортировать проведённым) нельзя —
-                экспорт по этому типу документа сервер не отдаёт.
-              </div>
+            <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
+              <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)}</b></span>
+              <span>В обрезки <b style={{ color: 'var(--hi)' }}>{pc(w.trim_pct)}</b></span>
+              <span>
+                Сходимость:&nbsp;
+                <b style={{ color: Math.abs((w.check || 0) - w.raw!.sum) < 0.01 ? 'var(--grn)' : 'var(--red)' }}>
+                  {tenge(w.check || 0)} из {tenge(w.raw!.sum)}
+                </b>
+              </span>
+              <span style={{ marginLeft: 'auto' }}>
+                себестоимость нарезки — <b style={{ color: 'var(--hi)' }}>{tenge(w.slice!.price_per_kg)}/кг</b>
+              </span>
             </div>
-          ) : (
-            <button onClick={send} disabled={sending || missing}
-              style={{ marginTop: 14, padding: '12px 20px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))', color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700, cursor: sending ? 'default' : 'pointer', opacity: sending ? .6 : 1 }}>
-              {sending ? 'Отправляю…' : 'Провести акт в iiko'}
-            </button>
+
+            <div style={{ marginTop: 14, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+              <Button onClick={save} disabled={saving || missing}>
+                {saving ? 'Записываю…' : 'Зафиксировать разбор'}
+              </Button>
+              <span style={{ fontSize: 11.5, color: 'var(--mute)' }}>
+                В iiko поштучно не уходит — за период администратор заносит один сводный акт.
+              </span>
+            </div>
+          </>
+        )}
+
+        <AnimatePresence>
+          {saved && (
+            <motion.div
+              initial={still ? { opacity: 0 } : { opacity: 0, y: 8, scale: .98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ type: 'spring', bounce: 0, duration: 0.35 }}
+              style={{
+                marginTop: 14, padding: '12px 14px', borderRadius: 14,
+                border: '1px solid var(--hair)', background: 'var(--glass-2)',
+              }}>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--grn)' }}>
+                Разбор записан · нарезка {kg(saved.slice?.weight)} кг по {tenge(saved.slice?.price_per_kg || 0)}/кг
+              </div>
+              <div style={{ marginTop: 4, fontSize: 12.5, color: 'var(--mute)' }}>
+                Он попал в свод за период — ниже. Ошиблись? Разбор можно удалить, пока свод не занесён в iiko.
+              </div>
+            </motion.div>
           )}
-        </>
-      )}
-    </Glass>
+        </AnimatePresence>
+      </Glass>
+
+      <SalmonPeriod token={token} org={org} reload={reload} />
+      <SalmonNetwork token={token} reload={reload} />
+    </>
   )
 }

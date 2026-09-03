@@ -473,3 +473,35 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 @media (max-width: 720px) {
   .lg-peak { grid-template-columns: 1fr; }
 }
+
+/* ── Разбор лосося: плитки позиций, полоса отхода, переключатель периода ──
+   Тот же материал, что у карточек, на уровень внутрь: стекло тоньше, кромка
+   тише, радиус меньше. Тени фото задаём в CSS, а не инлайном: на тёмной теме
+   синеватая тень не видна, на светлой чёрная выглядит грязью. */
+.sal-tile{display:block; padding:12px 13px 13px; border-radius:16px;
+  background:var(--glass-2); border:1px solid var(--hair);
+  box-shadow:0 1px 0 rgba(255,255,255,.10) inset;
+  transition:border-color .18s ease, box-shadow .18s ease}
+.sal-tile:focus-within{border-color:var(--acc); box-shadow:0 0 0 3px var(--acc-glow)}
+.sal-tile input{width:100%; min-width:0; padding:0; border:none; outline:none;
+  background:transparent; color:var(--hi); font:inherit; font-size:22px; font-weight:700;
+  letter-spacing:-.02em; font-variant-numeric:tabular-nums}
+.sal-tile input::placeholder{color:var(--mute); font-weight:600}
+
+.sal-photo{filter:drop-shadow(0 6px 10px rgba(20,30,60,.18))}
+:root[data-theme="dark"] .sal-photo{filter:drop-shadow(0 8px 14px rgba(0,0,0,.55))}
+.sal-shade{position:absolute; bottom:2px; width:58%; height:12px; border-radius:50%;
+  background:radial-gradient(closest-side, rgba(20,30,60,.20), transparent); filter:blur(3px)}
+:root[data-theme="dark"] .sal-shade{background:radial-gradient(closest-side, rgba(0,0,0,.55), transparent)}
+
+.sal-seg{display:inline-flex; gap:2px; padding:3px; border-radius:14px;
+  background:var(--glass-2); border:1px solid var(--hair)}
+.sal-seg button{position:relative; padding:7px 12px; border-radius:11px; border:none;
+  background:transparent; cursor:pointer; font:inherit; font-size:12.5px; color:var(--mute)}
+.sal-seg button[aria-pressed="true"]{color:var(--hi); font-weight:700}
+.sal-pill{position:absolute; inset:0; border-radius:11px; background:var(--card);
+  box-shadow:var(--shadow)}
+:root[data-theme="dark"] .sal-pill{background:var(--card-2)}
+
+.sal-bar{position:relative; flex:1; max-width:160px; height:7px; border-radius:4px;
+  background:var(--hair-2); overflow:hidden}

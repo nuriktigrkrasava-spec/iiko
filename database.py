@@ -2327,6 +2327,119 @@ def notice_read_stats(notice_id: int) -> int:
     return int(n)
 
 
+# ── Разборы лосося: журнал филиала и свод за период ──
+# Каждый разбор фиксируется здесь и НЕ уходит в iiko поштучно: администратор
+# заносит один сводный акт за период руками. Поэтому храним и веса, и цены —
+# по ним свод считается задним числом, даже если накладные с тех пор изменились.
+def _ensure_salmon(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS salmon_acts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT NOT NULL,
+        created_at TEXT,             -- ISO, по нему же фильтр периода
+        created_by INTEGER,
+        weight_raw REAL, weight_slice REAL, weight_trim REAL, weight_waste REAL,
+        price_per_kg REAL,           -- цена входа на момент разбора
+        trim_price REAL,             -- константа обрезков на момент разбора
+        slice_price REAL,            -- себестоимость нарезки, ₸/кг
+        note TEXT,
+        posted_at TEXT,              -- когда сводный акт занесли в iiko руками
+        posted_by INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_salmon_org_date
+        ON salmon_acts (organization_id, created_at);
+    """)
+
+
+def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],
+                   price_per_kg: float, trim_price: float, note: str = "") -> int:
+    """Фиксируем разбор. calc — результат acts.split_salmon."""
+    conn = get_db()
+    _ensure_salmon(conn)
+    cur = conn.execute(
+        "INSERT INTO salmon_acts (organization_id, created_at, created_by, weight_raw, "
+        "weight_slice, weight_trim, weight_waste, price_per_kg, trim_price, slice_price, note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (org_id, datetime.now().isoformat(), int(created_by or 0),
+         float(calc["raw"]["weight"]), float(calc["slice"]["weight"]),
+         float(calc["trim"]["weight"]), float(calc["waste"]["weight"]),
+         float(price_per_kg or 0), float(trim_price or 0),
+         float(calc["slice"]["price_per_kg"] or 0), (note or "")[:300]))
+    conn.commit()
+    aid = cur.lastrowid
+    conn.close()
+    return aid
+
+
+def get_salmon_acts(org_ids: List[str], date_from: str = "", date_to: str = "",
+                    only_open: bool = False, limit: int = 500) -> List[Dict[str, Any]]:
+    """Разборы филиалов за период. only_open — ещё не занесённые в iiko."""
+    if not org_ids:
+        return []
+    conn = get_db()
+    _ensure_salmon(conn)
+    q = (f"SELECT * FROM salmon_acts WHERE organization_id IN ({','.join('?' * len(org_ids))})")
+    args: List[Any] = list(org_ids)
+    if date_from:
+        q += " AND created_at >= ?"
+        args.append(date_from)
+    if date_to:
+        # даты приходят как YYYY-MM-DD, а created_at — с временем: берём день целиком
+        q += " AND created_at <= ?"
+        args.append(date_to + "T23:59:59" if len(date_to) == 10 else date_to)
+    if only_open:
+        q += " AND COALESCE(posted_at,'') = ''"
+    rows = conn.execute(q + " ORDER BY id DESC LIMIT ?", args + [int(limit)]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_salmon_act(act_id: int, org_ids: List[str]) -> bool:
+    """Удалить можно только свой филиал и только пока свод не занесён в iiko."""
+    if not org_ids:
+        return False
+    conn = get_db()
+    _ensure_salmon(conn)
+    cur = conn.execute(
+        f"DELETE FROM salmon_acts WHERE id = ? AND COALESCE(posted_at,'') = '' "
+        f"AND organization_id IN ({','.join('?' * len(org_ids))})",
+        [int(act_id)] + list(org_ids))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n > 0
+
+
+def mark_salmon_posted(act_ids: List[int], org_ids: List[str], by: int) -> int:
+    """Отметка «свод занесён в iiko». Закрывает именно те разборы, которые
+    человек видел на экране, — иначе в пачку попадёт разбор, добавленный, пока
+    администратор переписывал числа в iikoOffice."""
+    ids = [int(a) for a in act_ids or []]
+    if not ids or not org_ids:
+        return 0
+    conn = get_db()
+    _ensure_salmon(conn)
+    cur = conn.execute(
+        f"UPDATE salmon_acts SET posted_at = ?, posted_by = ? "
+        f"WHERE id IN ({','.join('?' * len(ids))}) "
+        f"AND organization_id IN ({','.join('?' * len(org_ids))}) "
+        f"AND COALESCE(posted_at,'') = ''",
+        [datetime.now().isoformat(), int(by or 0)] + ids + list(org_ids))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return int(n)
+
+
+def all_salmon_orgs() -> List[str]:
+    """Филиалы, где вообще были разборы, — для публичной таблицы по сети."""
+    conn = get_db()
+    _ensure_salmon(conn)
+    rows = conn.execute("SELECT DISTINCT organization_id FROM salmon_acts").fetchall()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
+
+
 # ── Чек-листы, сданные с сайта ──
 # Фото кладём файлами, в базе только пути: блобы раздувают SQLite и ломают
 # бэкапы. Каталог — рядом с базой (на Render это /data, переживает редеплой).
