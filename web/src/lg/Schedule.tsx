@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Glass } from './ui'
+import { Glass, tg, fmt } from './ui'
 import { useApi, useOrg } from '../lib/useApi'
 import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
 
@@ -10,7 +10,12 @@ import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
 
    Имена приезжают на весь сервер одной пачкой, поэтому в сетке — бригада
    филиала (кого уже ставили в график, чаще ставили — выше), а остальные
-   добираются поиском. */
+   добираются поиском.
+
+   Оплата пишется прямо на смене: ставок у нас нет намеренно — за выход платят
+   по-разному (полсмены, подмена, премия), и одна цифра на сотрудника это
+   враньё. Пустое поле значит «не проставили», ноль — «этот выход бесплатный»,
+   поэтому недельный итог считает только проставленные смены. */
 
 type Emp = { id: string; name: string; shifts: number }
 type Dir = { employees: Emp[] }
@@ -31,13 +36,16 @@ function Note({ children }: { children: React.ReactNode }) {
 
 /* Инлайн-редактор смены в клетке недели */
 function CellEditor({ init, onSave, onClear, onClose }: {
-  init: { start: string; end: string } | null
-  onSave: (start: string, end: string) => void
+  init: { start: string; end: string; pay?: number | null } | null
+  onSave: (start: string, end: string, pay: number | null) => void
   onClear: () => void
   onClose: () => void
 }) {
   const [start, setStart] = useState(init?.start ?? '10:00')
   const [end, setEnd] = useState(init?.end ?? '18:00')
+  // Строка, а не число: пустое поле должно оставаться пустым («не проставили»),
+  // а не превращаться в 0 при первом же нажатии Backspace.
+  const [pay, setPay] = useState(init?.pay == null ? '' : String(init.pay))
   const inp: React.CSSProperties = {
     background: 'var(--glass-2)', border: '1px solid var(--hair)', borderRadius: 9,
     padding: '7px 9px', color: 'var(--hi)', fontSize: 13, fontVariantNumeric: 'tabular-nums',
@@ -48,7 +56,13 @@ function CellEditor({ init, onSave, onClear, onClose }: {
       <input type="time" value={start} onChange={(e) => setStart(e.target.value)} style={inp} aria-label="Начало" />
       <span style={{ color: 'var(--mute)' }}>–</span>
       <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} style={inp} aria-label="Конец" />
-      <button style={{ ...btn, borderColor: 'var(--grn)', color: 'var(--grn)' }} onClick={() => onSave(start, end)}>Сохранить</button>
+      <input
+        type="number" inputMode="numeric" min={0} step={500} placeholder="оплата, ₸"
+        value={pay} onChange={(e) => setPay(e.target.value)} aria-label="Оплата за смену"
+        style={{ ...inp, width: 116 }}
+      />
+      <button style={{ ...btn, borderColor: 'var(--grn)', color: 'var(--grn)' }}
+              onClick={() => onSave(start, end, pay.trim() === '' ? null : Number(pay))}>Сохранить</button>
       {init && <button style={btn} onClick={onClear}>Убрать</button>}
       <button style={{ ...btn, marginLeft: 'auto' }} onClick={onClose}>Отмена</button>
     </div>
@@ -130,6 +144,11 @@ export default function Schedule() {
 
   const cell: React.CSSProperties = { padding: '9px 6px', textAlign: 'center', fontSize: 12, borderTop: '1px solid var(--hair-2)' }
   const label = (d: Date) => `${DOW[(d.getDay() + 6) % 7]} ${d.getDate()}`
+  // Смены без проставленной оплаты в итог не идут: иначе недельный фонд выглядел
+  // бы посчитанным, хотя половину сумм ещё не вписали.
+  const weekPay = (empId: string) => days.reduce(
+    (sum, d) => sum + (shiftFor(empId, iso(d))?.pay ?? 0), 0)
+  const total = rows.reduce((sum, e) => sum + weekPay(e.id), 0)
 
   return (
     <Glass span={12}>
@@ -153,6 +172,7 @@ export default function Schedule() {
               <tr>
                 <th style={{ ...cell, borderTop: 'none', textAlign: 'left', color: 'var(--mute)' }}>Сотрудник</th>
                 {days.map((d) => <th key={iso(d)} style={{ ...cell, borderTop: 'none', color: 'var(--mute)' }}>{label(d)}</th>)}
+                <th style={{ ...cell, borderTop: 'none', color: 'var(--mute)', textAlign: 'right', whiteSpace: 'nowrap' }}>За неделю</th>
               </tr>
             </thead>
             <tbody>
@@ -175,14 +195,36 @@ export default function Schedule() {
                             color: s ? 'var(--hi)' : 'var(--mute)',
                           }}
                         >
-                          {s ? `${s.start}–${s.end}` : '+'}
+                          {s ? (
+                            <>
+                              <span style={{ display: 'block' }}>{s.start}–{s.end}</span>
+                              {s.pay != null && (
+                                <span style={{ display: 'block', fontSize: 10.5, color: 'var(--grn)', marginTop: 2 }}>
+                                  {fmt(s.pay)}
+                                </span>
+                              )}
+                            </>
+                          ) : '+'}
                         </button>
                       </td>
                     )
                   })}
+                  <td style={{ ...cell, textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
+                               color: weekPay(e.id) ? 'var(--hi)' : 'var(--mute)', fontWeight: 600 }}>
+                    {weekPay(e.id) ? tg(weekPay(e.id)) : '—'}
+                  </td>
                 </tr>
               ))}
             </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={8} style={{ ...cell, textAlign: 'right', color: 'var(--mute)' }}>Фонд оплаты за неделю</td>
+                <td style={{ ...cell, textAlign: 'right', fontVariantNumeric: 'tabular-nums',
+                             fontWeight: 700, color: 'var(--hi)', whiteSpace: 'nowrap' }}>
+                  {total ? tg(total) : '—'}
+                </td>
+              </tr>
+            </tfoot>
           </table>
         </div>
       )}
@@ -190,7 +232,7 @@ export default function Schedule() {
       {editing && (
         <CellEditor
           init={shiftFor(editing.emp, editing.date)}
-          onSave={(start, end) => { setShift({ employeeId: editing.emp, date: editing.date, start, end }); setEditing(null); bump() }}
+          onSave={(start, end, pay) => { setShift({ employeeId: editing.emp, date: editing.date, start, end, pay }); setEditing(null); bump() }}
           onClear={() => { removeShift(editing.emp, editing.date); setEditing(null); bump() }}
           onClose={() => setEditing(null)}
         />
@@ -199,7 +241,7 @@ export default function Schedule() {
       <AddEmployee pool={pool} onPick={(id) => setExtra((x) => (x.includes(id) ? x : [...x, id]))} />
 
       <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--mute)' }}>
-        график общий для филиала · из iiko берутся только имена
+        график общий для филиала · из iiko берутся только имена · оплата пишется на смене
       </div>
     </Glass>
   )

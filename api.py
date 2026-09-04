@@ -9278,6 +9278,7 @@ class ShiftPlanIn(BaseModel):
     date: str
     start: Optional[str] = None           # None → снять смену с этого дня
     end: Optional[str] = None
+    pay: Optional[float] = None      # оплата за смену; ставок нет, пишется руками
 
 
 @app.get("/api/schedule/{org_id}")
@@ -9288,7 +9289,8 @@ async def schedule_get(org_id: str, from_: str = Query(..., alias="from"),
     from database import get_staff_schedule
     rows = get_staff_schedule(_get_org_id(org_id, user), from_, to)
     return {"shifts": [{"employeeId": r["employee_id"], "date": r["day"],
-                        "start": r["start_time"], "end": r["end_time"] or ""} for r in rows]}
+                        "start": r["start_time"], "end": r["end_time"] or "",
+                        "pay": r["pay"]} for r in rows]}
 
 
 @app.post("/api/schedule/{org_id}")
@@ -9301,7 +9303,11 @@ async def schedule_set(org_id: str, payload: ShiftPlanIn,
         return {"ok": True, "removed": True}
     if SL.to_min(payload.start) is None:
         raise HTTPException(status_code=400, detail="bad start time")
-    set_staff_shift(real_org, payload.employee_id, payload.date, payload.start, payload.end or "")
+    # Отрицательная оплата — это опечатка, а не штраф: штраф вычитают из суммы.
+    if payload.pay is not None and payload.pay < 0:
+        raise HTTPException(status_code=400, detail="bad pay")
+    set_staff_shift(real_org, payload.employee_id, payload.date, payload.start,
+                    payload.end or "", payload.pay)
     return {"ok": True}
 
 

@@ -1204,6 +1204,7 @@ def _ensure_staff_shifts(conn):
         day TEXT NOT NULL,              -- 'YYYY-MM-DD'
         start_time TEXT NOT NULL,
         end_time TEXT,
+        pay REAL,                       -- оплата за эту смену; NULL — не проставлена
         updated_at TEXT,
         PRIMARY KEY (organization_id, employee_id, day)
     );
@@ -1236,6 +1237,11 @@ def _ensure_staff_shifts(conn):
         PRIMARY KEY (organization_id, day, employee_id)
     );
     """)
+    # pay добавлен позже: ставок у нас нет, сумма пишется прямо на смене.
+    # NULL и 0 значат разное — «не проставили» против «этот выход бесплатный».
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(staff_schedule)").fetchall()}
+    if "pay" not in cols:
+        conn.execute("ALTER TABLE staff_schedule ADD COLUMN pay REAL")
 
 
 def get_shift_starts(org_id: str) -> Dict[str, Any]:
@@ -1274,19 +1280,21 @@ def get_staff_schedule(org_id: str, day_from: str, day_to: str) -> List[Dict[str
     conn = get_db()
     _ensure_staff_shifts(conn)
     rows = conn.execute(
-        "SELECT employee_id, day, start_time, end_time FROM staff_schedule "
+        "SELECT employee_id, day, start_time, end_time, pay FROM staff_schedule "
         "WHERE organization_id = ? AND day BETWEEN ? AND ?", (org_id, day_from, day_to)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def set_staff_shift(org_id: str, employee_id: str, day: str, start: str, end: str = ""):
+def set_staff_shift(org_id: str, employee_id: str, day: str, start: str, end: str = "",
+                    pay: Optional[float] = None):
     conn = get_db()
     _ensure_staff_shifts(conn)
     conn.execute("INSERT OR REPLACE INTO staff_schedule "
-                 "(organization_id, employee_id, day, start_time, end_time, updated_at) "
-                 "VALUES (?,?,?,?,?,?)",
-                 (org_id, employee_id, day, start, end or "", datetime.now().isoformat()))
+                 "(organization_id, employee_id, day, start_time, end_time, pay, updated_at) "
+                 "VALUES (?,?,?,?,?,?,?)",
+                 (org_id, employee_id, day, start, end or "", pay,
+                  datetime.now().isoformat()))
     conn.commit()
     conn.close()
 

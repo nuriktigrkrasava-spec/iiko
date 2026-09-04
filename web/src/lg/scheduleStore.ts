@@ -85,7 +85,7 @@ export function setShift(s: PlanShift) {
   const all = { ...read() }
   all[idOf(s.employeeId, s.date)] = s
   write(all)
-  push({ employee_id: s.employeeId, date: s.date, start: s.start, end: s.end })
+  push({ employee_id: s.employeeId, date: s.date, start: s.start, end: s.end, pay: s.pay ?? null })
 }
 
 export function removeShift(employeeId: string, date: string) {

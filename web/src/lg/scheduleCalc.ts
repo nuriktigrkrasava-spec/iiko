@@ -6,7 +6,8 @@
    смена без времени ухода, — и сверять его будет приложение смен. Старая
    сверка убрана намеренно: тип Fact в форме iiko вводил бы в заблуждение. */
 
-export type Shift = { employeeId: string; date: string; start: string; end: string }
+export type Shift = { employeeId: string; date: string; start: string; end: string;
+                     pay?: number | null }   // оплата за смену; null — не проставлена
 
 const toMin = (t: string): number => {
   const [h, m] = t.split(':').map(Number)
