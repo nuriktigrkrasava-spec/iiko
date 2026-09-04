@@ -126,29 +126,6 @@ export function barChart(data: { l: string; v: number }[], hiIdx = -1, color = a
   return `<div style="overflow-x:auto;margin-top:8px"><div style="display:flex;gap:8px;align-items:flex-end;min-width:100%">${cols}</div></div>`
 }
 
-export function yoyChart(data: { l: string; a: number; b: number }[], unit = ''): string {
-  const id = 'y' + UID++, W = 580, H = 200, pX = 34, pT = 24, pB = 28, n = data.length
-  const gap = (W - pX - 10) / n, bw = gap * 0.3
-  const max = Math.max(...data.flatMap((x) => [x.a, x.b])) * 1.05, plotH = H - pT - pB
-  const fnum = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(0))
-  let g = ''
-  // шкала слева + сетка
-  ;[0, 0.5, 1].forEach((t) => {
-    const yy = pT + t * plotH, val = max * (1 - t)
-    g += `<line x1="${pX}" y1="${yy.toFixed(1)}" x2="${W - 10}" y2="${yy.toFixed(1)}" stroke="var(--hair)" stroke-width="1"/>`
-    g += `<text x="${pX - 6}" y="${(yy + 3.5).toFixed(1)}" text-anchor="end" fill="var(--mute)" font-size="10" style="font-variant-numeric:tabular-nums">${fnum(val)}</text>`
-  })
-  data.forEach((r, i) => {
-    const base = pX + i * gap + gap / 2, ha = (r.a / max) * plotH, hb = (r.b / max) * plotH
-    g += `<rect x="${(base - bw - 3).toFixed(1)}" y="${(H - pB - ha).toFixed(1)}" width="${bw.toFixed(1)}" height="${ha.toFixed(1)}" rx="4" fill="var(--lo)" opacity=".3"/>`
-    g += `<rect x="${(base + 3).toFixed(1)}" y="${(H - pB - hb).toFixed(1)}" width="${bw.toFixed(1)}" height="${hb.toFixed(1)}" rx="4" fill="url(#${id})" style="filter:drop-shadow(0 0 5px color-mix(in srgb, var(--acc) 50%, transparent))"/>`
-    // число над баром 2025
-    g += `<text x="${(base + 3 + bw / 2).toFixed(1)}" y="${(H - pB - hb - 6).toFixed(1)}" text-anchor="middle" fill="var(--hi)" font-size="11" font-weight="700" style="font-variant-numeric:tabular-nums">${fnum(r.b)}${unit}</text>`
-    g += `<text x="${base.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="var(--mute)" font-size="11">${r.l}</text>`
-  })
-  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block"><defs><linearGradient id="${id}" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="color-mix(in srgb, var(--acc) 72%, #fff)"/><stop offset="1" stop-color="var(--acc)"/></linearGradient></defs>${g}</svg>`
-}
-
 export function slope(series: { c: string; v: number[] }[]): string {
   const W = 580, H = 184, pX = 14
   const all = series.flatMap((s) => s.v), max = Math.max(...all), min = Math.min(...all)

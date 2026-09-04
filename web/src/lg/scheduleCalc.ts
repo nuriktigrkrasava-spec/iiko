@@ -1,11 +1,12 @@
-/* Логика расписания: план у нас, факт из явок iiko. Чистые функции — тестируются
-   отдельно от UI. Время — строки 'HH:MM'; факт приходит уже свёрнутым по дню. */
+/* Логика расписания: план у нас — чистые функции, тестируются отдельно от UI.
+   Время — строки 'HH:MM'.
+
+   Сверка «план vs факт» жила здесь, пока фактом были явки iiko. Факт теперь
+   наш (отметка смены, POST /api/attendance), у него другая форма — открытая
+   смена без времени ухода, — и сверять его будет приложение смен. Старая
+   сверка убрана намеренно: тип Fact в форме iiko вводил бы в заблуждение. */
 
 export type Shift = { employeeId: string; date: string; start: string; end: string }
-export type Fact = { employeeId: string; date: string; start: string; end: string }
-
-export type CompareStatus = 'ontime' | 'late' | 'absent' | 'noplan'
-export type Compare = { status: CompareStatus; lateMin: number; overtimeMin: number }
 
 const toMin = (t: string): number => {
   const [h, m] = t.split(':').map(Number)
@@ -18,19 +19,4 @@ export function shiftMinutes(start: string, end: string): number {
   let e = toMin(end)
   if (e <= s) e += 24 * 60
   return e - s
-}
-
-/** Сверяет плановую смену с фактической явкой. lateGraceMin — допуск на опоздание. */
-export function comparePlanFact(
-  plan: Shift | null,
-  fact: Fact | null,
-  lateGraceMin = 5,
-): Compare {
-  if (!plan && fact) return { status: 'noplan', lateMin: 0, overtimeMin: 0 }
-  if (!plan || !fact) return { status: 'absent', lateMin: 0, overtimeMin: 0 }
-
-  const lateMin = Math.max(0, toMin(fact.start) - toMin(plan.start))
-  const overtimeMin = Math.max(0, toMin(fact.end) - toMin(plan.end))
-  const status = lateMin > lateGraceMin ? 'late' : 'ontime'
-  return { status, lateMin, overtimeMin }
 }

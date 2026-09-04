@@ -79,7 +79,7 @@ def late_rows(arrivals: List[Dict[str, Any]],
               max_late_min: int = MAX_LATE_MIN) -> List[Dict[str, Any]]:
     """Явки → строки «кто во сколько пришёл и опоздал ли».
 
-    arrivals — строки _attendance_journal (employee_id, name, date, start).
+    arrivals — строки отметок смены (employee_id, name, date, start).
     На сотрудника за день берём САМЫЙ РАННИЙ приход: терминал часто пишет
     несколько интервалов (разные роли), и поздний из них — не опоздание.
     schedule — {(employee_id, date): 'HH:MM'} плановое начало смены.

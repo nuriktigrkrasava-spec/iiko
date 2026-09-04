@@ -1207,6 +1207,17 @@ def _ensure_staff_shifts(conn):
         updated_at TEXT,
         PRIMARY KEY (organization_id, employee_id, day)
     );
+    CREATE TABLE IF NOT EXISTS staff_attendance (
+        organization_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        day TEXT NOT NULL,              -- 'YYYY-MM-DD'
+        start_time TEXT NOT NULL,       -- 'HH:MM' приход
+        end_time TEXT,                  -- 'HH:MM' уход; пусто — человек ещё на смене
+        name TEXT,                      -- имя на момент отметки: iiko может уволить
+        source TEXT,                    -- кто поставил отметку
+        updated_at TEXT,
+        PRIMARY KEY (organization_id, employee_id, day)
+    );
     CREATE TABLE IF NOT EXISTS staff_late (
         organization_id TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -1285,6 +1296,78 @@ def remove_staff_shift(org_id: str, employee_id: str, day: str):
     _ensure_staff_shifts(conn)
     conn.execute("DELETE FROM staff_schedule WHERE organization_id = ? AND employee_id = ? "
                  "AND day = ?", (org_id, employee_id, day))
+    conn.commit()
+    conn.close()
+
+
+def staff_shift_counts(org_id: str, since: Optional[str] = None) -> Dict[str, int]:
+    """Сколько раз сотрудника ставили в график. Нужно, чтобы в списке для
+    расписания сверху шли те, кого ставят каждую неделю: имена приезжают из
+    iiko пачкой на весь сервер, и без этого управляющий листал бы чужие точки."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    sql = "SELECT employee_id, COUNT(*) AS n FROM staff_schedule WHERE organization_id = ?"
+    args: List[Any] = [org_id]
+    if since:
+        sql += " AND day >= ?"
+        args.append(since)
+    rows = conn.execute(sql + " GROUP BY employee_id", args).fetchall()
+    conn.close()
+    return {r["employee_id"]: int(r["n"]) for r in rows}
+
+
+# ── Факт смены. Наш, не iiko: явки терминала показывали только тех, кто пробил
+# чек, и молчали про весь зал. Отметку кладёт тот, кто её видит. ──
+
+def get_staff_attendance(org_id: str, day_from: str, day_to: str) -> List[Dict[str, Any]]:
+    """Отметки филиала за период в формате строк staff_late.late_rows:
+    employee_id, name, date, start, end, hours, open."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute(
+        "SELECT employee_id, day, start_time, end_time, name FROM staff_attendance "
+        "WHERE organization_id = ? AND day BETWEEN ? AND ? ORDER BY day, start_time",
+        (org_id, day_from, day_to)).fetchall()
+    conn.close()
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        start, end = r["start_time"], r["end_time"] or ""
+        # Смена без времени ухода — человек ещё на смене (см. open в late_rows).
+        hours = 0.0
+        if end:
+            try:
+                sh, sm = (int(x) for x in start.split(":"))
+                eh, em = (int(x) for x in end.split(":"))
+                mins = (eh * 60 + em) - (sh * 60 + sm)
+                if mins <= 0:
+                    mins += 24 * 60          # смена через полночь
+                hours = round(mins / 60, 2)
+            except (ValueError, TypeError):
+                hours = 0.0
+        out.append({"employee_id": r["employee_id"], "name": r["name"] or "",
+                    "date": r["day"], "start": start, "end": end,
+                    "hours": hours, "open": not end})
+    return out
+
+
+def set_staff_attendance(org_id: str, employee_id: str, day: str, start: str,
+                         end: str = "", name: str = "", source: str = "manager"):
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("INSERT OR REPLACE INTO staff_attendance "
+                 "(organization_id, employee_id, day, start_time, end_time, name, source, updated_at) "
+                 "VALUES (?,?,?,?,?,?,?,?)",
+                 (org_id, employee_id, day, start, end or "", name or "", source,
+                  datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+
+
+def remove_staff_attendance(org_id: str, employee_id: str, day: str):
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("DELETE FROM staff_attendance WHERE organization_id = ? "
+                 "AND employee_id = ? AND day = ?", (org_id, employee_id, day))
     conn.commit()
     conn.close()
 

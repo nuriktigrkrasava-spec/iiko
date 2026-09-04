@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
-import { Glass, Chart, Light, Bullet, Insight, Delta, Trend, fmt, PlanFallback } from './ui'
-import { areaChart, barChart, yoyChart, slope, donut, hbar, legend, color, bar } from './charts'
+import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback } from './ui'
+import { areaChart, barChart, slope, donut, hbar, legend, color, bar } from './charts'
 import { useApi } from '../lib/useApi'
 import { periodLabel } from '../lib/api'
 import { tenge } from '../lib/format'
@@ -242,58 +242,6 @@ export function Inv() {
           <tbody>{varc.map((x, i) => (
             <tr key={i}><td style={td}>{x[0]}</td><td style={{ ...tdR, color: 'var(--grn)' }}>{x[2]}<Sub>{x[1]}</Sub></td><td style={tdR}>{x[4]}<Sub>{x[3]}</Sub></td><td style={tdR}>{x[5]}</td></tr>
           ))}</tbody>
-        </table>
-      </Glass>
-    </>
-  )
-}
-
-/* ─────────── Год к году — живой /api/comparison ─────────── */
-type CmpRow = { key: string; label: string; year: number; total_rev: number; total_orders: number }
-type CmpT = { months: { current: CmpRow[]; previous: CmpRow[] }; cur_year: number; prev_year: number; as_of?: string; prev_as_of?: string }
-export function YoY() {
-  const { data, error, loading } = useApi<CmpT>('comparison', { period: 'month' })
-  if (loading) return <Note>Сравниваю год к году…</Note>
-  if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
-  const prevBy = new Map(data.months.previous.map((r) => [r.label, r]))
-  const m = data.months.current.map((cur) => {
-    const p = prevBy.get(cur.label)
-    return { l: cur.label, a: p ? +(p.total_rev / 1_000_000).toFixed(1) : 0, b: +(cur.total_rev / 1_000_000).toFixed(1) }
-  })
-  const curSum = data.months.current.reduce((s, r) => s + r.total_rev, 0)
-  const prevSum = data.months.current.reduce((s, r) => s + (prevBy.get(r.label)?.total_rev || 0), 0)
-  const growth = prevSum ? ((curSum - prevSum) / prevSum) * 100 : 0
-  const ordCur = data.months.current.reduce((s, r) => s + r.total_orders, 0)
-  const ordPrev = data.months.current.reduce((s, r) => s + (prevBy.get(r.label)?.total_orders || 0), 0)
-  const ordGrowth = ordPrev ? ((ordCur - ordPrev) / ordPrev) * 100 : 0
-  const plus = m.filter((r) => r.b > r.a).length
-  const maxB = Math.max(...m.map((x) => x.b), 1)
-  return (
-    <>
-      <Glass span={5} spot warp>
-        <Hero eyebrow="Год к году" hint={`${data.cur_year} против ${data.prev_year} · день в день`} value={<Trend v={growth} />}
-          note={`${tenge(curSum)} против ${tenge(prevSum)} год назад · ${plus} из ${m.length} месяцев в плюсе. Прошлый год посчитан по то же число, что и текущий, — иначе незакрытый месяц сравнивался бы с целым.`} />
-      </Glass>
-      <Glass span={7}>
-        <Eyebrow t="Выручка по месяцам, млн ₸" hint={`бледное — ${data.prev_year} · акцент — ${data.cur_year}`} />
-        <Chart html={yoyChart(m)} />
-      </Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Рост выручки г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}><Trend v={growth} /></div></Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Заказов г/г</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}><Trend v={ordGrowth} /></div></Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Выручка {data.cur_year}</div><div className="tnum" style={{ fontSize: 22, fontWeight: 660, marginTop: 7 }}>{tenge(curSum)}</div></Glass>
-      <Glass span={3} tap><div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>Месяцев в плюсе</div><div className="tnum" style={{ fontSize: 25, fontWeight: 660, marginTop: 7 }}>{plus} / {m.length}</div></Glass>
-      <Glass span={12}>
-        <Eyebrow t={`Помесячно · ${data.prev_year} → ${data.cur_year}`} hint="разрыв год к году" />
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 10 }}>
-          <thead><tr><th style={th}>Месяц</th><th style={{ ...th, textAlign: 'right' }}>{data.prev_year}</th><th style={{ ...th, textAlign: 'right' }}>{data.cur_year}</th><th style={{ ...th, width: '26%' }}>vs пик</th><th style={{ ...th, textAlign: 'right' }}>Δ</th></tr></thead>
-          <tbody>{m.map((r, i) => {
-            const d = r.a ? ((r.b - r.a) / r.a) * 100 : 0
-            return (
-              <tr key={i}><td style={td}>{r.l}</td><td style={tdR}>{r.a.toFixed(1)}</td><td style={tdR}>{r.b.toFixed(1)}</td>
-                <td style={td}><Bullet value={r.b} max={maxB} /></td>
-                <td style={{ ...tdR, color: d >= 0 ? 'var(--grn)' : 'var(--red)' }}>{d >= 0 ? '+' : ''}{d.toFixed(1).replace('.', ',')}%</td></tr>
-            )
-          })}</tbody>
         </table>
       </Glass>
     </>

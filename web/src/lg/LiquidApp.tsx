@@ -14,7 +14,6 @@ const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key
   lazy(() => load().then((m) => ({ default: m[key] as React.ComponentType })))
 
 const Dash = lazyFrom(() => import('./screens'), 'Dash')
-const YoY = lazyFrom(() => import('./screens'), 'YoY')
 const Staff = lazyFrom(() => import('./screens'), 'Staff')
 const Plan = lazy(() => import('./Plan'))
 const Onboarding = lazy(() => import('./Onboarding'))
@@ -34,7 +33,6 @@ const SECTIONS: Sec[] = [
   { id: 'dash', group: 'Сводка', label: 'Главная', icon: 'dash', periodic: true, render: Dash },
   { id: 'menu', group: 'Деньги', label: 'Меню · продажи', icon: 'menu', periodic: false, render: Menu },
   { id: 'supply', group: 'Деньги', label: 'Склад · заявки', icon: 'supply', badge: 'var(--red)', periodic: false, render: Supply },
-  { id: 'yoy', group: 'Деньги', label: 'Год к году', icon: 'yoy', periodic: false, render: YoY },
   { id: 'shifts', group: 'Операции', label: 'Кассовые смены', icon: 'yoy', periodic: false, render: Shifts },
   { id: 'staff', group: 'Операции', label: 'Смены и персонал', icon: 'staff', periodic: false, render: Staff },
   { id: 'sched', group: 'Операции', label: 'Расписание', icon: 'sched', periodic: false, render: Schedule },

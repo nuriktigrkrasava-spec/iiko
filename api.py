@@ -7813,83 +7813,6 @@ async def cashshifts_day(org_id: str, date: str, user: Dict = Depends(get_curren
     return resp
 
 
-def _attendance_journal(attendance: List[Dict[str, Any]],
-                        employees: Dict[str, str],
-                        org_name: str = "",
-                        day_from: Optional[str] = None,
-                        day_to: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Явки iiko → строки приход/уход по (сотрудник, день). Пересекающиеся
-    интервалы (задвоенные роли на терминале) сливаются, чтобы часы не удваивались.
-    Формат строки: employee_id, name, date(YYYY-MM-DD), start/end(HH:MM), hours, open.
-
-    Явку, которая ЕЩЁ ИДЁТ, iiko отдаёт без dateTo: конец пишется только когда
-    смену закрывают (у Алиева это ~00:07). Такие строки раньше молча выпадали —
-    и весь рабочий день экран уверял, что «за этот день явок нет», а к ночи
-    всё появлялось. Незакрытая явка = человек на смене: конец берём «сейчас»,
-    строку помечаем open.
-
-    day_from/day_to обязательны именно из-за этого: незакрытые явки iiko отдаёт
-    в ответ на ЛЮБОЙ период (у Алиева висят с 2024-го), и без фильтра по дате
-    они превратились бы в «сотрудник на смене второй год».
-    """
-    by_emp_day: Dict[Any, list] = {}
-    org_key = org_name.strip().lower()
-    now = local_now()
-    for a in attendance:
-        if org_key and (a.get("departmentName") or "").strip().lower() != org_key:
-            continue
-        try:
-            df = datetime.fromisoformat(a["dateFrom"])
-        except Exception:
-            continue
-        raw_to = a.get("dateTo")
-        open_ = not raw_to
-        if open_:
-            # «Сейчас» в поясе самой явки, иначе aware и naive не вычитаются.
-            dt_ = now.astimezone(df.tzinfo) if df.tzinfo else now.replace(tzinfo=None)
-        else:
-            try:
-                dt_ = datetime.fromisoformat(raw_to)
-            except Exception:
-                continue
-        if dt_ <= df:
-            # Закрытая явка нулевой длины — мусор. Открытая: человек отметился
-            # только что, часов ещё нет, но на смене он уже есть.
-            if not open_:
-                continue
-            dt_ = df
-        by_emp_day.setdefault((a["employeeId"], df.date()), []).append((df, dt_, open_))
-    rows: List[Dict[str, Any]] = []
-    for (eid, _day), ivs in by_emp_day.items():
-        ivs.sort()
-        merged = [list(ivs[0])]
-        for df, dt_, op in ivs[1:]:
-            if df <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], dt_)
-                # Незакрытая явка означает «человек на смене» независимо от того,
-                # чем кончаются соседние интервалы. Раньше флаг брался у того,
-                # кто кончается позже: сотрудник с закрытой явкой до 12:00 и
-                # открытой с 11:10 до полудня числился ушедшим.
-                merged[-1][2] = merged[-1][2] or op
-            else:
-                merged.append([df, dt_, op])
-        for a0, b0, op in merged:
-            rows.append({
-                "employee_id": eid,
-                "name": employees.get(eid, eid[:8]),
-                "date": a0.date().isoformat(),
-                "start": a0.strftime("%H:%M"),
-                "end": b0.strftime("%H:%M"),
-                "hours": round((b0 - a0).total_seconds() / 3600, 2),
-                "open": op,
-            })
-    if day_from or day_to:
-        lo, hi = day_from or "0000-00-00", day_to or "9999-99-99"
-        rows = [r for r in rows if lo <= r["date"] <= hi]
-    rows.sort(key=lambda r: (r["date"], r["name"], r["start"]))
-    return rows
-
-
 def _last_completed_week() -> Optional[Tuple[str, Dict[str, Any]]]:
     """Последняя ПОЛНОСТЬЮ прошедшая неделя плана → (ym, {widx, from, to}).
 
@@ -9165,40 +9088,82 @@ def _demo_attendance(from_: str, to: str) -> Dict[str, Any]:
             "rows": rows}
 
 
+@app.get("/api/employees/{org_id}")
+async def employees_directory(org_id: str, user: Dict = Depends(get_current_user)):
+    """Имена сотрудников для расписания. Из iiko берём ТОЛЬКО имена: план, факт
+    и опоздания считаются у нас, чтобы расписание не зависело от того, пробил
+    ли человек чек на терминале.
+
+    Кого чаще ставят в график в этом филиале — тот выше. /api/employees отдаёт
+    сотрудников всего сервера одной пачкой, и без этого управляющий искал бы
+    свою бригаду среди чужих точек."""
+    if _use_demo_data(user, org_id):
+        return {"employees": [{"id": m["id"], "name": m["name"], "shifts": 0}
+                              for m in _DEMO_TEAM]}
+    real_org = _get_org_id(org_id, user)
+    info = _get_restaurant_info(real_org, user)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    if not hasattr(client, "get_employees_map"):
+        raise HTTPException(status_code=400,
+                            detail="Список сотрудников доступен только на самохостед iiko")
+    from database import staff_shift_counts
+    try:
+        employees = await client.get_employees_map()
+    except Exception as e:
+        logger.warning(f"[staff] имена {real_org}: {e!r}")
+        employees = {}
+    counts = staff_shift_counts(real_org)
+    # Кто уже стоит в графике, но пропал из iiko (уволен, переименован), из
+    # списка не выпадает: иначе его смены в сетке остались бы без имени.
+    out = [{"id": eid, "name": employees.get(eid) or eid[:8], "shifts": counts.get(eid, 0)}
+           for eid in set(employees) | set(counts)]
+    out.sort(key=lambda e: (-e["shifts"], e["name"]))
+    return {"employees": out}
+
+
 @app.get("/api/attendance/{org_id}")
 async def attendance(org_id: str,
                      from_: str = Query(..., alias="from"), to: str = Query(...),
                      user: Dict = Depends(get_current_user)):
-    """Журнал явок (факт из iiko) + список сотрудников для расписания.
-    План (расписание) хранится на стороне клиента/нашей БД — здесь только факт."""
+    """Факт смен филиала — наш, не явки iiko. По нему считаются опоздания.
+    Отметки кладёт POST ниже; пока их никто не ставит, ответ честно пустой."""
     if _use_demo_data(user, org_id):
         return _demo_attendance(from_, to)
     real_org = _get_org_id(org_id, user)
-    info = _get_restaurant_info(real_org, user)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-    if not hasattr(client, "get_attendance"):
-        raise HTTPException(status_code=400, detail="Явки доступны только на самохостед iiko")
-    today = local_now().date().isoformat()
-    calls = [client.get_attendance(from_, to), client.get_employees_map()]
-    # Плановый график iiko отдаётся только при запросе С СЕГОДНЯ вперёд. Если период
-    # захватывает будущее — тянем плановые смены отдельно и мержим (dedupe).
-    want_future = to >= today
-    if want_future:
-        calls.append(client.get_attendance(today, to))
-    results = await asyncio.gather(*calls)
-    att, employees = results[0], results[1]
-    if want_future:
-        seen = {(a.get("employeeId"), a.get("dateFrom")) for a in att}
-        for a in results[2]:
-            k = (a.get("employeeId"), a.get("dateFrom"))
-            if k not in seen:
-                att.append(a); seen.add(k)
-    rows = _attendance_journal(att, employees, info.get("org_name", ""), from_, to)
-    # роспись филиала = сотрудники, у кого есть явки/график в этом филиале за период
-    branch_ids = {r["employee_id"] for r in rows}
-    emp_list = [{"id": eid, "name": employees.get(eid, eid[:8])} for eid in branch_ids]
+    from database import get_staff_attendance
+    rows = get_staff_attendance(real_org, from_, to)
+    emps: Dict[str, str] = {}
+    for r in rows:
+        emps.setdefault(r["employee_id"], r["name"] or r["employee_id"][:8])
+    emp_list = [{"id": eid, "name": name} for eid, name in emps.items()]
     emp_list.sort(key=lambda x: x["name"])
     return {"employees": emp_list, "rows": rows}
+
+
+class AttendanceMarkIn(BaseModel):
+    employee_id: str
+    date: str
+    start: Optional[str] = None      # None — отметку снять
+    end: Optional[str] = None        # пусто — человек ещё на смене
+    name: Optional[str] = None
+
+
+@app.post("/api/attendance/{org_id}")
+async def attendance_mark(org_id: str, payload: AttendanceMarkIn,
+                          user: Dict = Depends(get_current_user)):
+    """Отметка «пришёл/ушёл». Одна на (сотрудник, день) — как и плановая смена."""
+    from database import set_staff_attendance, remove_staff_attendance
+    real_org = _get_org_id(org_id, user)
+    if not payload.start:
+        remove_staff_attendance(real_org, payload.employee_id, payload.date)
+        return {"ok": True, "removed": True}
+    if SL.to_min(payload.start) is None:
+        raise HTTPException(status_code=400, detail="bad start time")
+    if payload.end and SL.to_min(payload.end) is None:
+        raise HTTPException(status_code=400, detail="bad end time")
+    set_staff_attendance(real_org, payload.employee_id, payload.date,
+                         payload.start, payload.end or "", payload.name or "")
+    return {"ok": True}
 
 
 
@@ -9209,23 +9174,18 @@ async def attendance(org_id: str,
 
 async def _attendance_rows(org_id: str, real_org: str, day_from: str, day_to: str,
                            user: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-    """Явки филиала за период. None — явок у этого филиала нет вообще
-    (облачный iiko или сервер не ответил): это не «все пришли вовремя»."""
+    """Факт смен филиала за период — из НАШИХ отметок, не из явок iiko.
+
+    Явки терминала знали только тех, кто пробил чек, и приходили с задержкой на
+    незакрытой смене; опоздание по ним было наполовину догадкой. Теперь источник
+    один — отметка, поставленная в приложении.
+
+    None — отметок у филиала нет вообще. Это не «все пришли вовремя»: критерий
+    по такому филиалу должен выпасть, а не обнулить оценку."""
     if _use_demo_data(user, org_id):
         return _demo_attendance(day_from, day_to)["rows"]
-    info = _get_restaurant_info(real_org, user)
-    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
-    if not hasattr(client, "get_attendance"):
-        return None
-    try:
-        att, employees = await asyncio.gather(
-            client.get_attendance(day_from, day_to),
-            client.get_employees_map(),
-        )
-    except Exception as e:
-        logger.warning(f"[staff-late] явки {real_org}: {e!r}")
-        return None
-    return _attendance_journal(att, employees, info.get("org_name", ""), day_from, day_to)
+    from database import get_staff_attendance
+    return get_staff_attendance(real_org, day_from, day_to) or None
 
 
 def _late_reference(real_org: str) -> Dict[str, Any]:
