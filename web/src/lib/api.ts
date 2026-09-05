@@ -59,6 +59,16 @@ function authHeaders(): Record<string, string> {
   return h
 }
 
+/** Ссылка подключения (QR филиала). Пусто — открыли не по ней. */
+export function getJoinToken(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return new URLSearchParams(window.location.search).get('j') || ''
+  } catch {
+    return ''
+  }
+}
+
 /** Код сотрудника из адреса. Пусто — открыли не по личной ссылке сотрудника. */
 export function getStaffCode(): string {
   if (typeof window === 'undefined') return ''

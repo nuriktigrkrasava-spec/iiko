@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
+import qrcode from 'qrcode-generator'
 
 /* Панель управляющего под расписанием: доступы сотрудников, точка филиала и
    сообщения смене. Живёт рядом с сеткой намеренно — ссылку выдают, глядя на
@@ -8,6 +9,7 @@ import { useOrg } from '../lib/useApi'
 
 type Emp = { id: string; name: string }
 type Access = { employee_id: string; name: string; bound: boolean; bound_at: string | null; url: string }
+type AccessResp = { join_url: string; access: Access[] }
 type Geo = { lat: number; lon: number; radius: number } | null
 type Sent = { id: number; text: string; created_at: string; to_employee_id: string | null; read_by: number }
 
@@ -26,6 +28,29 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   })
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`)
   return r.json() as Promise<T>
+}
+
+/* QR печатают и вешают в подсобке, поэтому рисуем крупно и чёрным по белому:
+   светлая тема тут не вопрос вкуса, сканеру нужен контраст. */
+function QR({ text, size = 168 }: { text: string; size?: number }) {
+  const svg = useMemo(() => {
+    if (!text) return ''
+    const q = qrcode(0, 'M')
+    q.addData(text)
+    q.make()
+    const n = q.getModuleCount()
+    let path = ''
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) if (q.isDark(r, c)) path += `M${c} ${r}h1v1h-1z`
+    }
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -1 ${n + 2} ${n + 2}" `
+      + `width="${size}" height="${size}" shape-rendering="crispEdges">`
+      + `<rect x="-1" y="-1" width="${n + 2}" height="${n + 2}" fill="#fff"/>`
+      + `<path d="${path}" fill="#000"/></svg>`
+  }, [text, size])
+  if (!svg) return null
+  return <div style={{ lineHeight: 0, borderRadius: 10, overflow: 'hidden', background: '#fff', padding: 8, width: 'fit-content' }}
+              dangerouslySetInnerHTML={{ __html: svg }} />
 }
 
 /* ── Точка филиала: сверять гео не с чем, пока её не задали ── */
@@ -79,13 +104,14 @@ function BranchPoint({ org }: { org: string }) {
 /* ── Личные ссылки сотрудников ── */
 function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]; onWrite: (e: Emp) => void }) {
   const [access, setAccess] = useState<Access[]>([])
+  const [joinUrl, setJoinUrl] = useState('')
   const [copied, setCopied] = useState('')
 
   const load = useCallback(() => {
     if (!org) return
     fetch(`/api/staff-access/${org}`, { headers: { Accept: 'application/json' } })
-      .then((r) => (r.ok ? r.json() : { access: [] }))
-      .then((d) => setAccess(d.access || []))
+      .then((r) => (r.ok ? r.json() : { join_url: '', access: [] }))
+      .then((d: AccessResp) => { setAccess(d.access || []); setJoinUrl(d.join_url || '') })
       .catch(() => { /* покажем пустым */ })
   }, [org])
   useEffect(load, [load])
@@ -102,11 +128,29 @@ function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]
       .catch(() => { /* буфер недоступен — ссылка видна в поле ниже */ })
   }
 
-  if (!employees.length) return null
   return (
     <Glass span={6}>
-      <div className="eyebrow"><span>Доступ в мини-апп</span><span className="hint">личная ссылка</span></div>
-      <div style={{ marginTop: 8, maxHeight: 260, overflowY: 'auto' }}>
+      <div className="eyebrow"><span>Доступ в мини-апп</span><span className="hint">QR филиала</span></div>
+
+      {/* Основной путь: повесить в подсобке. Личные ссылки ниже — запасной,
+          для тех, кто сменил телефон или чья ссылка утекла. */}
+      <div style={{ marginTop: 12, display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <QR text={joinUrl} />
+        <div style={{ flex: 1, minWidth: 190 }}>
+          <div style={{ fontSize: 13, color: 'var(--hi)' }}>Распечатайте и повесьте в подсобке.</div>
+          <div style={{ fontSize: 12, color: 'var(--mute)', marginTop: 6 }}>
+            Сотрудник сканирует, один раз выбирает себя — и дальше заходит по своей ссылке.
+          </div>
+          <button onClick={() => copy(joinUrl, '__join')} style={{ ...btn, marginTop: 10 }}>
+            {copied === '__join' ? 'Скопировано' : 'Скопировать ссылку'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>
+        Кто подключился
+      </div>
+      <div style={{ marginTop: 4, maxHeight: 220, overflowY: 'auto' }}>
         {employees.map((e) => {
           const a = byId.get(e.id)
           return (
@@ -128,7 +172,7 @@ function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]
         })}
       </div>
       <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--mute)' }}>
-        Ссылка привязывается к первому, кто откроет её в Telegram. Утекла — выдайте заново, прежняя перестанет работать.
+        Привязка к телеграму происходит один раз. Ошиблись при выборе или человек сменил телефон — «Выдать» перевыпустит ссылку, прежняя умрёт.
       </div>
     </Glass>
   )

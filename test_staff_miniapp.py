@@ -365,6 +365,89 @@ def test_reminder_takes_only_the_asked_day():
     print("  [OK] взяли завтрашнюю смену, сегодняшнюю не трогали")
 
 
+# ── Подключение по QR филиала ──
+
+class _FakeIiko:
+    """Имена сотрудников без похода в iiko: тесты наружу не ходят."""
+    async def get_employees_map(self):
+        return {KIM: "Ким Виктория", VOLKOV: "Волков Артём", "e-third": "Нуров Асан"}
+
+
+def _with_iiko(fn):
+    real, api.get_client = api.get_client, lambda *a, **k: _FakeIiko()
+    try:
+        return fn()
+    finally:
+        api.get_client = real
+
+
+def test_join_token_cannot_be_swapped_with_a_branch_link():
+    """QR из подсобки не должен оказаться пропуском управляющего: у него своя
+    подпись и свой префикс, одно в другое не превращается."""
+    import mountain_routes as M
+    j, b = M.token_for_join(ORG), M.token_for_org(ORG)
+    assert M.org_from_token(j) is None, "QR подключения прочитался как ссылка филиала"
+    assert M.org_from_join_token(b) is None, "ссылка филиала прочиталась как QR"
+    assert M.org_from_join_token("j" + b[1:]) is None, "подмена префикса прошла"
+    assert M.org_from_join_token(j) == ORG
+    print("  [OK] подписи QR и ссылки филиала не взаимозаменяемы")
+
+
+def test_bad_join_token_is_not_found():
+    _seed()
+    os.environ["DEV_TID"] = str(TID_KIM)
+    assert client.get("/api/join/jorg-mine.wrongsignature").status_code == 404
+    print("  [OK] поддельная подпись — 404")
+
+
+def test_scanning_lets_you_pick_yourself_and_binds():
+    _seed()
+    import mountain_routes as M
+    t = M.token_for_join(ORG)
+    os.environ["DEV_TID"] = str(TID_KIM)
+
+    d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())
+    assert d["already"] is False, d
+    assert {e["id"] for e in d["employees"]} == {KIM, VOLKOV, "e-third"}, d
+
+    r = client.post(f"/api/join/{t}", json={"employee_id": KIM, "name": "Ким Виктория"})
+    assert r.status_code == 200, r.text[:200]
+    code = r.json()["code"]
+    me = client.get("/api/me", headers=_as(code, TID_KIM))
+    assert me.status_code == 200 and me.json()["employee_id"] == KIM, me.text[:200]
+    print("  [OK] выбрал себя — привязался, личная ссылка сразу работает")
+
+
+def test_taken_person_is_not_offered_and_cannot_be_claimed():
+    """Второй сканирующий не должен занять чужое место."""
+    _seed()
+    import mountain_routes as M
+    t = M.token_for_join(ORG)
+    D.bind_staff_access(D.issue_staff_access(ORG, KIM, "Ким"), TID_KIM)
+
+    os.environ["DEV_TID"] = str(TID_VOLKOV)
+    d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())
+    assert KIM not in {e["id"] for e in d["employees"]}, "занятого предложили в списке"
+
+    r = client.post(f"/api/join/{t}", json={"employee_id": KIM})
+    assert r.status_code == 409, f"{r.status_code} {r.text[:160]}"
+    print("  [OK] занятого нет в списке, и напрямую его не забрать")
+
+
+def test_second_scan_from_the_same_phone_returns_the_same_link():
+    """Повторный скан не должен плодить вторую привязку тому же человеку."""
+    _seed()
+    import mountain_routes as M
+    t = M.token_for_join(ORG)
+    os.environ["DEV_TID"] = str(TID_KIM)
+    code1 = client.post(f"/api/join/{t}", json={"employee_id": KIM}).json()["code"]
+    d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())
+    assert d["already"] is True and d["code"] == code1, d
+    assert client.post(f"/api/join/{t}", json={"employee_id": VOLKOV}).json()["code"] == code1, \
+        "со второго скана человек сменил личность"
+    print("  [OK] второй скан возвращает ту же ссылку, личность не меняется")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

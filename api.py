@@ -9302,6 +9302,113 @@ async def me_notice_read(notice_id: int, staff: Dict = Depends(get_staff)):
     return {"ok": True}
 
 
+def _app_base(request: Request) -> str:
+    """Откуда открыт мини-апп — основа всех выдаваемых ссылок.
+
+    MINIAPP_URL уважаем, только если он ЗАДАН явно. Его дефолт в коде указывает
+    на домен, который сейчас отдаёт 503, и собранные по нему ссылки были бы
+    мёртвыми у всех сотрудников разом. Хост запроса всегда тот, где приложение
+    реально живёт."""
+    env = os.getenv("MINIAPP_URL")
+    return (env or str(request.base_url)).rstrip("/")
+
+
+# ============ МИНИ-АПП СМЕН: ПОДКЛЮЧЕНИЕ ПО QR ФИЛИАЛА ============
+# Основной путь входа. Личные ссылки каждому — работа, про которую управляющий
+# забудет на третьем новичке, и человек тихо перестанет отмечаться. QR висит в
+# подсобке: сотрудник сканирует и ОДИН РАЗ выбирает себя, дальше он привязан к
+# своему телеграму. Подменить коллегу можно только в этот единственный момент,
+# и это видно управляющему — в панели написано, кто и когда привязался.
+
+
+async def _join_org(token: str) -> str:
+    """org филиала из ссылки подключения. 404, а не 401: несуществующая ссылка
+    и чужая подпись для сканирующего — одно и то же."""
+    import mountain_routes as _mr
+    org = _mr.org_from_join_token(token or "")
+    if not org:
+        raise HTTPException(status_code=404, detail="Ссылка недействительна")
+    return org
+
+
+def _join_tid(init_data: Optional[str]) -> int:
+    """Кто сканирует. Телеграм обязателен: привязка — это и есть вся защита,
+    без неё QR из подсобки давал бы доступ любому, кто его сфотографировал."""
+    if BOT_TOKEN:
+        if not init_data:
+            raise HTTPException(status_code=401, detail="Откройте ссылку в Telegram")
+        return int(validate_telegram_init_data(init_data).get("id") or 0)
+    return int(os.getenv("DEV_TID", "0") or 0)
+
+
+@app.get("/api/join/{token}")
+async def join_list(token: str,
+                    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
+    """Кого можно выбрать. Уже привязанных не показываем — иначе первым делом
+    предложили бы занять чужое место."""
+    from database import list_staff_access, staff_shift_counts, branch_name
+    org = await _join_org(token)
+    tid = _join_tid(x_telegram_init_data)
+
+    taken = {a["employee_id"] for a in list_staff_access(org) if a["telegram_id"]}
+    mine = [a for a in list_staff_access(org) if a["telegram_id"] == tid]
+    if mine:
+        # Уже подключался с этого телефона — второй раз выбирать себя не нужно.
+        return {"branch": branch_name(org), "already": True,
+                "code": mine[0]["code"], "employees": []}
+
+    import mountain_routes as _mr
+    owner = {"id": _mr._owner_of(org), "username": "join", "first_name": "Join"}
+    info = _get_restaurant_info(org, owner)
+    client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    names: Dict[str, str] = {}
+    if hasattr(client, "get_employees_map"):
+        try:
+            names = await client.get_employees_map()
+        except Exception as e:
+            logger.warning(f"[join] имена {org}: {e!r}")
+    counts = staff_shift_counts(org)
+    # Кого чаще ставят в график — тот выше: свою фамилию человек должен видеть
+    # сразу, а не листать весь сервер.
+    out = [{"id": eid, "name": names.get(eid) or eid[:8], "shifts": counts.get(eid, 0)}
+           for eid in (set(names) | set(counts)) - taken]
+    out.sort(key=lambda e: (-e["shifts"], e["name"]))
+    return {"branch": branch_name(org), "already": False, "employees": out}
+
+
+class JoinIn(BaseModel):
+    employee_id: str
+    name: Optional[str] = None
+
+
+@app.post("/api/join/{token}")
+async def join_claim(token: str, payload: JoinIn,
+                     x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data")):
+    """Выбрал себя — привязались. Отдаём личный код: дальше человек ходит по нему,
+    а QR ему больше не нужен."""
+    from database import (issue_staff_access, bind_staff_access, list_staff_access)
+    org = await _join_org(token)
+    tid = _join_tid(x_telegram_init_data)
+    if not tid:
+        raise HTTPException(status_code=401, detail="Не удалось определить пользователя")
+    if not payload.employee_id:
+        raise HTTPException(status_code=400, detail="Выберите себя из списка")
+
+    existing = {a["employee_id"]: a for a in list_staff_access(org)}
+    mine = next((a for a in existing.values() if a["telegram_id"] == tid), None)
+    if mine:
+        return {"ok": True, "code": mine["code"], "already": True}
+    taken = existing.get(payload.employee_id)
+    if taken and taken["telegram_id"]:
+        raise HTTPException(status_code=409,
+                            detail="Этого сотрудника уже подключили — позовите управляющего")
+
+    code = issue_staff_access(org, payload.employee_id, payload.name or "")
+    if not bind_staff_access(code, tid):
+        raise HTTPException(status_code=409, detail="Не удалось привязать, попробуйте ещё раз")
+    return {"ok": True, "code": code, "already": False}
+
+
 # ============ МИНИ-АПП СМЕН: СТОРОНА УПРАВЛЯЮЩЕГО ============
 # Эти ручки принимают {org_id} и потому обязаны идти через _get_org_id —
 # единственную точку изоляции по филиалам (её контракт стережёт test_site_isolation).
@@ -9313,27 +9420,31 @@ class StaffAccessIn(BaseModel):
 
 
 @app.get("/api/staff-access/{org_id}")
-async def staff_access_list(org_id: str, user: Dict = Depends(get_current_user)):
-    """Кому филиал выдал личные ссылки и кто уже привязался."""
+async def staff_access_list(org_id: str, request: Request,
+                            user: Dict = Depends(get_current_user)):
+    """Ссылка подключения филиала (её вешают в подсобке) плюс кто уже привязался."""
     from database import list_staff_access
+    import mountain_routes as _mr
     real_org = _get_org_id(org_id, user)
+    base = _app_base(request)
     rows = list_staff_access(real_org)
-    return {"access": [{"employee_id": r["employee_id"], "name": r["name"] or "",
+    return {"join_url": f"{base}/?j={_mr.token_for_join(real_org)}",
+            "access": [{"employee_id": r["employee_id"], "name": r["name"] or "",
                         "bound": bool(r["telegram_id"]), "bound_at": r["bound_at"],
-                        "url": f"{MINIAPP_URL}/?e={r['code']}"} for r in rows]}
+                        "url": f"{base}/?e={r['code']}"} for r in rows]}
 
 
 @app.post("/api/staff-access/{org_id}")
-async def staff_access_issue(org_id: str, payload: StaffAccessIn,
+async def staff_access_issue(org_id: str, payload: StaffAccessIn, request: Request,
                              user: Dict = Depends(get_current_user)):
-    """Выдать (или перевыпустить) личную ссылку сотруднику. Перевыпуск сбрасывает
-    привязку — им пользуются, когда человек сменил телефон или ссылка утекла."""
+    """Выдать (или перевыпустить) личную ссылку сотруднику. Основной путь входа —
+    QR филиала, а это запасной: человек сменил телефон или ссылка утекла."""
     from database import issue_staff_access
     real_org = _get_org_id(org_id, user)
     if not payload.employee_id:
         raise HTTPException(status_code=400, detail="employee_id обязателен")
     code = issue_staff_access(real_org, payload.employee_id, payload.name or "")
-    return {"ok": True, "url": f"{MINIAPP_URL}/?e={code}"}
+    return {"ok": True, "url": f"{_app_base(request)}/?e={code}"}
 
 
 @app.post("/api/staff-access/{org_id}/revoke")
