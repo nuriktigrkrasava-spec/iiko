@@ -67,7 +67,8 @@ def _seed():
     try:
         conn.execute("DELETE FROM restaurants WHERE telegram_id = ?", (OWNER,))
         for t in ("staff_access", "branch_notices", "branch_notice_reads",
-                  "staff_attendance", "staff_schedule", "staff_shift_notified"):
+                  "staff_attendance", "staff_schedule", "staff_shift_notified",
+                  "branch_join"):
             conn.execute(f"DELETE FROM {t}")
         conn.commit()
     finally:
@@ -381,29 +382,49 @@ def _with_iiko(fn):
         api.get_client = real
 
 
-def test_join_token_cannot_be_swapped_with_a_branch_link():
-    """QR из подсобки не должен оказаться пропуском управляющего: у него своя
-    подпись и свой префикс, одно в другое не превращается."""
+def test_join_code_is_not_a_branch_link():
+    """QR из подсобки не должен оказаться пропуском управляющего."""
     import mountain_routes as M
-    j, b = M.token_for_join(ORG), M.token_for_org(ORG)
-    assert M.org_from_token(j) is None, "QR подключения прочитался как ссылка филиала"
-    assert M.org_from_join_token(b) is None, "ссылка филиала прочиталась как QR"
-    assert M.org_from_join_token("j" + b[1:]) is None, "подмена префикса прошла"
-    assert M.org_from_join_token(j) == ORG
-    print("  [OK] подписи QR и ссылки филиала не взаимозаменяемы")
+    _seed()
+    code = D.get_or_create_join_code(ORG)
+    assert M.org_from_token(code) is None, "код подключения прочитался как ссылка филиала"
+    assert D.org_by_join_code(M.token_for_org(ORG)) is None, "ссылка филиала прошла как код"
+    assert D.org_by_join_code(code) == ORG
+    print("  [OK] код подключения и ссылка филиала не взаимозаменяемы")
 
 
-def test_bad_join_token_is_not_found():
+def test_rotating_the_code_kills_the_old_qr():
+    """QR сфотографировали — управляющий печатает новый, старый умирает."""
+    _seed()
+    old = D.get_or_create_join_code(ORG)
+    new = D.rotate_join_code(ORG)
+    assert new != old
+    assert D.org_by_join_code(old) is None, "старый QR всё ещё работает"
+    assert D.org_by_join_code(new) == ORG
+    print("  [OK] перевыпуск QR убивает прежний код")
+
+
+def test_join_code_is_safe_for_a_telegram_deep_link():
+    """Код едет в t.me/...?start=join_<код>: там можно только буквы, цифры,
+    дефис и подчёркивание, и не длиннее 64 символов вместе с префиксом."""
+    import re
+    _seed()
+    code = D.get_or_create_join_code(ORG)
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", code), code
+    assert len(f"join_{code}") <= 64, code
+    print(f"  [OK] код {code} проходит в deep-link телеграма")
+
+
+def test_bad_join_code_is_not_found():
     _seed()
     os.environ["DEV_TID"] = str(TID_KIM)
-    assert client.get("/api/join/jorg-mine.wrongsignature").status_code == 404
-    print("  [OK] поддельная подпись — 404")
+    assert client.get("/api/join/nosuchcode").status_code == 404
+    print("  [OK] несуществующий код — 404")
 
 
 def test_scanning_lets_you_pick_yourself_and_binds():
     _seed()
-    import mountain_routes as M
-    t = M.token_for_join(ORG)
+    t = D.get_or_create_join_code(ORG)
     os.environ["DEV_TID"] = str(TID_KIM)
 
     d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())
@@ -421,8 +442,7 @@ def test_scanning_lets_you_pick_yourself_and_binds():
 def test_taken_person_is_not_offered_and_cannot_be_claimed():
     """Второй сканирующий не должен занять чужое место."""
     _seed()
-    import mountain_routes as M
-    t = M.token_for_join(ORG)
+    t = D.get_or_create_join_code(ORG)
     D.bind_staff_access(D.issue_staff_access(ORG, KIM, "Ким"), TID_KIM)
 
     os.environ["DEV_TID"] = str(TID_VOLKOV)
@@ -437,8 +457,7 @@ def test_taken_person_is_not_offered_and_cannot_be_claimed():
 def test_second_scan_from_the_same_phone_returns_the_same_link():
     """Повторный скан не должен плодить вторую привязку тому же человеку."""
     _seed()
-    import mountain_routes as M
-    t = M.token_for_join(ORG)
+    t = D.get_or_create_join_code(ORG)
     os.environ["DEV_TID"] = str(TID_KIM)
     code1 = client.post(f"/api/join/{t}", json={"employee_id": KIM}).json()["code"]
     d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())

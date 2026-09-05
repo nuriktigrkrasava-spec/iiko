@@ -30,10 +30,14 @@ function StaffApp() {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
     savePref('theme', dark ? 'dark' : 'light')
   }, [dark])
+  // Пока человек не выбрал себя, показываем список; после выбора переключаемся
+  // на его смены ЗДЕСЬ ЖЕ. Перезагрузка со сменой адреса потеряла бы подпись
+  // Telegram — она приезжает в хеше и живёт только до навигации.
+  const [code, setCode] = useState(() => getStaffCode())
   const join = getJoinToken()
   return (
     <Suspense fallback={<div style={{ padding: 20, fontSize: 14, opacity: 0.6 }}>Загружаю…</div>}>
-      {join ? <Join token={join} /> : <MyShift />}
+      {join && !code ? <Join token={join} onDone={setCode} /> : <MyShift />}
     </Suspense>
   )
 }

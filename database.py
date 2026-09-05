@@ -1225,6 +1225,15 @@ def _ensure_staff_shifts(conn):
         updated_at TEXT,
         PRIMARY KEY (organization_id, employee_id, day)
     );
+    /* Код подключения филиала — тот, что в QR из подсобки. Живёт в базе, а не
+       в подписи: так его можно перевыпустить, если QR сфотографировали, не
+       трогая общий секрет приложения. */
+    CREATE TABLE IF NOT EXISTS branch_join (
+        organization_id TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        created_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS branch_join_code ON branch_join(code);
     /* Личная ссылка сотрудника. Управляющий выдаёт её напротив человека в
        расписании; code — сам секрет. Первый, кто открыл ссылку в телеграме,
        привязывается telegram_id, дальше она работает только ему: иначе
@@ -1460,6 +1469,46 @@ def set_branch_geo(org_id: str, lat: float, lon: float, radius: int = 250):
 
 
 # ── Личный доступ сотрудника: ссылка от управляющего. ──
+
+def get_or_create_join_code(org_id: str) -> str:
+    """Код подключения филиала. Короткий и из безопасного алфавита — он едет в
+    deep-link телеграма, где разрешены только буквы, цифры, дефис и подчёркивание."""
+    import secrets
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    row = conn.execute("SELECT code FROM branch_join WHERE organization_id = ?",
+                       (org_id,)).fetchone()
+    if row:
+        conn.close()
+        return row["code"]
+    code = secrets.token_urlsafe(9).replace("-", "_")
+    conn.execute("INSERT OR REPLACE INTO branch_join (organization_id, code, created_at) "
+                 "VALUES (?,?,?)", (org_id, code, datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    return code
+
+
+def rotate_join_code(org_id: str) -> str:
+    """Новый QR. Нужен, когда прежний сфотографировали: старый сразу мёртв."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("DELETE FROM branch_join WHERE organization_id = ?", (org_id,))
+    conn.commit()
+    conn.close()
+    return get_or_create_join_code(org_id)
+
+
+def org_by_join_code(code: str) -> Optional[str]:
+    if not code:
+        return None
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    row = conn.execute("SELECT organization_id FROM branch_join WHERE code = ?",
+                       (code,)).fetchone()
+    conn.close()
+    return row["organization_id"] if row else None
+
 
 def issue_staff_access(org_id: str, employee_id: str, name: str = "") -> str:
     """Выдаёт (или перевыпускает) личную ссылку. Перевыпуск сбрасывает привязку:

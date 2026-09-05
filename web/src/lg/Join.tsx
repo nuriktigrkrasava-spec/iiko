@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Glass } from './ui'
+import { saveStaffCode } from '../lib/api'
 
 /* Подключение по QR филиала: человек сканирует код из подсобки и ОДИН РАЗ
    выбирает себя. Дальше он привязан к своему телеграму и ходит по личной
@@ -12,7 +13,7 @@ import { Glass } from './ui'
 type Emp = { id: string; name: string; shifts: number }
 type Info = { branch: string; already: boolean; code?: string; employees: Emp[] }
 
-export default function Join({ token }: { token: string }) {
+export default function Join({ token, onDone }: { token: string; onDone: (code: string) => void }) {
   const [info, setInfo] = useState<Info | null>(null)
   const [error, setError] = useState('')
   const [q, setQ] = useState('')
@@ -27,10 +28,11 @@ export default function Join({ token }: { token: string }) {
       })
       .then((d) => {
         // Уже подключался с этого телефона — второй раз выбирать себя незачем.
-        if (d.already && d.code) { window.location.replace(`/?e=${d.code}`); return }
+        if (d.already && d.code) { saveStaffCode(d.code); onDone(d.code); return }
         setInfo(d)
       })
       .catch((e) => setError(String((e as Error).message || e)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token])
 
   const hits = useMemo(() => {
@@ -48,7 +50,10 @@ export default function Join({ token }: { token: string }) {
       })
       const d = await r.json().catch(() => ({}))
       if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`)
-      window.location.replace(`/?e=${d.code}`)
+      // Не перезагружаемся: подпись Telegram лежит в хеше адреса и при смене
+      // адреса пропадёт — человек тут же получит «откройте ссылку в Telegram».
+      saveStaffCode(d.code)
+      onDone(d.code)
     } catch (err) {
       setError(String((err as Error).message || err)); setBusy('')
     }

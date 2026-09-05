@@ -111,33 +111,6 @@ def token_for_org(org_id: str) -> str:
     return f"b{org_id}.{_sign_org(org_id)}"
 
 
-def _sign_join(org_id: str) -> str:
-    mac = hmac.new(_secret(), f"mountain-join:{org_id}".encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:20]
-
-
-def token_for_join(org_id: str) -> str:
-    """Ссылка/QR ПОДКЛЮЧЕНИЯ для сотрудников филиала: висит в подсобке, человек
-    сканирует и один раз выбирает себя.
-
-    Подпись СВОЯ, не та, что у ссылки филиала: иначе QR из подсобки был бы
-    заодно и пропуском управляющего — с выручкой, складом и чужими зарплатами.
-    Отличается и префикс, и подписываемая строка, поэтому одну в другую не
-    превратить перестановкой букв."""
-    return f"j{org_id}.{_sign_join(org_id)}"
-
-
-def org_from_join_token(token: str) -> Optional[str]:
-    """organization_id из ссылки подключения. None — это не она."""
-    if not token or not token.startswith("j") or "." not in token:
-        return None
-    org, sig = token[1:].rsplit(".", 1)
-    if not org:
-        return None
-    return org if hmac.compare_digest(sig.encode("utf-8", "ignore"),
-                                      _sign_join(org).encode()) else None
-
-
 def org_from_token(token: str) -> Optional[str]:
     """organization_id из ссылки филиала. None — это не ссылка филиала."""
     if not token or not token.startswith("b") or "." not in token:

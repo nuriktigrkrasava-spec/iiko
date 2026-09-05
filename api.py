@@ -7362,6 +7362,39 @@ async def telegram_webhook(request: Request):
             raw_source = parts[1].strip() if len(parts) > 1 else ""
             source = re.sub(r"[^0-9A-Za-z_\-]", "", raw_source)[:64] or "direct"
 
+            # Мини-апп смен. Обычная https-ссылка сюда не годится: открытая
+            # даже внутри Telegram, она попадает во встроенный браузер, а не в
+            # Mini App, и подписи там нет. Поэтому сотрудник приходит к боту, а
+            # тот отвечает кнопкой web_app — она открывает настоящий Mini App.
+            if source.startswith("join_") or source.startswith("emp_"):
+                from database import org_by_join_code, staff_access_by_code, branch_name
+                code = source.split("_", 1)[1]
+                if source.startswith("join_"):
+                    org = org_by_join_code(code)
+                    if not org:
+                        await _tg_send(chat_id, "❌ Код филиала недействителен. "
+                                                "Попросите управляющего показать новый.")
+                        return {"ok": True}
+                    await _tg_send(
+                        chat_id,
+                        f"<b>{branch_name(org)}</b>\n\nНажмите кнопку и выберите себя из списка — "
+                        f"это делается один раз.",
+                        {"inline_keyboard": [[{"text": "Выбрать себя",
+                                               "web_app": {"url": f"{_miniapp_url()}/?j={code}"}}]]})
+                    return {"ok": True}
+                acc = staff_access_by_code(code)
+                if not acc:
+                    await _tg_send(chat_id, "❌ Ссылка недействительна. "
+                                            "Попросите управляющего выдать новую.")
+                    return {"ok": True}
+                await _tg_send(
+                    chat_id,
+                    f"<b>Смены · {branch_name(acc['organization_id'])}</b>\n\n"
+                    f"Здесь ваш график, оплата и открытие смены.",
+                    {"inline_keyboard": [[{"text": "Мои смены",
+                                           "web_app": {"url": f"{_miniapp_url()}/?e={code}"}}]]})
+                return {"ok": True}
+
             # Приглашение управляющего: /start inv_<org>_<подпись> на один филиал
             # или inv<N>_<org>…_<подпись> на несколько (один человек — два адреса).
             # Подпись на ENCRYPTION_KEY — по чужой ссылке к филиалу не подключиться.
@@ -9302,15 +9335,32 @@ async def me_notice_read(notice_id: int, staff: Dict = Depends(get_staff)):
     return {"ok": True}
 
 
-def _app_base(request: Request) -> str:
-    """Откуда открыт мини-апп — основа всех выдаваемых ссылок.
+# Где живёт мини-апп. MINIAPP_URL уважаем, только если он ЗАДАН явно: его
+# дефолт в коде указывает на домен, который отдаёт 503, и кнопки, собранные по
+# нему, были бы мёртвыми у всех разом. Иначе берём хост последнего запроса —
+# фоновым рассылкам спросить неоткуда, а приложение всегда отвечает по тому же
+# адресу, по которому его открывают.
+_seen_base: str = ""
 
-    MINIAPP_URL уважаем, только если он ЗАДАН явно. Его дефолт в коде указывает
-    на домен, который сейчас отдаёт 503, и собранные по нему ссылки были бы
-    мёртвыми у всех сотрудников разом. Хост запроса всегда тот, где приложение
-    реально живёт."""
-    env = os.getenv("MINIAPP_URL")
-    return (env or str(request.base_url)).rstrip("/")
+
+def _app_base(request: Request) -> str:
+    global _seen_base
+    _seen_base = str(request.base_url).rstrip("/")
+    return (os.getenv("MINIAPP_URL") or _seen_base).rstrip("/")
+
+
+def _miniapp_url() -> str:
+    return (os.getenv("MINIAPP_URL") or _seen_base or MINIAPP_URL).rstrip("/")
+
+
+def _tg_link(payload: str) -> str:
+    """Ссылка для сотрудника — ТОЛЬКО через бота.
+
+    Обычный https-адрес мини-аппа не годится: открытый даже внутри Telegram, он
+    попадает во встроенный браузер, а не в Mini App, и подписи (initData) там
+    нет — вход по такой ссылке невозможен в принципе. Бот же отвечает кнопкой
+    web_app, и вот она открывает настоящий Mini App с подписью."""
+    return f"https://t.me/{BOT_USERNAME}?start={payload}"
 
 
 # ============ МИНИ-АПП СМЕН: ПОДКЛЮЧЕНИЕ ПО QR ФИЛИАЛА ============
@@ -9322,10 +9372,10 @@ def _app_base(request: Request) -> str:
 
 
 async def _join_org(token: str) -> str:
-    """org филиала из ссылки подключения. 404, а не 401: несуществующая ссылка
-    и чужая подпись для сканирующего — одно и то же."""
-    import mountain_routes as _mr
-    org = _mr.org_from_join_token(token or "")
+    """org филиала по коду подключения. 404, а не 401: несуществующий код и
+    чужой для сканирующего — одно и то же."""
+    from database import org_by_join_code
+    org = org_by_join_code(token or "")
     if not org:
         raise HTTPException(status_code=404, detail="Ссылка недействительна")
     return org
@@ -9423,15 +9473,13 @@ class StaffAccessIn(BaseModel):
 async def staff_access_list(org_id: str, request: Request,
                             user: Dict = Depends(get_current_user)):
     """Ссылка подключения филиала (её вешают в подсобке) плюс кто уже привязался."""
-    from database import list_staff_access
-    import mountain_routes as _mr
+    from database import list_staff_access, get_or_create_join_code
     real_org = _get_org_id(org_id, user)
-    base = _app_base(request)
     rows = list_staff_access(real_org)
-    return {"join_url": f"{base}/?j={_mr.token_for_join(real_org)}",
+    return {"join_url": _tg_link(f"join_{get_or_create_join_code(real_org)}"),
             "access": [{"employee_id": r["employee_id"], "name": r["name"] or "",
                         "bound": bool(r["telegram_id"]), "bound_at": r["bound_at"],
-                        "url": f"{base}/?e={r['code']}"} for r in rows]}
+                        "url": _tg_link(f"emp_{r['code']}")} for r in rows]}
 
 
 @app.post("/api/staff-access/{org_id}")
@@ -9444,7 +9492,7 @@ async def staff_access_issue(org_id: str, payload: StaffAccessIn, request: Reque
     if not payload.employee_id:
         raise HTTPException(status_code=400, detail="employee_id обязателен")
     code = issue_staff_access(real_org, payload.employee_id, payload.name or "")
-    return {"ok": True, "url": f"{_app_base(request)}/?e={code}"}
+    return {"ok": True, "url": _tg_link(f"emp_{code}")}
 
 
 @app.post("/api/staff-access/{org_id}/revoke")
@@ -9459,6 +9507,38 @@ class BranchGeoIn(BaseModel):
     lat: float
     lon: float
     radius: Optional[int] = None
+
+
+@app.get("/api/geocode/{org_id}")
+async def geocode(org_id: str, q: str = Query(..., min_length=3),
+                  user: Dict = Depends(get_current_user)):
+    """Адрес → координаты, чтобы точку филиала задавали из кабинета, а не стоя
+    в заведении.
+
+    OpenStreetMap (Nominatim): без ключей и без счетов. Он просит представляться
+    и не частить — для настройки, которую делают несколько раз за жизнь филиала,
+    этого хватает с запасом. Сами ничего не выбираем: «Абая 10» есть в каждом
+    городе, поэтому отдаём варианты, а решает человек."""
+    _get_org_id(org_id, user)          # изоляция: чужой филиал не настраиваем
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as c:
+            r = await c.get("https://nominatim.openstreetmap.org/search",
+                            params={"q": q, "format": "json", "limit": 5,
+                                    "accept-language": "ru"},
+                            headers={"User-Agent": "iiko-analytics/1.0 (branch geo setup)"})
+            r.raise_for_status()
+            found = r.json()
+    except Exception as e:
+        logger.warning(f"[geocode] {q!r}: {e!r}")
+        raise HTTPException(status_code=502, detail="Поиск адреса недоступен, попробуйте позже")
+    out = []
+    for item in found:
+        try:
+            out.append({"label": item.get("display_name") or q,
+                        "lat": float(item["lat"]), "lon": float(item["lon"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    return {"results": out}
 
 
 @app.get("/api/branch-geo/{org_id}")
@@ -9767,7 +9847,7 @@ async def _shift_reminders_round(day: Optional[str] = None) -> int:
         text = (f'<b>Завтра смена — {when}</b>\n{names[org]}\n\n'
                 f'Открыть её нужно на месте, когда придёте.')
         kb = {"inline_keyboard": [[{"text": "Мои смены",
-                                    "web_app": {"url": f"{MINIAPP_URL}/?e={r['code']}"}}]]}
+                                    "web_app": {"url": f"{_miniapp_url()}/?e={r['code']}"}}]]}
         if await _tg_send(int(r["telegram_id"]), text, kb):
             sent += 1
     return sent

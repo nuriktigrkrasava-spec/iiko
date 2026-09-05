@@ -53,7 +53,7 @@ function authHeaders(): Record<string, string> {
     const q = new URLSearchParams(window.location.search)
     const m = q.get('m')
     if (m) h['X-Site-Token'] = m
-    const e = q.get('e')
+    const e = q.get('e') || loadPref('staffCode')
     if (e) h['X-Staff-Code'] = e
   } catch { /* нет доступа к адресу */ }
   return h
@@ -69,14 +69,24 @@ export function getJoinToken(): string {
   }
 }
 
-/** Код сотрудника из адреса. Пусто — открыли не по личной ссылке сотрудника. */
+/* Код сотрудника: из адреса, иначе из запомненного.
+
+   Запоминаем намеренно. Мини-апп открывают кнопкой бота, и подпись Telegram
+   приезжает в хеше адреса — любая перезагрузка со сменой адреса её теряет.
+   Сохранённый код позволяет открыть приложение повторно, ничего не пересылая. */
 export function getStaffCode(): string {
   if (typeof window === 'undefined') return ''
   try {
-    return new URLSearchParams(window.location.search).get('e') || ''
+    const q = new URLSearchParams(window.location.search).get('e')
+    if (q) { savePref('staffCode', q); return q }
+    return loadPref('staffCode') || ''
   } catch {
     return ''
   }
+}
+
+export function saveStaffCode(code: string) {
+  savePref('staffCode', code)
 }
 
 if (typeof window !== 'undefined' && !(window as TgWindow).__lgAuthPatched) {

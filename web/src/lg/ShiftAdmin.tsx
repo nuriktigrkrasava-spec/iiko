@@ -11,6 +11,7 @@ type Emp = { id: string; name: string }
 type Access = { employee_id: string; name: string; bound: boolean; bound_at: string | null; url: string }
 type AccessResp = { join_url: string; access: Access[] }
 type Geo = { lat: number; lon: number; radius: number } | null
+type Hit = { label: string; lat: number; lon: number }
 type Sent = { id: number; text: string; created_at: string; to_employee_id: string | null; read_by: number }
 
 const btn: React.CSSProperties = {
@@ -58,6 +59,8 @@ function BranchPoint({ org }: { org: string }) {
   const [geo, setGeo] = useState<Geo>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
+  const [addr, setAddr] = useState('')
+  const [hits, setHits] = useState<Hit[]>([])
 
   useEffect(() => {
     if (!org) return
@@ -70,17 +73,34 @@ function BranchPoint({ org }: { org: string }) {
   const here = () => {
     setBusy(true); setMsg('')
     navigator.geolocation?.getCurrentPosition(
-      async (p) => {
-        try {
-          const d = await post<{ geo: Geo }>(`/api/branch-geo/${org}`, {
-            lat: p.coords.latitude, lon: p.coords.longitude, radius: geo?.radius ?? 250,
-          })
-          setGeo(d.geo); setMsg('Точка сохранена')
-        } catch (e) { setMsg(String((e as Error).message)) } finally { setBusy(false) }
-      },
+      async (p) => { await save(p.coords.latitude, p.coords.longitude); setBusy(false) },
       () => { setBusy(false); setMsg('Телефон не дал геопозицию') },
       { enableHighAccuracy: true, timeout: 10000 },
     )
+  }
+
+  const save = async (lat: number, lon: number, label?: string) => {
+    try {
+      const d = await post<{ geo: Geo }>(`/api/branch-geo/${org}`, {
+        lat, lon, radius: geo?.radius ?? 250,
+      })
+      setGeo(d.geo); setHits([]); setAddr('')
+      setMsg(label ? `Точка: ${label.split(',').slice(0, 3).join(',')}` : 'Точка сохранена')
+    } catch (e) { setMsg(String((e as Error).message)) }
+  }
+
+  const find = async () => {
+    const q = addr.trim()
+    if (q.length < 3) return
+    setBusy(true); setMsg(''); setHits([])
+    try {
+      const r = await fetch(`/api/geocode/${org}?q=${encodeURIComponent(q)}`,
+                            { headers: { Accept: 'application/json' } })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`)
+      setHits(d.results || [])
+      if (!(d.results || []).length) setMsg('Ничего не нашли — добавьте город и номер дома')
+    } catch (e) { setMsg(String((e as Error).message)) } finally { setBusy(false) }
   }
 
   return (
@@ -91,12 +111,37 @@ function BranchPoint({ org }: { org: string }) {
           ? `Задана · радиус ${geo.radius} м`
           : 'Не задана — гео у сотрудников не проверяется, смены открываются без отметки о месте.'}
       </div>
-      <button onClick={here} disabled={busy} style={{ ...btn, marginTop: 12, borderColor: 'var(--acc)', color: 'var(--acc)' }}>
-        {busy ? 'Определяю…' : geo ? 'Переставить сюда' : 'Филиал здесь'}
-      </button>
-      <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
-        Нажимайте, стоя в заведении. {msg}
+      {/* Адресом — из кабинета; кнопкой — стоя на месте. Второе точнее, но
+          ради него не поедешь через город. */}
+      <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+        <input
+          value={addr} onChange={(e) => setAddr(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') find() }}
+          placeholder="Город, улица, дом" aria-label="Адрес филиала"
+          style={{ ...inp, flex: 1 }}
+        />
+        <button onClick={find} disabled={busy} style={{ ...btn, whiteSpace: 'nowrap' }}>
+          {busy ? '…' : 'Найти'}
+        </button>
       </div>
+
+      {hits.length > 0 && (
+        <div style={{ marginTop: 8, borderRadius: 11, border: '1px solid var(--hair)', overflow: 'hidden' }}>
+          {hits.map((h, i) => (
+            <button key={i} onClick={() => save(h.lat, h.lon, h.label)}
+              style={{ display: 'block', width: '100%', textAlign: 'left', padding: '10px 11px',
+                       fontSize: 12.5, background: 'transparent', border: 'none',
+                       borderBottom: '1px solid var(--hair-2)', color: 'var(--hi)', cursor: 'pointer' }}>
+              {h.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <button onClick={here} disabled={busy} style={{ ...btn, marginTop: 10 }}>
+        {busy ? 'Определяю…' : 'Или взять моё место сейчас'}
+      </button>
+      <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>{msg}</div>
     </Glass>
   )
 }
