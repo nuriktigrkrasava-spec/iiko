@@ -62,11 +62,19 @@ function BranchPoint({ org }: { org: string }) {
   const [addr, setAddr] = useState('')
   const [hits, setHits] = useState<Hit[]>([])
 
+  const [noHouse, setNoHouse] = useState(false)
+
   useEffect(() => {
     if (!org) return
     fetch(`/api/branch-geo/${org}`, { headers: { Accept: 'application/json' } })
       .then((r) => (r.ok ? r.json() : { geo: null }))
-      .then((d) => setGeo(d.geo))
+      .then((d: { geo: Geo; name?: string; has_house_number?: boolean }) => {
+        setGeo(d.geo)
+        // Филиалы в iiko называются своим адресом — подставляем его, чтобы
+        // управляющему осталось только нажать «Найти».
+        if (d.name && !d.geo) setAddr(d.name.replace(/\s*\(.*?\)\s*/g, ' ').trim())
+        setNoHouse(d.has_house_number === false)
+      })
       .catch(() => { /* не критично: просто предложим задать */ })
   }, [org])
 
@@ -141,6 +149,12 @@ function BranchPoint({ org }: { org: string }) {
       <button onClick={here} disabled={busy} style={{ ...btn, marginTop: 10 }}>
         {busy ? 'Определяю…' : 'Или взять моё место сейчас'}
       </button>
+      {noHouse && !geo && (
+        <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--amb)' }}>
+          В названии филиала нет номера дома — допишите его в поле, иначе точка
+          встанет в центр улицы и радиус промахнётся.
+        </div>
+      )}
       <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>{msg}</div>
     </Glass>
   )

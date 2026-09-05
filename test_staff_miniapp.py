@@ -467,6 +467,37 @@ def test_second_scan_from_the_same_phone_returns_the_same_link():
     print("  [OK] второй скан возвращает ту же ссылку, личность не меняется")
 
 
+# ── Точка филиала из его названия ──
+
+def test_branch_name_is_offered_as_the_address():
+    """Филиалы в iiko называются адресом — панель подставляет его сама."""
+    _seed()
+    os.environ["DEV_TID"] = str(OWNER)
+    d = client.get(f"/api/branch-geo/{ORG}").json()
+    assert d["name"] == "Астана, Мой филиал", d
+    assert d["geo"] is None, d
+    print(f"  [OK] панели отдано название «{d['name']}» для подстановки")
+
+
+def test_missing_house_number_is_reported_not_guessed():
+    """Без номера дома геокодер поставит точку в центр улицы, и радиус
+    промахнётся. Честно предупреждаем, а не ставим молча мимо."""
+    _seed()
+    conn = D.get_db()
+    conn.execute("UPDATE restaurants SET organization_name = ? WHERE organization_id = ?",
+                 ("Астана, проспект Кабанбай Батыра", ORG))
+    conn.commit(); conn.close()
+    os.environ["DEV_TID"] = str(OWNER)
+    assert client.get(f"/api/branch-geo/{ORG}").json()["has_house_number"] is False
+
+    conn = D.get_db()
+    conn.execute("UPDATE restaurants SET organization_name = ? WHERE organization_id = ?",
+                 ("Астана, проспект Кабанбай Батыра 13 (EXPO)", ORG))
+    conn.commit(); conn.close()
+    assert client.get(f"/api/branch-geo/{ORG}").json()["has_house_number"] is True
+    print("  [OK] «без дома» отличаем от «дом есть», скобки в счёт не идут")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

@@ -9543,8 +9543,16 @@ async def geocode(org_id: str, q: str = Query(..., min_length=3),
 
 @app.get("/api/branch-geo/{org_id}")
 async def branch_geo_get(org_id: str, user: Dict = Depends(get_current_user)):
-    from database import get_branch_geo
-    return {"geo": get_branch_geo(_get_org_id(org_id, user))}
+    """Точка филиала и его название. Название отдаём, чтобы панель подставила
+    адрес сама: в iiko филиалы и называются адресом («Астана, ул. Г.Алиева 10»),
+    и переписывать его руками — лишняя работа с опечатками."""
+    from database import get_branch_geo, branch_name
+    real_org = _get_org_id(org_id, user)
+    name = branch_name(real_org)
+    return {"geo": get_branch_geo(real_org), "name": name,
+            # Без номера дома геокодер поставит точку в центр улицы, и радиус
+            # промахнётся. Честно говорим об этом, а не молча ставим мимо.
+            "has_house_number": bool(re.search(r"\d", re.sub(r"\(.*?\)", "", name)))}
 
 
 @app.post("/api/branch-geo/{org_id}")

@@ -239,6 +239,7 @@ export default function MyShift() {
   }
 
   const today = week.days.find((d) => d.date === week.today)
+  const unread = notices.some((n) => !n.is_read)
   return (
     <div style={{ padding: '18px 14px 40px', maxWidth: 560, margin: '0 auto', display: 'grid', gap: 14 }}>
       <div style={{ padding: '0 4px' }}>
@@ -246,8 +247,11 @@ export default function MyShift() {
         <div style={{ fontSize: 12.5, color: 'var(--mute)', marginTop: 2 }}>{me.branch}</div>
       </div>
       <OpenShift today={today} onOpened={load} />
-      <Messages notices={notices} onRead={read} />
+      {/* Непрочитанное поднимаем над графиком: сообщение управляющего обычно
+          про сегодня, а график — справочник, к нему возвращаются. */}
+      {unread ? <Messages notices={notices} onRead={read} /> : null}
       <MyWeek week={week} />
+      {unread ? null : <Messages notices={notices} onRead={read} />}
     </div>
   )
 }

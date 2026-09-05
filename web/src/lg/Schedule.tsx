@@ -91,7 +91,9 @@ function AddEmployee({ pool, onPick }: { pool: Emp[]; onPick: (id: string) => vo
         }}
       />
       {hits.length > 0 && (
-        <div style={{ position: 'absolute', zIndex: 5, left: 0, right: 0, marginTop: 4, borderRadius: 11, border: '1px solid var(--hair)', background: 'var(--glass-1)', backdropFilter: 'blur(18px)', overflow: 'hidden' }}>
+        // Фон обязан быть НЕПРОЗРАЧНЫМ: список висит поверх таблицы, и сквозь
+        // него просвечивали смены — казалось, что блоки наехали друг на друга.
+        <div style={{ position: 'absolute', zIndex: 20, left: 0, right: 0, marginTop: 4, borderRadius: 11, border: '1px solid var(--hair)', background: 'var(--card)', boxShadow: 'var(--shadow)', maxHeight: 260, overflowY: 'auto' }}>
           {hits.map((e) => (
             <button key={e.id} onClick={() => { onPick(e.id); setQ('') }}
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 11px', fontSize: 13, background: 'transparent', border: 'none', borderBottom: '1px solid var(--hair-2)', color: 'var(--hi)', cursor: 'pointer' }}>
