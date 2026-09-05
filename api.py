@@ -9315,6 +9315,36 @@ async def me_open_shift(payload: OpenShiftIn, staff: Dict = Depends(get_staff)):
     return {"ok": True, "already": False, "start": now_hm, "geo_ok": None if ok is None else int(ok)}
 
 
+def _month_bounds(month: Optional[str] = None) -> tuple:
+    """Границы месяца 'YYYY-MM'. Зарплату считают месяцем, а не неделей."""
+    d = date.fromisoformat((month or local_now().date().isoformat()[:7]) + "-01")
+    nxt = date(d.year + (d.month == 12), (d.month % 12) + 1, 1)
+    return d.isoformat(), (nxt - timedelta(days=1)).isoformat()
+
+
+@app.get("/api/me/pay")
+async def me_pay(month: Optional[str] = Query(None), staff: Dict = Depends(get_staff)):
+    """Мой расчёт за месяц: начислено сменами, выдано на руки, остаток.
+
+    Начисление и выплата живут раздельно: «отработал» и «получил» расходятся во
+    времени, и человеку важно видеть не одну цифру, а обе и разницу."""
+    from database import get_staff_schedule, get_staff_payouts, staff_pay_summary
+    org, eid = staff["org"], staff["employee_id"]
+    d_from, d_to = _month_bounds(month)
+    mine = staff_pay_summary(org, d_from, d_to).get(eid, {"earned": 0, "paid": 0,
+                                                          "balance": 0, "shifts": 0})
+    shifts = [{"date": r["day"], "start": r["start_time"], "end": r["end_time"] or "",
+               "pay": r["pay"]}
+              for r in get_staff_schedule(org, d_from, d_to)
+              if r["employee_id"] == eid and r["pay"] is not None]
+    shifts.sort(key=lambda x: x["date"])
+    payouts = [{"day": p["day"], "amount": p["amount"], "comment": p["comment"] or ""}
+               for p in get_staff_payouts(org, d_from, d_to, eid)]
+    return {"month": d_from[:7], "from": d_from, "to": d_to,
+            "earned": mine["earned"], "paid": mine["paid"], "balance": mine["balance"],
+            "shifts": shifts, "payouts": payouts}
+
+
 @app.get("/api/me/notices")
 async def me_notices(staff: Dict = Depends(get_staff)):
     """Объявления смене и адресованные лично мне. Чужие личные сюда не попадают."""
@@ -9566,6 +9596,68 @@ async def branch_geo_set(org_id: str, payload: BranchGeoIn,
     set_branch_geo(real_org, payload.lat, payload.lon, payload.radius or 250)
     return {"ok": True, "geo": {"lat": payload.lat, "lon": payload.lon,
                                 "radius": max(20, int(payload.radius or 250))}}
+
+
+class PayoutIn(BaseModel):
+    employee_id: str
+    amount: float
+    day: Optional[str] = None
+    comment: Optional[str] = None
+
+
+class PayoutDelIn(BaseModel):
+    id: int
+
+
+@app.get("/api/payouts/{org_id}")
+async def payouts_list(org_id: str, month: Optional[str] = Query(None),
+                       user: Dict = Depends(get_current_user)):
+    """Расчёт по бригаде за месяц: кому сколько начислено, выдано и осталось."""
+    from database import staff_pay_summary, get_staff_payouts, list_staff_access
+    real_org = _get_org_id(org_id, user)
+    d_from, d_to = _month_bounds(month)
+    summary = staff_pay_summary(real_org, d_from, d_to)
+    names = {a["employee_id"]: a["name"] for a in list_staff_access(real_org) if a["name"]}
+    rows = [{"employee_id": eid, "name": names.get(eid, eid[:8]), **v}
+            for eid, v in summary.items()]
+    # Сначала те, кому должны: управляющий открывает экран ради них.
+    rows.sort(key=lambda r: (-r["balance"], r["name"]))
+    return {"month": d_from[:7], "rows": rows,
+            "payouts": get_staff_payouts(real_org, d_from, d_to),
+            "total_earned": round(sum(r["earned"] for r in rows), 2),
+            "total_paid": round(sum(r["paid"] for r in rows), 2),
+            "total_balance": round(sum(r["balance"] for r in rows), 2)}
+
+
+@app.post("/api/payouts/{org_id}")
+async def payout_add(org_id: str, payload: PayoutIn,
+                     user: Dict = Depends(get_current_user)):
+    """Записать выдачу. Отрицательная сумма — это удержание, и вводить его так
+    мы не даём: для исправления ошибки выплату удаляют, а не гасят минусом."""
+    from database import add_staff_payout
+    real_org = _get_org_id(org_id, user)
+    if not payload.employee_id:
+        raise HTTPException(status_code=400, detail="employee_id обязателен")
+    if payload.amount is None or payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть больше нуля")
+    day = payload.day or local_now().date().isoformat()
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверная дата")
+    pid = add_staff_payout(real_org, payload.employee_id, day, float(payload.amount),
+                           payload.comment or "", user.get("id", 0))
+    return {"ok": True, "id": pid}
+
+
+@app.post("/api/payouts/{org_id}/delete")
+async def payout_delete(org_id: str, payload: PayoutDelIn,
+                        user: Dict = Depends(get_current_user)):
+    from database import delete_staff_payout
+    real_org = _get_org_id(org_id, user)
+    if not delete_staff_payout(real_org, payload.id):
+        raise HTTPException(status_code=404, detail="Выплата не найдена")
+    return {"ok": True}
 
 
 class StaffNoticeIn(BaseModel):

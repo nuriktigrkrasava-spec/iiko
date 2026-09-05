@@ -17,6 +17,10 @@ type Me = { name: string; employee_id: string; branch: string; geo_required: boo
 type Day = { date: string; start: string; end: string; pay: number | null; opened: string; geo_ok: number | null }
 type Week = { from: string; to: string; days: Day[]; pay_total: number; today: string }
 type Notice = { id: number; text: string; created_at: string; personal: boolean; is_read: boolean }
+type Payout = { day: string; amount: number; comment: string }
+type Pay = { month: string; earned: number; paid: number; balance: number;
+             shifts: { date: string; start: string; end: string; pay: number }[];
+             payouts: Payout[] }
 
 const DOW = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 const dowOf = (iso: string) => DOW[(new Date(iso + 'T00:00:00').getDay() + 6) % 7]
@@ -162,6 +166,68 @@ function MyWeek({ week }: { week: Week }) {
   )
 }
 
+/* ── Зарплата: начислено, выдано, остаток ──
+   Одна цифра «за неделю» на вопрос «сколько мне должны» не отвечает: человек
+   держит в голове, что часть уже получил авансом. Поэтому три числа и история
+   выдач — чтобы спор с управляющим решался экраном, а не памятью. */
+function Wallet({ pay }: { pay: Pay }) {
+  const owed = pay.balance > 0
+  return (
+    <Card>
+      <div className="eyebrow">
+        <span>Зарплата</span>
+        <span className="hint">{pay.month}</span>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 13, color: 'var(--mute)' }}>
+        {owed ? 'К выплате' : pay.balance < 0 ? 'Выдано авансом' : 'Всё выплачено'}
+      </div>
+      <div className="tnum" style={{
+        fontSize: 38, fontWeight: 680, letterSpacing: '-.03em', marginTop: 2,
+        color: owed ? 'var(--hi)' : 'var(--grn)',
+      }}>
+        {tg(Math.abs(pay.balance))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 18, marginTop: 14, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--mute)' }}>Начислено</div>
+          <div className="tnum" style={{ fontSize: 17, fontWeight: 620, color: 'var(--hi)' }}>{tg(pay.earned)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--mute)' }}>Выдано</div>
+          <div className="tnum" style={{ fontSize: 17, fontWeight: 620, color: 'var(--grn)' }}>{tg(pay.paid)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--mute)' }}>Смен с оплатой</div>
+          <div className="tnum" style={{ fontSize: 17, fontWeight: 620, color: 'var(--hi)' }}>{pay.shifts.length}</div>
+        </div>
+      </div>
+
+      {pay.payouts.length > 0 && (
+        <>
+          <div style={{ marginTop: 16, fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>
+            История выплат
+          </div>
+          {pay.payouts.map((p, i) => (
+            <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '10px 0', borderTop: '1px solid var(--hair-2)' }}>
+              <span style={{ width: 52, fontSize: 12, color: 'var(--mute)' }}>{p.day.slice(8)}.{p.day.slice(5, 7)}</span>
+              <span style={{ flex: 1, fontSize: 12.5, color: 'var(--lo)' }}>{p.comment || 'выплата'}</span>
+              <span className="tnum" style={{ fontSize: 13.5, fontWeight: 620, color: 'var(--grn)' }}>{tg(p.amount)}</span>
+            </div>
+          ))}
+        </>
+      )}
+
+      {!pay.earned && !pay.paid && (
+        <div style={{ marginTop: 12, fontSize: 12, color: 'var(--mute)' }}>
+          За этот месяц пока ничего не начислено — управляющий проставляет оплату на смене.
+        </div>
+      )}
+    </Card>
+  )
+}
+
 /* ── Сообщения ── */
 function Messages({ notices, onRead }: { notices: Notice[]; onRead: (id: number) => void }) {
   if (!notices.length) return null
@@ -200,16 +266,18 @@ export default function MyShift() {
   const [me, setMe] = useState<Me | null>(null)
   const [week, setWeek] = useState<Week | null>(null)
   const [notices, setNotices] = useState<Notice[]>([])
+  const [pay, setPay] = useState<Pay | null>(null)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
     try {
-      const [m, w, n] = await Promise.all([
+      const [m, w, n, p] = await Promise.all([
         getJSON<Me>('/api/me'),
         getJSON<Week>('/api/me/week'),
         getJSON<{ notices: Notice[] }>('/api/me/notices'),
+        getJSON<Pay>('/api/me/pay'),
       ])
-      setMe(m); setWeek(w); setNotices(n.notices)
+      setMe(m); setWeek(w); setNotices(n.notices); setPay(p)
       setError('')
     } catch (e) {
       setError(String((e as Error).message || e))
@@ -250,6 +318,7 @@ export default function MyShift() {
       {/* Непрочитанное поднимаем над графиком: сообщение управляющего обычно
           про сегодня, а график — справочник, к нему возвращаются. */}
       {unread ? <Messages notices={notices} onRead={read} /> : null}
+      {pay && <Wallet pay={pay} />}
       <MyWeek week={week} />
       {unread ? null : <Messages notices={notices} onRead={read} />}
     </div>

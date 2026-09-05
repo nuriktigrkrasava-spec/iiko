@@ -13,6 +13,10 @@ type AccessResp = { join_url: string; access: Access[] }
 type Geo = { lat: number; lon: number; radius: number } | null
 type Hit = { label: string; lat: number; lon: number }
 type Sent = { id: number; text: string; created_at: string; to_employee_id: string | null; read_by: number }
+type PayRow = { employee_id: string; name: string; earned: number; paid: number; balance: number; shifts: number }
+type Payout = { id: number; employee_id: string; day: string; amount: number; comment: string }
+type PayResp = { month: string; rows: PayRow[]; payouts: Payout[];
+                 total_earned: number; total_paid: number; total_balance: number }
 
 const btn: React.CSSProperties = {
   border: '1px solid var(--hair)', borderRadius: 9, padding: '7px 12px',
@@ -293,6 +297,124 @@ function ShiftMessage({ org, to, onDone }: { org: string; to: Emp | null; onDone
   )
 }
 
+/* ── Выплаты: начислено сменами, выдано на руки, остаток ──
+   Начисление и выдача хранятся раздельно, поэтому здесь их видно рядом. Ошибку
+   исправляют удалением выплаты, а не вводом минуса: минус в истории выглядит
+   как штраф сотруднику, и через месяц никто не вспомнит, что это была опечатка. */
+function Payouts({ org, employees }: { org: string; employees: Emp[] }) {
+  const [data, setData] = useState<PayResp | null>(null)
+  const [to, setTo] = useState('')
+  const [sum, setSum] = useState('')
+  const [note, setNote] = useState('')
+  const [msg, setMsg] = useState('')
+
+  const load = useCallback(() => {
+    if (!org) return
+    fetch(`/api/payouts/${org}`, { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setData(d))
+      .catch(() => { /* покажем пустым */ })
+  }, [org])
+  useEffect(load, [load])
+
+  const names = useMemo(() => {
+    const m = new Map(employees.map((e) => [e.id, e.name]))
+    for (const r of data?.rows ?? []) if (!m.has(r.employee_id)) m.set(r.employee_id, r.name)
+    return m
+  }, [employees, data])
+
+  const give = async () => {
+    const amount = Number(sum)
+    if (!to || !amount || amount <= 0) { setMsg('Выберите сотрудника и сумму'); return }
+    try {
+      await post(`/api/payouts/${org}`, { employee_id: to, amount, comment: note.trim() })
+      setSum(''); setNote(''); setMsg(`Записано: ${names.get(to) || ''}`); load()
+    } catch (e) { setMsg(String((e as Error).message)) }
+  }
+
+  const drop = async (id: number) => {
+    try { await post(`/api/payouts/${org}/delete`, { id }); load() }
+    catch (e) { setMsg(String((e as Error).message)) }
+  }
+
+  const rows = data?.rows ?? []
+  return (
+    <Glass span={12}>
+      <div className="eyebrow">
+        <span>Выплаты</span>
+        <span className="hint">{data?.month || ''} · осталось выдать {money(data?.total_balance)}</span>
+      </div>
+
+      {rows.length > 0 && (
+        <div style={{ overflowX: 'auto', marginTop: 10 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 460 }}>
+            <thead><tr>
+              {['Сотрудник', 'Смен', 'Начислено', 'Выдано', 'Осталось'].map((h, i) => (
+                <th key={h} style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase',
+                                     color: 'var(--mute)', fontWeight: 600, padding: '0 10px 9px 0',
+                                     textAlign: i ? 'right' : 'left', borderBottom: '1px solid var(--hair)' }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.employee_id}>
+                  <td style={td}>{r.name}</td>
+                  <td style={tdR}>{r.shifts}</td>
+                  <td style={tdR}>{money(r.earned)}</td>
+                  <td style={{ ...tdR, color: 'var(--grn)' }}>{money(r.paid)}</td>
+                  <td style={{ ...tdR, fontWeight: 700,
+                               color: r.balance > 0 ? 'var(--hi)' : 'var(--mute)' }}>{money(r.balance)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div style={{ marginTop: 14, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <select value={to} onChange={(e) => setTo(e.target.value)} aria-label="Кому выдать"
+                style={{ ...inp, width: 'auto', minWidth: 160 }}>
+          <option value="">Кому выдать…</option>
+          {[...names].map(([id, n]) => <option key={id} value={id}>{n}</option>)}
+        </select>
+        <input value={sum} onChange={(e) => setSum(e.target.value)} type="number" min={0}
+               placeholder="Сумма, ₸" aria-label="Сумма выплаты" style={{ ...inp, width: 130 }} />
+        <input value={note} onChange={(e) => setNote(e.target.value)}
+               placeholder="Комментарий (аванс, за неделю…)" aria-label="Комментарий"
+               style={{ ...inp, flex: 1, minWidth: 180 }} />
+        <button onClick={give} style={{ ...btn, borderColor: 'var(--grn)', color: 'var(--grn)' }}>Выдал</button>
+      </div>
+      <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
+        Выплата сразу видна сотруднику в его мини-аппе. {msg}
+      </div>
+
+      {(data?.payouts.length ?? 0) > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>
+            История выплат
+          </div>
+          {data!.payouts.map((p) => (
+            <div key={p.id} style={{ display: 'flex', gap: 10, alignItems: 'baseline', padding: '9px 0', borderTop: '1px solid var(--hair-2)' }}>
+              <span style={{ width: 46, fontSize: 12, color: 'var(--mute)' }}>{p.day.slice(8)}.{p.day.slice(5, 7)}</span>
+              <span style={{ flex: 1, fontSize: 12.5, color: 'var(--hi)' }}>
+                {names.get(p.employee_id) || p.employee_id.slice(0, 8)}
+                {p.comment && <span style={{ color: 'var(--mute)' }}> · {p.comment}</span>}
+              </span>
+              <span className="tnum" style={{ fontSize: 13, fontWeight: 620, color: 'var(--grn)' }}>{money(p.amount)}</span>
+              <button onClick={() => drop(p.id)} aria-label="Удалить выплату"
+                      style={{ ...btn, padding: '3px 8px', fontSize: 11 }}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Glass>
+  )
+}
+
+const td: React.CSSProperties = { padding: '10px 10px 10px 0', borderBottom: '1px solid var(--hair-2)', fontSize: 12.5, whiteSpace: 'nowrap' }
+const tdR: React.CSSProperties = { ...td, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }
+const money = (n?: number) => (n == null ? '—' : new Intl.NumberFormat('ru-RU').format(Math.round(n)) + ' ₸')
+
 export default function ShiftAdmin({ employees }: { employees: Emp[] }) {
   const org = useOrg()
   const [to, setTo] = useState<Emp | null>(null)
@@ -301,6 +423,7 @@ export default function ShiftAdmin({ employees }: { employees: Emp[] }) {
     <>
       <BranchPoint org={org} />
       <StaffLinks org={org} employees={employees} onWrite={setTo} />
+      <Payouts org={org} employees={employees} />
       <ShiftMessage org={org} to={to} onDone={() => setTo(null)} />
     </>
   )

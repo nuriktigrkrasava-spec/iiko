@@ -68,7 +68,7 @@ def _seed():
         conn.execute("DELETE FROM restaurants WHERE telegram_id = ?", (OWNER,))
         for t in ("staff_access", "branch_notices", "branch_notice_reads",
                   "staff_attendance", "staff_schedule", "staff_shift_notified",
-                  "branch_join"):
+                  "branch_join", "staff_payouts"):
             conn.execute(f"DELETE FROM {t}")
         conn.commit()
     finally:
@@ -496,6 +496,97 @@ def test_missing_house_number_is_reported_not_guessed():
     conn.commit(); conn.close()
     assert client.get(f"/api/branch-geo/{ORG}").json()["has_house_number"] is True
     print("  [OK] «без дома» отличаем от «дом есть», скобки в счёт не идут")
+
+
+# ── Зарплата: начислено, выдано, остаток ──
+
+def _month():
+    import datetime as _dt
+    return _dt.date.today().replace(day=1).isoformat()
+
+
+def test_only_shifts_with_pay_are_earned():
+    """Смена без проставленной оплаты — «ещё не решили, сколько стоит». Считать
+    её нулём значило бы занизить долг перед человеком."""
+    _seed()
+    d = _month()
+    D.set_staff_shift(ORG, KIM, d, "10:00", "18:00", 12000)
+    D.set_staff_shift(ORG, KIM, d[:8] + "02", "10:00", "18:00")          # без оплаты
+    got = D.staff_pay_summary(ORG, d, d[:8] + "28")[KIM]
+    assert got["earned"] == 12000 and got["shifts"] == 1, got
+    print("  [OK] начислено 12 000 по одной смене, пустая в счёт не пошла")
+
+
+def test_payout_reduces_the_balance():
+    _seed()
+    d = _month()
+    D.set_staff_shift(ORG, KIM, d, "10:00", "18:00", 12000)
+    D.add_staff_payout(ORG, KIM, d, 5000, "аванс", OWNER)
+    got = D.staff_pay_summary(ORG, d, d[:8] + "28")[KIM]
+    assert (got["earned"], got["paid"], got["balance"]) == (12000, 5000, 7000), got
+    print("  [OK] 12 000 начислено − 5 000 выдано = 7 000 остаток")
+
+
+def test_deleting_a_payout_returns_the_debt():
+    """Опечатку исправляют удалением, а не минусом: минус в истории выглядел бы
+    как штраф сотруднику."""
+    _seed()
+    d = _month()
+    D.set_staff_shift(ORG, KIM, d, "10:00", "18:00", 12000)
+    pid = D.add_staff_payout(ORG, KIM, d, 5000, "ошибка", OWNER)
+    assert D.delete_staff_payout(ORG, pid) is True
+    got = D.staff_pay_summary(ORG, d, d[:8] + "28")[KIM]
+    assert got["paid"] == 0 and got["balance"] == 12000, got
+    print("  [OK] удалённая выплата вернула долг целиком")
+
+
+def test_a_payout_of_another_branch_cannot_be_deleted_by_id():
+    """id угадать легко — без проверки филиала чужую выплату стёрли бы по номеру."""
+    _seed()
+    d = _month()
+    pid = D.add_staff_payout(OTHER, KIM, d, 5000, "чужая", OWNER)
+    assert D.delete_staff_payout(ORG, pid) is False, "стёрли выплату чужого филиала"
+    assert len(D.get_staff_payouts(OTHER, d, d[:8] + "28")) == 1
+    print("  [OK] чужую выплату по номеру не удалить")
+
+
+def test_employee_sees_own_settlement_only():
+    _seed()
+    d = _month()
+    D.set_staff_shift(ORG, KIM, d, "10:00", "18:00", 12000)
+    D.set_staff_shift(ORG, VOLKOV, d, "10:00", "18:00", 99000)
+    D.add_staff_payout(ORG, KIM, d, 5000, "аванс", OWNER)
+    D.add_staff_payout(ORG, VOLKOV, d, 40000, "аванс", OWNER)
+    code = D.issue_staff_access(ORG, KIM, "Ким")
+    r = client.get("/api/me/pay", headers=_as(code, TID_KIM))
+    assert r.status_code == 200, r.text[:200]
+    d2 = r.json()
+    assert (d2["earned"], d2["paid"], d2["balance"]) == (12000, 5000, 7000), d2
+    assert len(d2["payouts"]) == 1 and d2["payouts"][0]["comment"] == "аванс", d2
+    print("  [OK] сотрудник видит свои 12 000 / 5 000 / 7 000 и одну свою выплату")
+
+
+def test_manager_cannot_record_a_zero_or_negative_payout():
+    """Удержание вводить так нельзя: для исправления есть удаление."""
+    _seed()
+    os.environ["DEV_TID"] = str(OWNER)
+    for bad in (0, -100):
+        r = client.post(f"/api/payouts/{ORG}", json={"employee_id": KIM, "amount": bad})
+        assert r.status_code == 400, f"{bad} -> {r.status_code}"
+    print("  [OK] ноль и минус отвергаются")
+
+
+def test_manager_sees_who_is_owed_first():
+    _seed()
+    d = _month()
+    D.set_staff_shift(ORG, KIM, d, "10:00", "18:00", 12000)
+    D.set_staff_shift(ORG, VOLKOV, d, "10:00", "18:00", 30000)
+    D.add_staff_payout(ORG, KIM, d, 12000, "полностью", OWNER)
+    os.environ["DEV_TID"] = str(OWNER)
+    body = client.get(f"/api/payouts/{ORG}").json()
+    assert body["rows"][0]["employee_id"] == VOLKOV, body["rows"]
+    assert body["total_balance"] == 30000, body
+    print("  [OK] сверху тот, кому должны 30 000; рассчитанный — ниже")
 
 
 if __name__ == "__main__":

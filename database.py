@@ -1250,6 +1250,22 @@ def _ensure_staff_shifts(conn):
         PRIMARY KEY (organization_id, employee_id)
     );
     CREATE UNIQUE INDEX IF NOT EXISTS staff_access_code ON staff_access(code);
+    /* Выплаты сотруднику. Начисление живёт в staff_schedule.pay (сколько стоит
+       смена), выплата — здесь. Держим раздельно намеренно: «отработал» и
+       «получил на руки» расходятся во времени, и вычитать одно из другого
+       задним числом в той же строке значило бы терять историю. */
+    CREATE TABLE IF NOT EXISTS staff_payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        organization_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        day TEXT NOT NULL,              -- 'YYYY-MM-DD' когда выдали
+        amount REAL NOT NULL,
+        comment TEXT,
+        created_at TEXT,
+        created_by INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS staff_payouts_org_day
+        ON staff_payouts(organization_id, day);
     CREATE TABLE IF NOT EXISTS staff_late (
         organization_id TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -1610,6 +1626,78 @@ def mark_shift_reminded(org_id: str, employee_id: str, day: str) -> bool:
         return False
     finally:
         conn.close()
+
+
+# ── Выплаты: начислено по сменам, выдано на руки, остаток ──
+
+def add_staff_payout(org_id: str, employee_id: str, day: str, amount: float,
+                     comment: str = "", created_by: int = 0) -> int:
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    cur = conn.execute("INSERT INTO staff_payouts "
+                       "(organization_id, employee_id, day, amount, comment, created_at, created_by) "
+                       "VALUES (?,?,?,?,?,?,?)",
+                       (org_id, employee_id, day, float(amount), comment or "",
+                        datetime.now().isoformat(), int(created_by or 0)))
+    conn.commit()
+    pid = cur.lastrowid
+    conn.close()
+    return pid
+
+
+def delete_staff_payout(org_id: str, payout_id: int) -> bool:
+    """Удаляем с проверкой филиала: id угадать легко, и без неё чужую выплату
+    можно было бы стереть по номеру."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    cur = conn.execute("DELETE FROM staff_payouts WHERE id = ? AND organization_id = ?",
+                       (int(payout_id), org_id))
+    conn.commit()
+    ok = cur.rowcount > 0
+    conn.close()
+    return ok
+
+
+def get_staff_payouts(org_id: str, day_from: str, day_to: str,
+                      employee_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    q = ("SELECT id, employee_id, day, amount, comment FROM staff_payouts "
+         "WHERE organization_id = ? AND day BETWEEN ? AND ?")
+    args: List[Any] = [org_id, day_from, day_to]
+    if employee_id:
+        q += " AND employee_id = ?"
+        args.append(employee_id)
+    rows = conn.execute(q + " ORDER BY day DESC, id DESC", args).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def staff_pay_summary(org_id: str, day_from: str, day_to: str) -> Dict[str, Dict[str, float]]:
+    """По каждому сотруднику: начислено сменами и выплачено за период.
+
+    Смены без проставленной оплаты в начисление не идут — NULL значит «ещё не
+    решили, сколько стоит», и считать её нулём означало бы занизить долг."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    out: Dict[str, Dict[str, float]] = {}
+    for r in conn.execute(
+        "SELECT employee_id, SUM(pay) AS s, COUNT(pay) AS n FROM staff_schedule "
+        "WHERE organization_id = ? AND day BETWEEN ? AND ? AND pay IS NOT NULL "
+        "GROUP BY employee_id", (org_id, day_from, day_to)).fetchall():
+        out.setdefault(r["employee_id"], {"earned": 0.0, "paid": 0.0, "shifts": 0})
+        out[r["employee_id"]]["earned"] = float(r["s"] or 0)
+        out[r["employee_id"]]["shifts"] = int(r["n"] or 0)
+    for r in conn.execute(
+        "SELECT employee_id, SUM(amount) AS s FROM staff_payouts "
+        "WHERE organization_id = ? AND day BETWEEN ? AND ? GROUP BY employee_id",
+        (org_id, day_from, day_to)).fetchall():
+        out.setdefault(r["employee_id"], {"earned": 0.0, "paid": 0.0, "shifts": 0})
+        out[r["employee_id"]]["paid"] = float(r["s"] or 0)
+    conn.close()
+    for v in out.values():
+        v["balance"] = round(v["earned"] - v["paid"], 2)
+    return out
 
 
 def save_staff_late(org_id: str, rows: List[Dict[str, Any]]):
