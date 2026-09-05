@@ -72,16 +72,27 @@ function CellEditor({ init, onSave, onClear, onClose }: {
   )
 }
 
+/* В именах из iiko латиница и кириллица перемешаны: «Алия» вполне может быть
+   набрана с латинской «a», а «Sholpan» — с кириллической «о». Человек ищет
+   свою букву и не находит коллегу, хотя тот в списке есть. Приводим похожие
+   буквы к одной, чтобы искалось по написанию, а не по кодам символов. */
+const LOOKALIKE: Record<string, string> = {
+  а: 'a', е: 'e', о: 'o', р: 'p', с: 'c', у: 'y', х: 'x',
+  к: 'k', м: 'm', н: 'h', т: 't', в: 'b', і: 'i', ѕ: 's',
+}
+export const norm = (s: string) =>
+  s.trim().toLowerCase().replace(/[аеорсухкмнтвіѕ]/g, (ch) => LOOKALIKE[ch] || ch)
+
 /* Поиск по всему справочнику — добрать в сетку того, кого ещё не ставили */
 function AddEmployee({ pool, onPick }: { pool: Emp[]; onPick: (id: string) => void }) {
   const [q, setQ] = useState('')
   const hits = useMemo(() => {
-    const s = q.trim().toLowerCase()
+    const s = norm(q)
     if (!s) return []
-    return pool.filter((e) => e.name.toLowerCase().includes(s)).slice(0, 8)
+    return pool.filter((e) => norm(e.name).includes(s)).slice(0, 8)
   }, [q, pool])
   return (
-    <div style={{ marginTop: 12, position: 'relative', maxWidth: 320 }}>
+    <div style={{ marginTop: 12, maxWidth: 320 }}>
       <input
         value={q} onChange={(e) => setQ(e.target.value)} placeholder="Добавить сотрудника в график"
         aria-label="Поиск сотрудника"
@@ -91,9 +102,11 @@ function AddEmployee({ pool, onPick }: { pool: Emp[]; onPick: (id: string) => vo
         }}
       />
       {hits.length > 0 && (
-        // Фон обязан быть НЕПРОЗРАЧНЫМ: список висит поверх таблицы, и сквозь
-        // него просвечивали смены — казалось, что блоки наехали друг на друга.
-        <div style={{ position: 'absolute', zIndex: 20, left: 0, right: 0, marginTop: 4, borderRadius: 11, border: '1px solid var(--hair)', background: 'var(--card)', boxShadow: 'var(--shadow)', maxHeight: 260, overflowY: 'auto' }}>
+        // Список РАЗДВИГАЕТ содержимое, а не висит над ним. Плавающий вариант
+        // накрывал карточку с точкой филиала, а при пустом токене фона ещё и
+        // просвечивал — выглядело так, будто блоки наехали друг на друга.
+        // Раздвигающийся не может наложиться ни при каких стилях.
+        <div style={{ marginTop: 6, borderRadius: 11, border: '1px solid var(--hair)', background: 'var(--card)', maxHeight: 260, overflowY: 'auto' }}>
           {hits.map((e) => (
             <button key={e.id} onClick={() => { onPick(e.id); setQ('') }}
               style={{ display: 'block', width: '100%', textAlign: 'left', padding: '9px 11px', fontSize: 13, background: 'transparent', border: 'none', borderBottom: '1px solid var(--hair-2)', color: 'var(--hi)', cursor: 'pointer' }}>
