@@ -94,7 +94,7 @@ function AddEmployee({ pool, onPick }: { pool: Emp[]; onPick: (id: string) => vo
   return (
     <div style={{ marginTop: 12, maxWidth: 320 }}>
       <input
-        value={q} onChange={(e) => setQ(e.target.value)} placeholder="Добавить сотрудника в график"
+        value={q} onChange={(e) => setQ(e.target.value)} placeholder="Найти сотрудника и поставить ему смену"
         aria-label="Поиск сотрудника"
         style={{
           width: '100%', background: 'var(--glass-2)', border: '1px solid var(--hair)',
@@ -232,9 +232,13 @@ export default function Schedule() {
                                 </span>
                               )}
                               {mark && (
+                                /* Три состояния, а не два. «Место не проверили» — не то же
+                                   самое, что «проверили, он на месте»: зелёная галочка на
+                                   непроверенной смене обещала бы то, чего мы не знаем. */
                                 <span style={{ display: 'block', fontSize: 10, marginTop: 2,
-                                               color: mark.geo_ok === 0 ? 'var(--amb)' : 'var(--grn)' }}>
-                                  {mark.geo_ok === 0 ? `⚑ ${mark.start}` : `✓ ${mark.start}`}
+                                               color: mark.geo_ok === 1 ? 'var(--grn)'
+                                                    : mark.geo_ok === 0 ? 'var(--amb)' : 'var(--mute)' }}>
+                                  {mark.geo_ok === 1 ? '✓' : mark.geo_ok === 0 ? '⚑' : '•'} {mark.start}
                                 </span>
                               )}
                             </>
@@ -275,8 +279,12 @@ export default function Schedule() {
       <AddEmployee pool={pool} onPick={(id) => setExtra((x) => (x.includes(id) ? x : [...x, id]))} />
 
       <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--mute)' }}>
-        график общий для филиала · из iiko берутся только имена · оплата пишется на смене
-        <br />✓ — сотрудник открыл смену на месте · ⚑ — открыл вне заведения
+        В сетке — бригада этого филиала. iiko отдаёт сотрудников всего сервера одним
+        списком, поэтому остальных доберите поиском: поставили человеку смену — дальше
+        он в сетке сам.
+        <br />график общий для филиала · из iiko берутся только имена · оплата на смене
+        <br />✓ — открыл смену на месте · ⚑ — открыл вне заведения · • — место не проверяли
+        <br />время у значка — когда нажали «Открыть смену»; это не опоздание
       </div>
     </Glass>
 
