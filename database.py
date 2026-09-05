@@ -176,7 +176,13 @@ def init_db():
     """)
     conn.commit()
     # Миграция для существующих БД
-    for col, definition in [("iiko_server", "TEXT DEFAULT NULL"), ("api_password", "TEXT DEFAULT NULL"), ("cloud_api_login", "TEXT DEFAULT NULL")]:
+    # geo_* — точка филиала для проверки «сотрудник на месте». Радиус по умолчанию
+    # 250 м: GPS в помещении врёт на сотни метров, и меньший радиус ругался бы
+    # на человека, который стоит у плиты.
+    for col, definition in [("iiko_server", "TEXT DEFAULT NULL"), ("api_password", "TEXT DEFAULT NULL"),
+                            ("cloud_api_login", "TEXT DEFAULT NULL"),
+                            ("geo_lat", "REAL"), ("geo_lon", "REAL"),
+                            ("geo_radius", "INTEGER DEFAULT 250")]:
         try:
             conn.execute(f"ALTER TABLE restaurants ADD COLUMN {col} {definition}")
             conn.commit()
@@ -1219,6 +1225,22 @@ def _ensure_staff_shifts(conn):
         updated_at TEXT,
         PRIMARY KEY (organization_id, employee_id, day)
     );
+    /* Личная ссылка сотрудника. Управляющий выдаёт её напротив человека в
+       расписании; code — сам секрет. Первый, кто открыл ссылку в телеграме,
+       привязывается telegram_id, дальше она работает только ему: иначе
+       пересланная в общий чат ссылка отмечала бы смены за всю бригаду. */
+    CREATE TABLE IF NOT EXISTS staff_access (
+        organization_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        code TEXT NOT NULL,
+        name TEXT,
+        telegram_id INTEGER,            -- NULL — ссылку ещё не открывали
+        created_at TEXT,
+        bound_at TEXT,
+        active INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (organization_id, employee_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS staff_access_code ON staff_access(code);
     CREATE TABLE IF NOT EXISTS staff_late (
         organization_id TEXT NOT NULL,
         day TEXT NOT NULL,
@@ -1228,6 +1250,16 @@ def _ensure_staff_shifts(conn):
         arrival TEXT,
         late_min INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (organization_id, day, employee_id)
+    );
+    /* Кому уже напомнили про завтрашнюю смену. Отдельная таблица, а не флаг в
+       app_state: ключ на человека и день делает вставку атомарной, и перезапуск
+       сервиса вечером не рассылает напоминания по второму разу. */
+    CREATE TABLE IF NOT EXISTS staff_shift_notified (
+        organization_id TEXT NOT NULL,
+        employee_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        sent_at TEXT,
+        PRIMARY KEY (organization_id, employee_id, day)
     );
     CREATE TABLE IF NOT EXISTS staff_late_notified (
         organization_id TEXT NOT NULL,
@@ -1242,6 +1274,13 @@ def _ensure_staff_shifts(conn):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(staff_schedule)").fetchall()}
     if "pay" not in cols:
         conn.execute("ALTER TABLE staff_schedule ADD COLUMN pay REAL")
+    # Гео добавлено вместе с мини-аппом смен. geo_ok: 1 — в радиусе, 0 — вне
+    # или геопозиции не дали. Смену это не блокирует (решение владельца), но
+    # управляющий должен видеть, что человек отметился не на месте.
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(staff_attendance)").fetchall()}
+    for col, definition in (("lat", "REAL"), ("lon", "REAL"), ("geo_ok", "INTEGER")):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE staff_attendance ADD COLUMN {col} {definition}")
 
 
 def get_shift_starts(org_id: str) -> Dict[str, Any]:
@@ -1333,7 +1372,7 @@ def get_staff_attendance(org_id: str, day_from: str, day_to: str) -> List[Dict[s
     conn = get_db()
     _ensure_staff_shifts(conn)
     rows = conn.execute(
-        "SELECT employee_id, day, start_time, end_time, name FROM staff_attendance "
+        "SELECT employee_id, day, start_time, end_time, name, source, geo_ok FROM staff_attendance "
         "WHERE organization_id = ? AND day BETWEEN ? AND ? ORDER BY day, start_time",
         (org_id, day_from, day_to)).fetchall()
     conn.close()
@@ -1354,18 +1393,22 @@ def get_staff_attendance(org_id: str, day_from: str, day_to: str) -> List[Dict[s
                 hours = 0.0
         out.append({"employee_id": r["employee_id"], "name": r["name"] or "",
                     "date": r["day"], "start": start, "end": end,
-                    "hours": hours, "open": not end})
+                    "hours": hours, "open": not end,
+                    "source": r["source"] or "", "geo_ok": r["geo_ok"]})
     return out
 
 
 def set_staff_attendance(org_id: str, employee_id: str, day: str, start: str,
-                         end: str = "", name: str = "", source: str = "manager"):
+                         end: str = "", name: str = "", source: str = "manager",
+                         lat: Optional[float] = None, lon: Optional[float] = None,
+                         geo_ok: Optional[bool] = None):
     conn = get_db()
     _ensure_staff_shifts(conn)
     conn.execute("INSERT OR REPLACE INTO staff_attendance "
-                 "(organization_id, employee_id, day, start_time, end_time, name, source, updated_at) "
-                 "VALUES (?,?,?,?,?,?,?,?)",
+                 "(organization_id, employee_id, day, start_time, end_time, name, source, "
+                 " lat, lon, geo_ok, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                  (org_id, employee_id, day, start, end or "", name or "", source,
+                  lat, lon, None if geo_ok is None else int(geo_ok),
                   datetime.now().isoformat()))
     conn.commit()
     conn.close()
@@ -1378,6 +1421,146 @@ def remove_staff_attendance(org_id: str, employee_id: str, day: str):
                  "AND employee_id = ? AND day = ?", (org_id, employee_id, day))
     conn.commit()
     conn.close()
+
+
+# ── Точка филиала. Нужна, чтобы сверять, откуда сотрудник открывает смену. ──
+
+def branch_name(org_id: str) -> str:
+    """Как называется филиал. Филиал бывает зарегистрирован несколько раз
+    (владелец плюс управляющие) — берём первую запись, как scope_of_token."""
+    conn = get_db()
+    row = conn.execute("SELECT organization_name FROM restaurants WHERE organization_id = ? "
+                       "ORDER BY id LIMIT 1", (org_id,)).fetchone()
+    conn.close()
+    return (row[0] if row else "") or "Филиал"
+
+
+def get_branch_geo(org_id: str) -> Optional[Dict[str, Any]]:
+    """Координаты филиала или None, если их ещё не задали. None значит «сверять
+    не с чем» — открытие смены при этом не блокируется, просто не проверяется."""
+    conn = get_db()
+    row = conn.execute("SELECT geo_lat, geo_lon, geo_radius FROM restaurants "
+                       "WHERE organization_id = ? AND geo_lat IS NOT NULL "
+                       "ORDER BY id LIMIT 1", (org_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"lat": row["geo_lat"], "lon": row["geo_lon"],
+            "radius": int(row["geo_radius"] or 250)}
+
+
+def set_branch_geo(org_id: str, lat: float, lon: float, radius: int = 250):
+    """Филиал регистрируют несколько раз (владелец + управляющие), поэтому пишем
+    во ВСЕ его строки: иначе точка была бы видна одному из них."""
+    conn = get_db()
+    conn.execute("UPDATE restaurants SET geo_lat = ?, geo_lon = ?, geo_radius = ? "
+                 "WHERE organization_id = ?", (lat, lon, max(20, int(radius)), org_id))
+    conn.commit()
+    conn.close()
+
+
+# ── Личный доступ сотрудника: ссылка от управляющего. ──
+
+def issue_staff_access(org_id: str, employee_id: str, name: str = "") -> str:
+    """Выдаёт (или перевыпускает) личную ссылку. Перевыпуск сбрасывает привязку:
+    им пользуются, когда человек сменил телефон или ссылка утекла."""
+    import secrets
+    code = secrets.token_urlsafe(12)
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("INSERT OR REPLACE INTO staff_access "
+                 "(organization_id, employee_id, code, name, telegram_id, created_at, bound_at, active) "
+                 "VALUES (?,?,?,?,NULL,?,NULL,1)",
+                 (org_id, employee_id, code, name or "", datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    return code
+
+
+def staff_access_by_code(code: str) -> Optional[Dict[str, Any]]:
+    if not code:
+        return None
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    row = conn.execute("SELECT organization_id, employee_id, code, name, telegram_id, active "
+                       "FROM staff_access WHERE code = ?", (code,)).fetchone()
+    conn.close()
+    if not row or not row["active"]:
+        return None
+    return dict(row)
+
+
+def bind_staff_access(code: str, telegram_id: int) -> bool:
+    """Привязывает ссылку к первому открывшему. True — привязали или это он же.
+    False — ссылка уже чужая: пересланная в общий чат, она иначе позволила бы
+    отмечать смены за товарища."""
+    row = staff_access_by_code(code)
+    if not row:
+        return False
+    if row["telegram_id"]:
+        return int(row["telegram_id"]) == int(telegram_id)
+    conn = get_db()
+    conn.execute("UPDATE staff_access SET telegram_id = ?, bound_at = ? "
+                 "WHERE code = ? AND telegram_id IS NULL",
+                 (int(telegram_id), datetime.now().isoformat(), code))
+    conn.commit()
+    changed = conn.total_changes
+    conn.close()
+    # Гонка двух одновременных открытий: победил тот, чей UPDATE прошёл первым.
+    return bool(changed) or (staff_access_by_code(code) or {}).get("telegram_id") == telegram_id
+
+
+def list_staff_access(org_id: str) -> List[Dict[str, Any]]:
+    """Кому филиал выдал ссылки и кто ими уже воспользовался."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute("SELECT employee_id, code, name, telegram_id, bound_at "
+                        "FROM staff_access WHERE organization_id = ? AND active = 1",
+                        (org_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def revoke_staff_access(org_id: str, employee_id: str):
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    conn.execute("UPDATE staff_access SET active = 0 WHERE organization_id = ? "
+                 "AND employee_id = ?", (org_id, employee_id))
+    conn.commit()
+    conn.close()
+
+
+def shifts_with_access(day: str) -> List[Dict[str, Any]]:
+    """Смены на день у тех, кто уже привязал личную ссылку — только им есть куда
+    писать. Кто ссылку не открывал, в выборку не попадает: это не ошибка, а
+    «человека в мини-аппе ещё нет»."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    rows = conn.execute(
+        "SELECT s.organization_id, s.employee_id, s.start_time, s.end_time, s.pay, "
+        "       a.name, a.telegram_id, a.code "
+        "FROM staff_schedule s JOIN staff_access a "
+        "  ON a.organization_id = s.organization_id AND a.employee_id = s.employee_id "
+        "WHERE s.day = ? AND a.active = 1 AND a.telegram_id IS NOT NULL",
+        (day,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_shift_reminded(org_id: str, employee_id: str, day: str) -> bool:
+    """True — напоминаем впервые. False — уже писали, второй раз не надо."""
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    try:
+        conn.execute("INSERT INTO staff_shift_notified "
+                     "(organization_id, employee_id, day, sent_at) VALUES (?,?,?,?)",
+                     (org_id, employee_id, day, datetime.now().isoformat()))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
 
 
 def save_staff_late(org_id: str, rows: List[Dict[str, Any]]):
@@ -2390,7 +2573,9 @@ def _ensure_notices(conn):
         organization_id TEXT,        -- NULL/'' = всем филиалам
         text TEXT NOT NULL,
         created_at TEXT,
-        created_by INTEGER
+        created_by INTEGER,
+        audience TEXT,               -- 'managers' (владелец→управляющим) | 'staff'
+        to_employee_id TEXT          -- при audience='staff': NULL — всей смене, иначе лично
     );
     CREATE TABLE IF NOT EXISTS branch_notice_reads (
         notice_id INTEGER NOT NULL,
@@ -2399,14 +2584,25 @@ def _ensure_notices(conn):
         PRIMARY KEY (notice_id, telegram_id)
     );
     """)
+    # Аудитория добавлена вместе с мини-аппом смен. Старые строки — сообщения
+    # владельца управляющим, поэтому пустое значение читаем как 'managers':
+    # иначе вся история разом высыпалась бы сотрудникам.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(branch_notices)").fetchall()}
+    for col, definition in (("audience", "TEXT"), ("to_employee_id", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE branch_notices ADD COLUMN {col} {definition}")
 
 
-def add_branch_notice(text: str, created_by: int, org_id: str = "") -> int:
+def add_branch_notice(text: str, created_by: int, org_id: str = "",
+                      audience: str = "managers",
+                      to_employee_id: Optional[str] = None) -> int:
     conn = get_db()
     _ensure_notices(conn)
-    cur = conn.execute("INSERT INTO branch_notices (organization_id, text, created_at, created_by) "
-                       "VALUES (?,?,?,?)",
-                       (org_id or "", text, datetime.now().isoformat(), int(created_by or 0)))
+    cur = conn.execute("INSERT INTO branch_notices "
+                       "(organization_id, text, created_at, created_by, audience, to_employee_id) "
+                       "VALUES (?,?,?,?,?,?)",
+                       (org_id or "", text, datetime.now().isoformat(), int(created_by or 0),
+                        audience, to_employee_id))
     conn.commit()
     nid = cur.lastrowid
     conn.close()
@@ -2420,13 +2616,61 @@ def get_branch_notices(org_ids: Optional[List[str]] = None, reader: int = 0,
     _ensure_notices(conn)
     q = ("SELECT n.*, (SELECT 1 FROM branch_notice_reads r "
          "            WHERE r.notice_id = n.id AND r.telegram_id = ?) AS is_read "
-         "FROM branch_notices n WHERE 1=1")
+         "FROM branch_notices n WHERE COALESCE(n.audience,'managers') = 'managers'")
     args: List[Any] = [int(reader or 0)]
     if org_ids is not None:
         # всем (пустой organization_id) плюс адресные для этих филиалов
         q += f" AND (COALESCE(n.organization_id,'') = '' OR n.organization_id IN ({','.join('?' * len(org_ids))}))"
         args += list(org_ids)
     rows = conn.execute(q + " ORDER BY n.id DESC LIMIT ?", args + [int(limit)]).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_staff_notices(org_id: str, employee_id: str, reader: int = 0,
+                      limit: int = 20) -> List[Dict[str, Any]]:
+    """Лента сотрудника: объявления всей смене филиала плюс адресованные лично.
+
+    Чужие личные сообщения сюда не попадают — это первое, что человек проверит,
+    открыв мини-апп, и утечка чужого разговора убила бы доверие к нему."""
+    conn = get_db()
+    _ensure_notices(conn)
+    rows = conn.execute(
+        "SELECT n.*, (SELECT 1 FROM branch_notice_reads r "
+        "             WHERE r.notice_id = n.id AND r.telegram_id = ?) AS is_read "
+        "FROM branch_notices n "
+        "WHERE COALESCE(n.audience,'') = 'staff' AND n.organization_id = ? "
+        "  AND (n.to_employee_id IS NULL OR n.to_employee_id = ?) "
+        "ORDER BY n.id DESC LIMIT ?",
+        (int(reader or 0), org_id, employee_id, int(limit))).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def staff_notice_is_for(notice_id: int, org_id: str, employee_id: str) -> bool:
+    """Можно ли этому сотруднику пометить сообщение прочитанным. Без проверки
+    счётчик прочтений врал бы: отметиться мог бы кто угодно по чужому id."""
+    conn = get_db()
+    _ensure_notices(conn)
+    row = conn.execute("SELECT COALESCE(organization_id,''), COALESCE(audience,''), "
+                       "to_employee_id FROM branch_notices WHERE id = ?",
+                       (int(notice_id),)).fetchone()
+    conn.close()
+    if row is None or row[1] != "staff" or row[0] != org_id:
+        return False
+    return row[2] is None or row[2] == employee_id
+
+
+def sent_staff_notices(org_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Что филиал отправил смене — с числом прочитавших, для управляющего."""
+    conn = get_db()
+    _ensure_notices(conn)
+    rows = conn.execute(
+        "SELECT n.id, n.text, n.created_at, n.to_employee_id, "
+        "       (SELECT COUNT(*) FROM branch_notice_reads r WHERE r.notice_id = n.id) AS read_by "
+        "FROM branch_notices n WHERE COALESCE(n.audience,'') = 'staff' "
+        "  AND n.organization_id = ? ORDER BY n.id DESC LIMIT ?",
+        (org_id, int(limit))).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 

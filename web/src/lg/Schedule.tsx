@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Glass, tg, fmt } from './ui'
 import { useApi, useOrg } from '../lib/useApi'
 import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
+import ShiftAdmin from './ShiftAdmin'
 
 /* Расписание: целиком наше. Из iiko приходят ТОЛЬКО имена (/api/employees) —
    план живёт в нашей БД, факт смены ставится отметкой в приложении, и по ней
@@ -19,6 +20,8 @@ import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
 
 type Emp = { id: string; name: string; shifts: number }
 type Dir = { employees: Emp[] }
+type Mark = { employee_id: string; date: string; start: string; geo_ok: number | null }
+type Att = { rows: Mark[] }
 
 const DOW = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
@@ -112,6 +115,14 @@ export default function Schedule() {
   // period фиксирован: справочник имён от периода не зависит, а без него useApi
   // перезапрашивал бы iiko на каждое переключение «Неделя/Месяц» в шапке.
   const { data, error, loading } = useApi<Dir>('employees', { period: 'week' })
+  // Факт: во сколько человек открыл смену в мини-аппе и был ли он на месте.
+  // Без этого пометка «отмечено вне заведения» никому бы не показалась.
+  const att = useApi<Att>('attendance', { from: iso(days[0]), to: iso(days[6]), period: 'week' })
+  const marks = useMemo(() => {
+    const m: Record<string, Mark> = {}
+    for (const r of att.data?.rows ?? []) m[`${r.employee_id}|${r.date}`] = r
+    return m
+  }, [att.data])
 
   // График общий (лежит на сервере): подтягиваем неделю при её смене и при
   // смене филиала. Без org в зависимостях переключение филиала оставляло бы в
@@ -151,6 +162,7 @@ export default function Schedule() {
   const total = rows.reduce((sum, e) => sum + weekPay(e.id), 0)
 
   return (
+    <>
     <Glass span={12}>
       <div className="eyebrow" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span>Расписание · план</span>
@@ -182,6 +194,7 @@ export default function Schedule() {
                   {days.map((d) => {
                     const dISO = iso(d)
                     const s = shiftFor(e.id, dISO)
+                    const mark = marks[`${e.id}|${dISO}`]
                     const on = editing?.emp === e.id && editing?.date === dISO
                     return (
                       <td key={dISO} style={cell}>
@@ -195,12 +208,18 @@ export default function Schedule() {
                             color: s ? 'var(--hi)' : 'var(--mute)',
                           }}
                         >
-                          {s ? (
+                          {s || mark ? (
                             <>
-                              <span style={{ display: 'block' }}>{s.start}–{s.end}</span>
-                              {s.pay != null && (
+                              <span style={{ display: 'block' }}>{s ? `${s.start}–${s.end}` : '—'}</span>
+                              {s?.pay != null && (
                                 <span style={{ display: 'block', fontSize: 10.5, color: 'var(--grn)', marginTop: 2 }}>
                                   {fmt(s.pay)}
+                                </span>
+                              )}
+                              {mark && (
+                                <span style={{ display: 'block', fontSize: 10, marginTop: 2,
+                                               color: mark.geo_ok === 0 ? 'var(--amb)' : 'var(--grn)' }}>
+                                  {mark.geo_ok === 0 ? `⚑ ${mark.start}` : `✓ ${mark.start}`}
                                 </span>
                               )}
                             </>
@@ -242,8 +261,14 @@ export default function Schedule() {
 
       <div style={{ marginTop: 12, fontSize: 11.5, color: 'var(--mute)' }}>
         график общий для филиала · из iiko берутся только имена · оплата пишется на смене
+        <br />✓ — сотрудник открыл смену на месте · ⚑ — открыл вне заведения
       </div>
     </Glass>
+
+    {/* Доступы, точка филиала и сообщения — рядом с сеткой: ссылку выдают,
+        глядя на того же человека, которому только что поставили смену. */}
+    <ShiftAdmin employees={rows.map((e) => ({ id: e.id, name: e.name }))} />
+    </>
   )
 }
 

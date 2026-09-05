@@ -34,7 +34,11 @@ export function savePref(key: string, val: string) {
    оборачиваем fetch один раз:
      • внутри Telegram шлём его подпись (X-Telegram-Init-Data);
      • по личной ссылке ?m=… шлём токен (X-Site-Token) — он подписан на
-       ENCRYPTION_KEY и даёт ровно ту личность, что в нём зашита.
+       ENCRYPTION_KEY и даёт ровно ту личность, что в нём зашита;
+     • по личной ссылке СОТРУДНИКА ?e=… шлём код (X-Staff-Code). Это отдельный,
+       гораздо более узкий вход: он открывает только свои смены, оплату и
+       сообщения, и на сервере обрабатывается мимо get_current_user — иначе
+       сотрудник получил бы кабинет филиала целиком.
    Трогаем только свои /api/-запросы: чужие домены обёртка пропускает как есть. */
 type TgWindow = Window & { Telegram?: { WebApp?: { initData?: string } }; __lgAuthPatched?: boolean }
 
@@ -46,10 +50,23 @@ function authHeaders(): Record<string, string> {
     if (init) h['X-Telegram-Init-Data'] = init
   } catch { /* не в Telegram */ }
   try {
-    const m = new URLSearchParams(window.location.search).get('m')
+    const q = new URLSearchParams(window.location.search)
+    const m = q.get('m')
     if (m) h['X-Site-Token'] = m
+    const e = q.get('e')
+    if (e) h['X-Staff-Code'] = e
   } catch { /* нет доступа к адресу */ }
   return h
+}
+
+/** Код сотрудника из адреса. Пусто — открыли не по личной ссылке сотрудника. */
+export function getStaffCode(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return new URLSearchParams(window.location.search).get('e') || ''
+  } catch {
+    return ''
+  }
 }
 
 if (typeof window !== 'undefined' && !(window as TgWindow).__lgAuthPatched) {

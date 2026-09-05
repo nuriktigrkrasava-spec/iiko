@@ -1016,6 +1016,8 @@ async def startup():
     # За рубильником: без реальных telegram id управляющих слать некому.
     if os.getenv("LATE_ALERTS") == "1":
         asyncio.create_task(_late_alerts_scheduler())
+    # «Завтра у вас смена» — сотрудникам, привязавшим личную ссылку
+    asyncio.create_task(_shift_reminders_scheduler())
     if DEMO_ONLY:
         asyncio.create_task(_demo_sales_scheduler())
 
@@ -9166,6 +9168,237 @@ async def attendance_mark(org_id: str, payload: AttendanceMarkIn,
     return {"ok": True}
 
 
+# ============ МИНИ-АПП СМЕН: ВХОД СОТРУДНИКА ============
+# Отдельный вход, намеренно НЕ через get_current_user. Там ветка «роль + филиал»
+# (api.py, X-Site-Token) отдаёт права управляющего, и сотрудник получил бы весь
+# дашборд филиала: выручку, склад, чужие зарплаты. Здесь личность — это личная
+# ссылка плюс телеграм, а филиал берётся ИЗ КОДА, не из адреса запроса: ручки
+# сотрудника не принимают org_id, поэтому подставить чужой филиал физически негде.
+
+async def get_staff(
+    x_staff_code: Optional[str] = Header(None, alias="X-Staff-Code"),
+    x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+) -> Dict[str, Any]:
+    """Кто из сотрудников спрашивает: {org, employee_id, name, telegram_id}."""
+    from database import staff_access_by_code, bind_staff_access
+    if not x_staff_code:
+        raise HTTPException(status_code=401, detail="Нужна личная ссылка")
+    row = staff_access_by_code(x_staff_code)
+    if not row:
+        raise HTTPException(status_code=401, detail="Ссылка недействительна")
+    if BOT_TOKEN:
+        # Код без телеграма не пускаем: ссылку пересылают в общий чат, и тогда
+        # отмечаться за человека мог бы кто угодно, кто её открыл.
+        if not x_telegram_init_data:
+            raise HTTPException(status_code=401, detail="Откройте ссылку в Telegram")
+        tid = int(validate_telegram_init_data(x_telegram_init_data).get("id") or 0)
+    else:
+        tid = int(os.getenv("DEV_TID", "0") or 0)
+    if not tid:
+        raise HTTPException(status_code=401, detail="Не удалось определить пользователя")
+    if not bind_staff_access(x_staff_code, tid):
+        raise HTTPException(status_code=403,
+                            detail="Ссылка уже привязана к другому телефону — попросите новую")
+    return {"org": row["organization_id"], "employee_id": row["employee_id"],
+            "name": row["name"] or "", "telegram_id": tid}
+
+
+def _week_bounds(anchor_day: Optional[str] = None) -> tuple:
+    """Понедельник–воскресенье недели, в которую попадает день."""
+    d = date.fromisoformat(anchor_day) if anchor_day else local_now().date()
+    mon = d - timedelta(days=d.weekday())
+    return mon.isoformat(), (mon + timedelta(days=6)).isoformat()
+
+
+@app.get("/api/me")
+async def me_who(staff: Dict = Depends(get_staff)):
+    """Кто я и где работаю. Заодно проверка, что ссылка ещё жива."""
+    from database import get_branch_geo, branch_name
+    return {"name": staff["name"], "employee_id": staff["employee_id"],
+            "branch": branch_name(staff["org"]),
+            "geo_required": bool(get_branch_geo(staff["org"]))}
+
+
+@app.get("/api/me/week")
+async def me_week(day: Optional[str] = Query(None), staff: Dict = Depends(get_staff)):
+    """Мои смены на неделю: план, оплата и моя отметка о приходе."""
+    from database import get_staff_schedule, get_staff_attendance
+    org, eid = staff["org"], staff["employee_id"]
+    d_from, d_to = _week_bounds(day)
+    plan = {r["day"]: r for r in get_staff_schedule(org, d_from, d_to)
+            if r["employee_id"] == eid}
+    fact = {r["date"]: r for r in get_staff_attendance(org, d_from, d_to)
+            if r["employee_id"] == eid}
+    days = []
+    cur = date.fromisoformat(d_from)
+    while cur.isoformat() <= d_to:
+        k = cur.isoformat()
+        p, f = plan.get(k), fact.get(k)
+        days.append({
+            "date": k,
+            "start": (p or {}).get("start_time") or "",
+            "end": (p or {}).get("end_time") or "",
+            "pay": (p or {}).get("pay"),
+            "opened": (f or {}).get("start") or "",
+            "geo_ok": (f or {}).get("geo_ok"),
+        })
+        cur += timedelta(days=1)
+    # Смены без проставленной оплаты в сумму не идут — см. решение в staff_schedule.
+    pay_total = sum(d["pay"] for d in days if d["pay"] is not None)
+    return {"from": d_from, "to": d_to, "days": days, "pay_total": pay_total,
+            "today": local_now().date().isoformat()}
+
+
+class OpenShiftIn(BaseModel):
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
+
+@app.post("/api/me/open-shift")
+async def me_open_shift(payload: OpenShiftIn, staff: Dict = Depends(get_staff)):
+    """Открыть смену. Геопозиция несовпала или её не дали — смену всё равно
+    открываем, но помечаем: решение владельца. GPS в помещении врёт на сотни
+    метров, и повар, застрявший на экране «вы не на месте», пойдёт звонить
+    управляющему вместо того, чтобы готовить. Управляющий пометку видит.
+
+    Повторное нажатие ничего не портит: отметка одна на (сотрудник, день), и
+    время прихода остаётся первым — иначе человек мог бы «переоткрыть» смену
+    попозже и стереть своё опоздание."""
+    import geo as G
+    from database import (get_branch_geo, get_staff_attendance, set_staff_attendance)
+    org, eid = staff["org"], staff["employee_id"]
+    today = local_now().date().isoformat()
+
+    already = [r for r in get_staff_attendance(org, today, today) if r["employee_id"] == eid]
+    if already:
+        r = already[0]
+        return {"ok": True, "already": True, "start": r["start"], "geo_ok": r["geo_ok"]}
+
+    branch = get_branch_geo(org)
+    ok = G.within(branch, payload.lat, payload.lon)
+    now_hm = local_now().strftime("%H:%M")
+    set_staff_attendance(org, eid, today, now_hm, "", staff["name"], "employee",
+                         payload.lat, payload.lon, ok)
+    return {"ok": True, "already": False, "start": now_hm, "geo_ok": None if ok is None else int(ok)}
+
+
+@app.get("/api/me/notices")
+async def me_notices(staff: Dict = Depends(get_staff)):
+    """Объявления смене и адресованные лично мне. Чужие личные сюда не попадают."""
+    from database import get_staff_notices
+    rows = get_staff_notices(staff["org"], staff["employee_id"], staff["telegram_id"])
+    return {"notices": [{"id": r["id"], "text": r["text"], "created_at": r["created_at"],
+                         "personal": bool(r["to_employee_id"]), "is_read": bool(r["is_read"])}
+                        for r in rows],
+            "unread": sum(1 for r in rows if not r["is_read"])}
+
+
+@app.post("/api/me/notices/{notice_id}/read")
+async def me_notice_read(notice_id: int, staff: Dict = Depends(get_staff)):
+    from database import mark_notice_read, staff_notice_is_for
+    if not staff_notice_is_for(notice_id, staff["org"], staff["employee_id"]):
+        raise HTTPException(status_code=404, detail="Сообщение не найдено")
+    mark_notice_read(notice_id, staff["telegram_id"])
+    return {"ok": True}
+
+
+# ============ МИНИ-АПП СМЕН: СТОРОНА УПРАВЛЯЮЩЕГО ============
+# Эти ручки принимают {org_id} и потому обязаны идти через _get_org_id —
+# единственную точку изоляции по филиалам (её контракт стережёт test_site_isolation).
+
+
+class StaffAccessIn(BaseModel):
+    employee_id: str
+    name: Optional[str] = None
+
+
+@app.get("/api/staff-access/{org_id}")
+async def staff_access_list(org_id: str, user: Dict = Depends(get_current_user)):
+    """Кому филиал выдал личные ссылки и кто уже привязался."""
+    from database import list_staff_access
+    real_org = _get_org_id(org_id, user)
+    rows = list_staff_access(real_org)
+    return {"access": [{"employee_id": r["employee_id"], "name": r["name"] or "",
+                        "bound": bool(r["telegram_id"]), "bound_at": r["bound_at"],
+                        "url": f"{MINIAPP_URL}/?e={r['code']}"} for r in rows]}
+
+
+@app.post("/api/staff-access/{org_id}")
+async def staff_access_issue(org_id: str, payload: StaffAccessIn,
+                             user: Dict = Depends(get_current_user)):
+    """Выдать (или перевыпустить) личную ссылку сотруднику. Перевыпуск сбрасывает
+    привязку — им пользуются, когда человек сменил телефон или ссылка утекла."""
+    from database import issue_staff_access
+    real_org = _get_org_id(org_id, user)
+    if not payload.employee_id:
+        raise HTTPException(status_code=400, detail="employee_id обязателен")
+    code = issue_staff_access(real_org, payload.employee_id, payload.name or "")
+    return {"ok": True, "url": f"{MINIAPP_URL}/?e={code}"}
+
+
+@app.post("/api/staff-access/{org_id}/revoke")
+async def staff_access_revoke(org_id: str, payload: StaffAccessIn,
+                              user: Dict = Depends(get_current_user)):
+    from database import revoke_staff_access
+    revoke_staff_access(_get_org_id(org_id, user), payload.employee_id)
+    return {"ok": True}
+
+
+class BranchGeoIn(BaseModel):
+    lat: float
+    lon: float
+    radius: Optional[int] = None
+
+
+@app.get("/api/branch-geo/{org_id}")
+async def branch_geo_get(org_id: str, user: Dict = Depends(get_current_user)):
+    from database import get_branch_geo
+    return {"geo": get_branch_geo(_get_org_id(org_id, user))}
+
+
+@app.post("/api/branch-geo/{org_id}")
+async def branch_geo_set(org_id: str, payload: BranchGeoIn,
+                         user: Dict = Depends(get_current_user)):
+    """«Филиал здесь» — управляющий сохраняет точку, стоя в заведении."""
+    from database import set_branch_geo
+    if not (-90 <= payload.lat <= 90) or not (-180 <= payload.lon <= 180):
+        raise HTTPException(status_code=400, detail="Координаты вне диапазона")
+    real_org = _get_org_id(org_id, user)
+    set_branch_geo(real_org, payload.lat, payload.lon, payload.radius or 250)
+    return {"ok": True, "geo": {"lat": payload.lat, "lon": payload.lon,
+                                "radius": max(20, int(payload.radius or 250))}}
+
+
+class StaffNoticeIn(BaseModel):
+    text: str
+    employee_id: Optional[str] = None    # None — объявление всей смене
+
+
+@app.get("/api/staff-notice/{org_id}")
+async def staff_notice_list(org_id: str, user: Dict = Depends(get_current_user)):
+    from database import sent_staff_notices
+    return {"sent": sent_staff_notices(_get_org_id(org_id, user))}
+
+
+@app.post("/api/staff-notice/{org_id}")
+async def staff_notice_send(org_id: str, payload: StaffNoticeIn,
+                            user: Dict = Depends(get_current_user)):
+    """Сообщение смене или лично сотруднику. Ложится в те же branch_notices, что
+    и объявления владельца, но с audience='staff' — иначе вся переписка с
+    бригадой высыпалась бы управляющим в их ленту."""
+    from database import add_branch_notice
+    real_org = _get_org_id(org_id, user)
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    if len(text) > 2000:
+        raise HTTPException(status_code=400, detail="Слишком длинное сообщение")
+    nid = add_branch_notice(text, user.get("id", 0), real_org,
+                            audience="staff", to_employee_id=payload.employee_id or None)
+    return {"ok": True, "id": nid}
+
+
+
 
 # ============ ОПОЗДАНИЯ СОТРУДНИКОВ ============
 # Факт прихода берём из явок iiko (терминал), эталон — гибридный: время старта
@@ -9399,6 +9632,52 @@ def _owner_user_of(org_id: str) -> Optional[Dict[str, Any]]:
     # user["id"]. Строка из БД тут не годится — там ключ telegram_id, и
     # _get_restaurant_info искал бы филиалы владельца с id=0 → 404.
     return {"id": int(row[0]), "username": "system", "first_name": "Owner"}
+
+
+async def _shift_reminders_round(day: Optional[str] = None) -> int:
+    """Напоминание «завтра у вас смена» тем, у кого она стоит в графике.
+
+    Пишем в телеграм, а не в мини-апп: смысл напоминания в том, чтобы человек
+    УЗНАЛ о смене, не открывая приложение. Сумму в текст не кладём — уведомление
+    видно на заблокированном экране, и зарплата там ни к чему; она есть внутри.
+
+    Возвращает число отправленных."""
+    from database import shifts_with_access, mark_shift_reminded, branch_name
+    target = day or (local_now().date() + timedelta(days=1)).isoformat()
+    sent = 0
+    names: Dict[str, str] = {}
+    for r in shifts_with_access(target):
+        org, eid = r["organization_id"], r["employee_id"]
+        if not mark_shift_reminded(org, eid, target):
+            continue
+        if org not in names:
+            names[org] = branch_name(org)
+        when = r["start_time"] + (f'–{r["end_time"]}' if r["end_time"] else "")
+        text = (f'<b>Завтра смена — {when}</b>\n{names[org]}\n\n'
+                f'Открыть её нужно на месте, когда придёте.')
+        kb = {"inline_keyboard": [[{"text": "Мои смены",
+                                    "web_app": {"url": f"{MINIAPP_URL}/?e={r['code']}"}}]]}
+        if await _tg_send(int(r["telegram_id"]), text, kb):
+            sent += 1
+    return sent
+
+
+async def _shift_reminders_scheduler():
+    """Вечером напоминаем про завтрашнюю смену. 20:00 — человек ещё не спит и
+    уже дома, то есть успевает переспросить управляющего, если график не тот.
+
+    Рубильника нет намеренно: телеграм берётся из привязанной личной ссылки, а
+    значит рассылка молчит сама, пока сотрудники в мини-апп не пришли."""
+    while True:
+        try:
+            now = local_now()
+            if now.hour == 20:
+                n = await _shift_reminders_round()
+                if n:
+                    logger.info(f"[shift-reminders] напомнили: {n}")
+        except Exception as e:
+            logger.warning(f"[shift-reminders] цикл: {e!r}")
+        await asyncio.sleep(1800)
 
 
 async def _late_alerts_scheduler():

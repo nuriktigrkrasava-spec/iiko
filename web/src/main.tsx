@@ -1,10 +1,43 @@
-import { StrictMode } from 'react'
+import { StrictMode, Suspense, lazy, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+import './lg/lg.css'
 import App from './lg/LiquidApp.tsx'
+import { getStaffCode, loadPref, savePref } from './lib/api'
+
+/* Приложений внутри одного бандла два, и решает адрес.
+
+   `?e=…` — личная ссылка СОТРУДНИКА: он видит только свои смены, оплату и
+   сообщения. Кабинет ему не показываем даже пустым: там переключатель филиалов,
+   выручка и склад, а его ручки на сервере (/api/me/*) org_id вообще не
+   принимают. Разводим на входе, а не внутри кабинета, чтобы «сотрудник случайно
+   увидел не своё» было невозможно по устройству, а не по забытому условию. */
+const MyShift = lazy(() => import('./lg/MyShift.tsx'))
+
+/** Тема для мини-аппа смен: у кабинета её переключает шапка, а здесь шапки нет,
+    поэтому просто уважаем прошлый выбор и системную настройку телефона. */
+function StaffApp() {
+  const [dark] = useState(() => {
+    const saved = loadPref('theme')
+    if (saved) return saved === 'dark'
+    return typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  })
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+    savePref('theme', dark ? 'dark' : 'light')
+  }, [dark])
+  return (
+    <Suspense fallback={<div style={{ padding: 20, fontSize: 14, opacity: 0.6 }}>Загружаю…</div>}>
+      <MyShift />
+    </Suspense>
+  )
+}
+
+const Root = getStaffCode() ? StaffApp : App
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Root />
   </StrictMode>,
 )
