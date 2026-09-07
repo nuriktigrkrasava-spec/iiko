@@ -467,6 +467,90 @@ def test_second_scan_from_the_same_phone_returns_the_same_link():
     print("  [OK] второй скан возвращает ту же ссылку, личность не меняется")
 
 
+# ── Перевыпуск QR и отвязка (сторона управляющего) ──
+
+def test_manager_prints_a_new_qr_and_the_old_one_dies():
+    """QR сфотографировали или он уехал с уволенным управляющим. Перепечатать
+    его должны из кабинета, не дожидаясь разработчика."""
+    _seed()
+    old = D.get_or_create_join_code(ORG)
+    os.environ["DEV_TID"] = str(OWNER)
+
+    r = client.post(f"/api/staff-access/{ORG}/rotate")
+    assert r.status_code == 200, r.text[:200]
+    url = r.json()["join_url"]
+    assert url.startswith("https://t.me/") and "?start=join_" in url, url
+    new_code = url.split("?start=join_", 1)[1]
+    assert new_code != old
+
+    os.environ["DEV_TID"] = str(TID_KIM)
+    assert client.get(f"/api/join/{old}").status_code == 404, "старый QR всё ещё пускает"
+    assert D.org_by_join_code(new_code) == ORG
+    print("  [OK] управляющий печатает новый QR, прежний умирает")
+
+
+def test_reprinting_the_qr_does_not_unbind_anyone():
+    """Перевыпуск — про будущих новичков. Кто уже подключился, ходит по своей
+    ссылке и не должен ничего заметить."""
+    _seed()
+    code = D.issue_staff_access(ORG, KIM, "Ким")
+    D.bind_staff_access(code, TID_KIM)
+
+    os.environ["DEV_TID"] = str(OWNER)
+    assert client.post(f"/api/staff-access/{ORG}/rotate").status_code == 200
+
+    me = client.get("/api/me", headers=_as(code, TID_KIM))
+    assert me.status_code == 200 and me.json()["employee_id"] == KIM, me.text[:200]
+    print("  [OK] новый QR не выбил из мини-аппа тех, кто уже привязан")
+
+
+def test_a_stranger_cannot_reprint_the_branch_qr():
+    """Иначе чужой человек одним запросом обнулял бы QR в подсобке: висящий на
+    стене код мёртв, а сотрудники молча перестают отмечаться."""
+    _seed()
+    old = D.get_or_create_join_code(ORG)
+    os.environ["DEV_TID"] = str(TID_VOLKOV)          # не владелец филиала
+    r = client.post(f"/api/staff-access/{ORG}/rotate")
+    assert r.status_code in (401, 403, 404), f"{r.status_code} {r.text[:160]}"
+    assert D.org_by_join_code(old) == ORG, "чужой перевыпустил QR филиала"
+    print("  [OK] перевыпуск QR закрыт для чужих")
+
+
+def test_unbinding_frees_the_place_for_a_new_scan():
+    """Человек выбрал не себя — это единственная ошибка, которую даёт сделать
+    QR. Управляющий отвязывает, и место снова свободно."""
+    _seed()
+    t = D.get_or_create_join_code(ORG)
+    os.environ["DEV_TID"] = str(TID_KIM)
+    wrong = client.post(f"/api/join/{t}", json={"employee_id": VOLKOV}).json()["code"]
+
+    os.environ["DEV_TID"] = str(OWNER)
+    r = client.post(f"/api/staff-access/{ORG}/revoke", json={"employee_id": VOLKOV})
+    assert r.status_code == 200, r.text[:200]
+
+    assert client.get("/api/me", headers=_as(wrong, TID_KIM)).status_code in (401, 403, 404), \
+        "отвязанная ссылка всё ещё пускает"
+
+    os.environ["DEV_TID"] = str(TID_KIM)
+    d = _with_iiko(lambda: client.get(f"/api/join/{t}").json())
+    assert d["already"] is False, "телефон остался привязанным после отвязки"
+    assert VOLKOV in {e["id"] for e in d["employees"]}, "отвязанного не вернули в список"
+    assert client.post(f"/api/join/{t}", json={"employee_id": KIM}).status_code == 200
+    print("  [OK] отвязка убивает ссылку и возвращает человека в список выбора")
+
+
+def test_a_stranger_cannot_unbind_an_employee():
+    _seed()
+    code = D.issue_staff_access(ORG, KIM, "Ким")
+    D.bind_staff_access(code, TID_KIM)
+    os.environ["DEV_TID"] = str(TID_VOLKOV)
+    r = client.post(f"/api/staff-access/{ORG}/revoke", json={"employee_id": KIM})
+    assert r.status_code in (401, 403, 404), f"{r.status_code} {r.text[:160]}"
+    assert client.get("/api/me", headers=_as(code, TID_KIM)).status_code == 200, \
+        "чужой отвязал сотрудника"
+    print("  [OK] отвязка закрыта для чужих")
+
+
 # ── Точка филиала из его названия ──
 
 def test_branch_name_is_offered_as_the_address():

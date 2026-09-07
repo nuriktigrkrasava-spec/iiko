@@ -9525,6 +9525,19 @@ async def staff_access_issue(org_id: str, payload: StaffAccessIn, request: Reque
     return {"ok": True, "url": _tg_link(f"emp_{code}")}
 
 
+@app.post("/api/staff-access/{org_id}/rotate")
+async def staff_access_rotate(org_id: str, user: Dict = Depends(get_current_user)):
+    """Новый QR филиала. Нужен, когда прежний сфотографировали или он уехал с
+    уволенным управляющим: старый код умирает в тот же миг.
+
+    Привязок это не трогает — кто уже подключился, ходит по личной ссылке и
+    перевыпуска не замечает. Перепечатать лист в подсобке дешевле, чем
+    объяснять сотрудникам, почему они вдруг выпали из мини-аппа."""
+    from database import rotate_join_code
+    real_org = _get_org_id(org_id, user)
+    return {"ok": True, "join_url": _tg_link(f"join_{rotate_join_code(real_org)}")}
+
+
 @app.post("/api/staff-access/{org_id}/revoke")
 async def staff_access_revoke(org_id: str, payload: StaffAccessIn,
                               user: Dict = Depends(get_current_user)):

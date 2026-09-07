@@ -165,10 +165,12 @@ function BranchPoint({ org }: { org: string }) {
 }
 
 /* ── Личные ссылки сотрудников ── */
-function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]; onWrite: (e: Emp) => void }) {
+export function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]; onWrite: (e: Emp) => void }) {
   const [access, setAccess] = useState<Access[]>([])
   const [joinUrl, setJoinUrl] = useState('')
   const [copied, setCopied] = useState('')
+  const [ask, setAsk] = useState('')
+  const [err, setErr] = useState('')
 
   const load = useCallback(() => {
     if (!org) return
@@ -185,6 +187,37 @@ function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]
     const d = await post<{ url: string }>(`/api/staff-access/${org}`, { employee_id: e.id, name: e.name })
     load()
     copy(d.url, e.id)
+  }
+
+  /* Перевыпуск и отвязка тихо ломают человеку вход, а кнопки стоят вплотную к
+     безобидным. Поэтому подтверждаем вторым кликом — не модалкой: диалог тут
+     прожимают не глядя, а «Точно?» на самой кнопке заметно. */
+  const confirmed = (id: string) => {
+    if (ask !== id) {
+      setAsk(id)
+      setTimeout(() => setAsk((a) => (a === id ? '' : a)), 4000)
+      return false
+    }
+    setAsk('')
+    return true
+  }
+
+  const rotate = async () => {
+    if (!confirmed('__qr')) return
+    setErr('')
+    try {
+      const d = await post<{ join_url: string }>(`/api/staff-access/${org}/rotate`, {})
+      setJoinUrl(d.join_url)
+    } catch (e) { setErr(String((e as Error).message)) }
+  }
+
+  const unbind = async (e: Emp) => {
+    if (!confirmed(e.id)) return
+    setErr('')
+    try {
+      await post(`/api/staff-access/${org}/revoke`, { employee_id: e.id })
+      load()
+    } catch (x) { setErr(String((x as Error).message)) }
   }
   const copy = (url: string, id: string) => {
     navigator.clipboard?.writeText(url).then(() => { setCopied(id); setTimeout(() => setCopied(''), 2000) })
@@ -204,9 +237,18 @@ function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]
           <div style={{ fontSize: 12, color: 'var(--mute)', marginTop: 6 }}>
             Сотрудник сканирует, один раз выбирает себя — и дальше заходит по своей ссылке.
           </div>
-          <button onClick={() => copy(joinUrl, '__join')} style={{ ...btn, marginTop: 10 }}>
-            {copied === '__join' ? 'Скопировано' : 'Скопировать ссылку'}
-          </button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <button onClick={() => copy(joinUrl, '__join')} style={btn}>
+              {copied === '__join' ? 'Скопировано' : 'Скопировать ссылку'}
+            </button>
+            {/* QR сфотографировали или он уехал с уволенным управляющим —
+                печатают новый, прежний умирает сразу. Привязанных не трогает. */}
+            <button onClick={rotate} disabled={!joinUrl}
+                    style={{ ...btn, ...(ask === '__qr' ? { borderColor: 'var(--red)', color: 'var(--red)' } : {}) }}>
+              {ask === '__qr' ? 'Точно? Старый умрёт' : 'Новый QR'}
+            </button>
+          </div>
+          {err && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--red)' }}>{err}</div>}
         </div>
       </div>
 
@@ -226,16 +268,24 @@ function StaffLinks({ org, employees, onWrite }: { org: string; employees: Emp[]
               </span>
               <button onClick={() => onWrite(e)} style={{ ...btn, padding: '5px 9px' }}>Написать</button>
               {a
-                ? <button onClick={() => copy(a.url, e.id)} style={{ ...btn, padding: '5px 9px' }}>
-                    {copied === e.id ? 'Скопировано' : 'Ссылка'}
-                  </button>
+                ? <>
+                    <button onClick={() => copy(a.url, e.id)} style={{ ...btn, padding: '5px 9px' }}>
+                      {copied === e.id ? 'Скопировано' : 'Ссылка'}
+                    </button>
+                    {/* Выбрал не себя или уволился — отвязываем: ссылка умирает,
+                        а место снова свободно для скана по QR. */}
+                    <button onClick={() => unbind(e)}
+                            style={{ ...btn, padding: '5px 9px', ...(ask === e.id ? { borderColor: 'var(--red)', color: 'var(--red)' } : {}) }}>
+                      {ask === e.id ? 'Точно?' : 'Отвязать'}
+                    </button>
+                  </>
                 : <button onClick={() => issue(e)} style={{ ...btn, padding: '5px 9px', borderColor: 'var(--acc)', color: 'var(--acc)' }}>Выдать</button>}
             </div>
           )
         })}
       </div>
       <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--mute)' }}>
-        Привязка к телеграму происходит один раз. Ошиблись при выборе или человек сменил телефон — «Выдать» перевыпустит ссылку, прежняя умрёт.
+        Привязка к телеграму происходит один раз. Выбрал не себя, сменил телефон или уволился — «Отвязать»: прежняя ссылка умрёт, а место снова свободно для скана по QR.
       </div>
     </Glass>
   )
