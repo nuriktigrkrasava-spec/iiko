@@ -69,19 +69,172 @@ def test_no_trim_means_slice_costs_like_input():
     print("  [OK] без потерь себестоимость не меняется")
 
 
+# ── Терияки: те же обрезки, обжаренные с соусом ──────────────────────────────
+
+def test_teriyaki_is_taken_out_of_the_trim():
+    """Вписали, сколько вышло терияки, — ровно столько ушло из обрезков."""
+    r = acts.split_salmon(9300, 10, 8, 2, w_teriyaki=1.5)
+    assert r["ok"], r
+    assert r["trim"]["weight"] == 0.5, r               # 2 − 1.5 осталось обрезками
+    assert r["teriyaki"]["weight"] == 1.5, r
+    assert r["teriyaki"]["price_per_kg"] == 8800.0, r  # цена обрезочная: это они и есть
+    assert r["teriyaki"]["sum"] == 13200.0, r          # 1.5 × 8800
+    print(f"  [OK] из 2 кг обрезков 1.5 ушло в терияки, обрезков осталось {r['trim']['weight']}")
+
+
+def test_teriyaki_moves_money_but_does_not_create_it():
+    """Терияки стоит как обрезки, поэтому деньги переезжают из строки в строку:
+    ни нарезка, ни отход, ни сумма акта не двигаются."""
+    plain = acts.split_salmon(9300, 10, 7, 2)
+    with_ter = acts.split_salmon(9300, 10, 7, 2, w_teriyaki=1.2)
+    assert with_ter["slice"] == plain["slice"], (plain["slice"], with_ter["slice"])
+    assert with_ter["waste"] == plain["waste"], (plain["waste"], with_ter["waste"])
+    assert abs(with_ter["check"] - with_ter["raw"]["sum"]) < 0.01, with_ter
+    assert with_ter["trim"]["sum"] + with_ter["teriyaki"]["sum"] == plain["trim"]["sum"], with_ter
+    print("  [OK] нарезка, отход и сумма акта не изменились — деньги только переехали")
+
+
+def test_teriyaki_does_not_touch_the_waste_percent():
+    """Отход считается от стейка, а терияки берут из обрезков: процент отхода —
+    оценка того, как разобрали рыбу, и жарка не должна его улучшать."""
+    r = acts.split_salmon(9300, 10, 7, 2, w_teriyaki=2)
+    assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
+    assert r["trim_pct"] == 0.0 and r["teriyaki_pct"] == 20.0, r
+    print("  [OK] все обрезки ушли в терияки, отход остался прежним")
+
+
+def test_teriyaki_cannot_exceed_the_trim():
+    """Больше, чем было обрезков, нажарить нельзя — это описка в весах."""
+    bad = acts.split_salmon(9300, 10, 8, 2, w_teriyaki=2.5)
+    assert not bad["ok"] and "обрезк" in bad["error"], bad
+    neg = acts.split_salmon(9300, 10, 8, 2, w_teriyaki=-1)
+    assert not neg["ok"], neg
+    print("  [OK] терияки больше обрезков — внятная ошибка")
+
+
 def test_products_found_by_name():
     catalog = [
         {"id": "1", "name": "П/Ф ЛОСОСЬ СТЕЙК (ЦЕХ)", "unit": "кг"},
         {"id": "2", "name": "П/Ф ОБРЕЗКИ ЛОСОСЬ", "unit": "кг"},
         {"id": "3", "name": "П/Ф НАРЕЗКА ЛОСОСЬ", "unit": "кг"},
         {"id": "6", "name": "Отход лосося", "unit": "кг"},
-        {"id": "4", "name": "П/Ф Лосось терияки", "unit": "кг"},     # не про разбор
+        {"id": "4", "name": "П/Ф Лосось терияки", "unit": "кг"},
         {"id": "5", "name": "лосось туша", "unit": "кг"},            # сырьё ЦЕХа, не наш вход
     ]
     p = acts.find_products(catalog)
     assert p["raw"]["id"] == "1" and p["trim"]["id"] == "2", p
     assert p["slice"]["id"] == "3" and p["waste"]["id"] == "6", p
-    print("  [OK] четыре позиции разбора нашлись, лишние не подхватились")
+    assert p["teriyaki"]["id"] == "4", p
+    print("  [OK] пять позиций разбора нашлись, туша ЦЕХа не подхватилась")
+
+
+# ── Ужарка: терияки дороже обрезков ровно на то, что ушло со сковороды ───────
+
+def test_frying_loss_is_paid_by_the_teriyaki():
+    """2 кг обрезков положили жарить, сняли 1.4 — деньги обрезков никуда не
+    делись, значит килограмм терияки стоит дороже килограмма обрезков."""
+    r = acts.split_salmon(9300, 10, 8, 2, w_fry=2, w_teriyaki=1.4)
+    assert r["ok"], r
+    assert r["teriyaki"]["from_trim"] == 2.0 and r["teriyaki"]["weight"] == 1.4, r
+    assert r["teriyaki"]["shrink"] == 0.6, r
+    assert r["teriyaki"]["sum"] == 17600.0, r              # 2 × 8800, как и было
+    assert r["teriyaki"]["price_per_kg"] == 12571.43, r    # 17 600 / 1.4
+    assert r["teriyaki_yield_pct"] == 70.0, r
+    print(f"  [OK] ужарка {r['teriyaki']['shrink']} кг, терияки {r['teriyaki']['price_per_kg']} ₸/кг")
+
+
+def test_frying_loss_does_not_change_the_slice_or_the_act():
+    """Ужарка происходит ПОСЛЕ разбора: ни нарезка, ни отход, ни сумма акта от
+    неё не двигаются — иначе жаркой можно было бы улучшить разбор рыбы."""
+    plain = acts.split_salmon(9300, 10, 7, 2)
+    fried = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.1)
+    assert fried["slice"] == plain["slice"], (plain["slice"], fried["slice"])
+    assert fried["waste"] == plain["waste"], (plain["waste"], fried["waste"])
+    assert abs(fried["check"] - fried["raw"]["sum"]) < 0.01, fried
+    assert fried["trim"]["sum"] + fried["teriyaki"]["sum"] == plain["trim"]["sum"], fried
+    print("  [OK] сумма акта сошлась со входом, нарезка и отход на месте")
+
+
+def test_frying_more_than_there_was_is_refused():
+    """В жарку нельзя положить больше, чем вышло обрезков."""
+    bad = acts.split_salmon(9300, 10, 8, 2, w_fry=2.5, w_teriyaki=2)
+    assert not bad["ok"] and "обрезк" in bad["error"], bad
+    print("  [OK] в жарку больше обрезков — внятная ошибка")
+
+
+def test_teriyaki_heavier_than_the_pan_is_refused():
+    """При жарке вес уходит. Терияки тяжелее того, что положили, — описка."""
+    bad = acts.split_salmon(9300, 10, 8, 2, w_fry=1.5, w_teriyaki=1.8)
+    assert not bad["ok"] and "жарк" in bad["error"], bad
+    empty = acts.split_salmon(9300, 10, 8, 2, w_fry=1.5)     # положили и не взвесили
+    assert not empty["ok"] and "сковород" in empty["error"], empty
+    print("  [OK] привес после жарки и незаполненный выход не считаются")
+
+
+def test_period_counts_the_frying_loss():
+    """В своде терияки — своим весом, а деньгами он остаётся обрезками, что
+    ушли в жарку: себестоимость нарезки от ужарки не двигается."""
+    rows = [{"organization_id": "A", "weight_raw": 10, "weight_slice": 8,
+             "weight_trim": 0.0, "weight_fry": 1.8, "weight_teriyaki": 1.2,
+             "weight_waste": 0.2, "price_per_kg": 9300, "trim_price": 8800}]
+    s = acts.summarize(rows)
+    assert s["teriyaki"] == 1.2 and s["fry"] == 1.8 and s["shrink"] == 0.6, s
+    assert s["teriyaki_sum"] == 15840.0, s                  # 1.8 × 8800
+    assert s["teriyaki_price"] == 13200.0, s                # 15 840 / 1.2
+    assert s["teriyaki_yield_pct"] == 66.7, s
+    same = acts.summarize([{**rows[0], "weight_trim": 1.8, "weight_fry": 0,
+                            "weight_teriyaki": 0}])
+    assert abs(s["slice_price"] - same["slice_price"]) < 0.01, (s, same)
+    print(f"  [OK] за период ужарилось {s['shrink']} кг, выход жарки {s['teriyaki_yield_pct']}%")
+
+
+# ── Угорь: тот же разбор, другая рыба ────────────────────────────────────────
+
+def test_eel_splits_like_salmon():
+    """Целый угорь → нарезка + обрезки + отход. Цена обрезков у угря своя, и
+    пока она не назначена — приходит полем в акт."""
+    r = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, kind="eel")
+    assert r["ok"] and r["kind"] == "eel", r
+    assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
+    assert r["trim"]["sum"] == 18000.0, r                   # 1.5 × 12 000
+    assert r["slice"]["price_per_kg"] == round((140000 - 18000) / 7.5, 2), r
+    assert abs(r["check"] - r["raw"]["sum"]) < 0.01, r
+    print(f"  [OK] угорь: нарезка {r['slice']['price_per_kg']} ₸/кг, отход {r['waste_pct']}%")
+
+
+def test_eel_has_no_teriyaki():
+    """Терияки жарят из лососёвых обрезков. Угрю его передали по ошибке — акт
+    не должен молча посчитать несуществующий передел."""
+    r = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, w_fry=1, w_teriyaki=0.7, kind="eel")
+    assert r["ok"], r
+    assert r["teriyaki"]["weight"] == 0 and r["trim"]["weight"] == 1.5, r
+    print("  [OK] у угря жарка не считается, обрезки остались обрезками")
+
+
+def test_eel_error_speaks_about_the_eel():
+    bad = acts.split_act(14000, 0, 0, kind="eel")
+    assert not bad["ok"] and "угря" in bad["error"], bad
+    print(f"  [OK] «{bad['error']}»")
+
+
+def test_eel_products_found_by_name_or_by_words():
+    """Имя из справочника Алиева, а если филиал назвал по-своему — по словам."""
+    p = acts.find_products([
+        {"id": "1", "name": "Угорь целый", "unit": "кг"},
+        {"id": "2", "name": "П/Ф ОБРЕЗКИ УГОРЬ", "unit": "кг"},
+        {"id": "3", "name": "П/Ф НАРЕЗКА УГОРЬ", "unit": "кг"},
+        {"id": "4", "name": "Отход угря", "unit": "кг"},
+        {"id": "5", "name": "П/Ф ЛОСОСЬ СТЕЙК", "unit": "кг"},     # чужая рыба
+    ], kind="eel")
+    assert p["raw"]["id"] == "1" and p["trim"]["id"] == "2", p
+    assert p["slice"]["id"] == "3" and p["waste"]["id"] == "4", p
+    assert "teriyaki" not in p, p
+    other = acts.find_products([
+        {"id": "9", "name": "Угорь унаги 1 кг", "unit": "кг"},      # вход без «целый»
+        {"id": "8", "name": "Угорь нарезка", "unit": "кг"},
+    ], kind="eel")
+    assert other["raw"]["id"] == "9" and other["slice"]["id"] == "8", other
+    print("  [OK] позиции угря нашлись и по имени, и по словам")
 
 
 # ── Свод за период ───────────────────────────────────────────────────────────
@@ -96,6 +249,24 @@ ROWS = [
     {"organization_id": "B", "weight_raw": 10, "weight_slice": 6, "weight_trim": 2,
      "weight_waste": 2, "price_per_kg": 9300, "trim_price": 8800},
 ]
+
+# те же разборы, но часть обрезков ушла в терияки (в базе обрезки хранятся уже
+# остатком, терияки — отдельным весом)
+ROWS_TER = [
+    {"organization_id": "A", "weight_raw": 10, "weight_slice": 8, "weight_trim": 0.8,
+     "weight_teriyaki": 1.0, "weight_waste": 0.2, "price_per_kg": 9300, "trim_price": 8800},
+]
+
+
+def test_period_counts_teriyaki_as_part_of_the_trim():
+    """В своде терияки виден отдельной цифрой, но деньгами он остаётся обрезками:
+    себестоимость нарезки такая же, как если бы его не жарили."""
+    s = acts.summarize(ROWS_TER)
+    assert s["teriyaki"] == 1.0 and s["trim"] == 0.8, s
+    assert s["teriyaki_sum"] == 8800.0, s
+    same = acts.summarize([{**ROWS_TER[0], "weight_trim": 1.8, "weight_teriyaki": 0}])
+    assert abs(s["slice_price"] - same["slice_price"]) < 0.01, (s, same)
+    print(f"  [OK] терияки {s['teriyaki']} кг в своде, нарезка {s['slice_price']} ₸/кг не поехала")
 
 
 def test_period_totals_are_sums():
@@ -138,14 +309,11 @@ def test_empty_period_does_not_divide_by_zero():
 
 
 if __name__ == "__main__":
+    import sys
+    here = sys.modules[__name__]
+    tests = [v for k, v in vars(here).items() if k.startswith("test_") and callable(v)]
     failed = 0
-    for t in (test_worked_example, test_waste_is_what_is_left,
-              test_waste_costs_nothing_and_only_takes_weight, test_money_does_not_leak,
-              test_impossible_weights_are_refused,
-              test_trim_more_expensive_than_input_is_refused,
-              test_no_trim_means_slice_costs_like_input, test_products_found_by_name,
-              test_period_totals_are_sums, test_period_averages_are_weighted,
-              test_branches_are_ranked_by_waste, test_empty_period_does_not_divide_by_zero):
+    for t in tests:
         print(f"\n>>> {t.__name__}")
         try:
             t()

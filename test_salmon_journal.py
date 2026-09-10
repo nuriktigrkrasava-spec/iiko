@@ -93,13 +93,47 @@ def test_network_table_lists_every_branch_that_worked():
         f"{r['name']} {r['waste_pct']}% / {r['slice_price']:.0f} ₸" for r in rows))
 
 
+def test_eel_acts_do_not_mix_into_the_salmon_summary():
+    """Свод лосося и свод угря заносят в iiko разными актами. Если сложить их
+    вместе, средний отход перестаёт значить что-либо: рыбы разные."""
+    C = "org-shymkent"
+    calc = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, kind="eel")
+    assert calc["ok"], calc
+    eel_id = D.add_salmon_act(C, 1, calc, 14000, 12000, kind="eel")
+    sal_id = _act(C, 10, 8, 1.8)
+
+    salmon = D.get_salmon_acts([C])
+    assert [r["id"] for r in salmon] == [sal_id], salmon
+    eel = D.get_salmon_acts([C], kind="eel")
+    assert [r["id"] for r in eel] == [eel_id], eel
+    assert eel[0]["weight_slice"] == 7.5 and eel[0]["trim_price"] == 12000, eel[0]
+    assert C in D.all_salmon_orgs("eel") and C in D.all_salmon_orgs(), C
+    print("  [OK] у филиала два разбора, и каждый свод видит только свою рыбу")
+
+
+def test_frying_loss_survives_the_round_trip():
+    """Ужарка — часть разбора: в базу уезжает и сколько положили жарить, и
+    сколько сняли, иначе свод посчитает терияки по весу сковороды."""
+    calc = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.3)
+    assert calc["ok"], calc
+    aid = D.add_salmon_act(A, 1, calc, 9300, acts.TRIM_PRICE)
+    row = [r for r in D.get_salmon_acts([A]) if r["id"] == aid][0]
+    assert row["weight_fry"] == 2 and row["weight_teriyaki"] == 1.3, row
+    assert row["weight_trim"] == 0, row           # все обрезки ушли на сковороду
+    s = acts.summarize([row])
+    assert s["shrink"] == 0.7 and s["teriyaki_price"] > acts.TRIM_PRICE, s
+    print(f"  [OK] ужарка 0.7 кг доехала до свода, терияки {s['teriyaki_price']:.0f} ₸/кг")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_saved_act_comes_back_with_all_weights, test_period_filters_by_date_and_branch,
               test_summary_matches_what_admin_types_into_iiko,
               test_posting_closes_only_the_acts_you_saw, test_posting_twice_changes_nothing,
               test_foreign_branch_cannot_close_or_delete, test_posted_act_cannot_be_deleted,
-              test_network_table_lists_every_branch_that_worked):
+              test_network_table_lists_every_branch_that_worked,
+              test_eel_acts_do_not_mix_into_the_salmon_summary,
+              test_frying_loss_survives_the_round_trip):
         print(f"\n>>> {t.__name__}")
         try:
             t()

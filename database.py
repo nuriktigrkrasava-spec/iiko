@@ -2865,20 +2865,35 @@ def _ensure_salmon(conn):
     CREATE INDEX IF NOT EXISTS idx_salmon_org_date
         ON salmon_acts (organization_id, created_at);
     """)
+    # Дописано позже, поэтому колонками, а не новой таблицей:
+    #  • терияки — часть обрезков, обжаренная с соусом (weight_fry — сколько
+    #    обрезков положили жарить, weight_teriyaki — сколько сняли);
+    #  • kind — вид разбора: лосось был первым и в старых строках не записан,
+    #    поэтому пустой kind читается как 'salmon'.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(salmon_acts)").fetchall()}
+    for col, decl in (("weight_teriyaki", "REAL"), ("weight_fry", "REAL"),
+                      ("kind", "TEXT")):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE salmon_acts ADD COLUMN {col} {decl}")
 
 
 def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],
-                   price_per_kg: float, trim_price: float, note: str = "") -> int:
-    """Фиксируем разбор. calc — результат acts.split_salmon."""
+                   price_per_kg: float, trim_price: float, note: str = "",
+                   kind: str = "salmon") -> int:
+    """Фиксируем разбор. calc — результат acts.split_act."""
+    ter = calc.get("teriyaki") or {}
     conn = get_db()
     _ensure_salmon(conn)
     cur = conn.execute(
-        "INSERT INTO salmon_acts (organization_id, created_at, created_by, weight_raw, "
-        "weight_slice, weight_trim, weight_waste, price_per_kg, trim_price, slice_price, note) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (org_id, datetime.now().isoformat(), int(created_by or 0),
+        "INSERT INTO salmon_acts (organization_id, kind, created_at, created_by, weight_raw, "
+        "weight_slice, weight_trim, weight_fry, weight_teriyaki, weight_waste, price_per_kg, "
+        "trim_price, slice_price, note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (org_id, kind or "salmon", datetime.now().isoformat(), int(created_by or 0),
          float(calc["raw"]["weight"]), float(calc["slice"]["weight"]),
-         float(calc["trim"]["weight"]), float(calc["waste"]["weight"]),
+         float(calc["trim"]["weight"]),
+         float(ter.get("from_trim") or 0), float(ter.get("weight") or 0),
+         float(calc["waste"]["weight"]),
          float(price_per_kg or 0), float(trim_price or 0),
          float(calc["slice"]["price_per_kg"] or 0), (note or "")[:300]))
     conn.commit()
@@ -2888,14 +2903,20 @@ def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],
 
 
 def get_salmon_acts(org_ids: List[str], date_from: str = "", date_to: str = "",
-                    only_open: bool = False, limit: int = 500) -> List[Dict[str, Any]]:
-    """Разборы филиалов за период. only_open — ещё не занесённые в iiko."""
+                    only_open: bool = False, limit: int = 500,
+                    kind: str = "salmon") -> List[Dict[str, Any]]:
+    """Разборы филиалов за период. only_open — ещё не занесённые в iiko.
+
+    Виды разбора не смешиваем: свод лосося и свод угря заносят в iiko разными
+    актами, и средний отход по двум рыбам сразу не значит ничего.
+    """
     if not org_ids:
         return []
     conn = get_db()
     _ensure_salmon(conn)
-    q = (f"SELECT * FROM salmon_acts WHERE organization_id IN ({','.join('?' * len(org_ids))})")
-    args: List[Any] = list(org_ids)
+    q = (f"SELECT * FROM salmon_acts WHERE organization_id IN ({','.join('?' * len(org_ids))})"
+         " AND COALESCE(NULLIF(kind,''),'salmon') = ?")
+    args: List[Any] = list(org_ids) + [kind or "salmon"]
     if date_from:
         q += " AND created_at >= ?"
         args.append(date_from)
@@ -2947,11 +2968,13 @@ def mark_salmon_posted(act_ids: List[int], org_ids: List[str], by: int) -> int:
     return int(n)
 
 
-def all_salmon_orgs() -> List[str]:
+def all_salmon_orgs(kind: str = "salmon") -> List[str]:
     """Филиалы, где вообще были разборы, — для публичной таблицы по сети."""
     conn = get_db()
     _ensure_salmon(conn)
-    rows = conn.execute("SELECT DISTINCT organization_id FROM salmon_acts").fetchall()
+    rows = conn.execute(
+        "SELECT DISTINCT organization_id FROM salmon_acts "
+        "WHERE COALESCE(NULLIF(kind,''),'salmon') = ?", (kind or "salmon",)).fetchall()
     conn.close()
     return [r[0] for r in rows if r[0]]
 

@@ -695,8 +695,10 @@ def _rest_by_org(org_id: str) -> Dict[str, Any]:
             "org_name": row["organization_name"] or ""}
 
 
-async def _salmon_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, Any]:
+async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
+                          kind: str = A.DEFAULT_KIND) -> Dict[str, Any]:
     import api                                   # ленивый импорт: избегаем цикла
+    spec = A.kind_spec(kind)
     uid = sc["uid"]        # от чьего имени идём в iiko (владелец филиала)
     b = _branch_or_403(sc, org)
     if not b:
@@ -714,7 +716,7 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, A
     except Exception as e:
         logger.warning(f"[acts] номенклатура {real_org}: {e!r}")
         catalog = []
-    prods = A.find_products(catalog)
+    prods = A.find_products(catalog, spec["key"])
     price, price_from = 0.0, ""
 
     async def _price_at(org_id: str, product_id: str):
@@ -744,18 +746,31 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, A
                     price_from = f'{from2} · закуп: {r.get("organization_name")}'
                     break
     return {"branch": b, "products": prods, "price_per_kg": price,
-            "price_from": price_from, "trim_price": A.TRIM_PRICE}
+            "price_from": price_from, "trim_price": spec["trim_price"],
+            "kind": spec["key"], "title": spec["title"],
+            "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
+            "teriyaki": spec["teriyaki"],
+            "kinds": [{"key": k["key"], "title": k["title"], "tab": k["tab"]}
+                      for k in A.KINDS.values()]}
 
 
-@router.get("/api/acts/salmon/{token}")
-async def acts_salmon_get(token: str, org: Optional[str] = None):
+def _kind_or_404(kind: str) -> Optional[str]:
+    """Вид разбора из адреса. Чужое слово — 404, а не молчаливый лосось: иначе
+    опечатка в ссылке считала бы угря по лососёвой цене обрезков."""
+    return kind if kind in A.KINDS else None
+
+
+@router.get("/api/acts/{kind}/{token}")
+async def acts_salmon_get(kind: str, token: str, org: Optional[str] = None):
+    if not _kind_or_404(kind):
+        return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
     sc = scope_of_token(token)
     uid = sc["uid"]
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
     # по ссылке филиала акт делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or org)
+    ctx = await _salmon_context(sc, sc["org"] or org, kind)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     # филиалы для выбора — из УЖЕ разобранного доступа. Тут стоял _scope(uid), и
@@ -767,41 +782,62 @@ async def acts_salmon_get(token: str, org: Optional[str] = None):
 
 class SalmonPayload(BaseModel):
     org: Optional[str] = None
-    weight_raw: float                        # сколько П/Ф стейка пошло в разбор
+    weight_raw: float                        # сколько входа (стейк, угорь) пошло в разбор
     weight_slice: float                      # сколько вышло нарезки
-    weight_trim: float = 0.0                 # сколько вышло обрезков
+    weight_trim: float = 0.0                 # сколько вышло обрезков ВСЕГО
+    weight_fry: float = 0.0                  # сколько обрезков положили жарить
+    weight_teriyaki: float = 0.0             # сколько терияки сняли со сковороды
     price_per_kg: Optional[float] = None     # переопределение цены, если закуп разовый
+    trim_price: Optional[float] = None       # цена обрезков, пока она не константа
     note: Optional[str] = ""                 # чем разбор отличался, если отличался
 
 
-NO_PRICE = ("Нет цены П/Ф стейка: в накладных за 60 дней его не было. "
+NO_PRICE = ("Нет цены входа: в накладных за 60 дней его не было. "
             "Впиши цену вручную.")
+NO_TRIM_PRICE = "Цена обрезков не задана — впиши, почём их считать."
 
 
-@router.post("/api/acts/salmon/{token}")
-async def acts_salmon_calc(token: str, payload: SalmonPayload):
+def _prices(ctx: Dict[str, Any], payload: "SalmonPayload") -> Dict[str, Any]:
+    """Цена входа и цена обрезков: обе можно переписать руками. У лосося обрезки
+    стоят константу учёта, у угря её ещё не назначили — тогда цифру даёт человек,
+    и разбор не ждёт правки в коде."""
+    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
+    trim = float(payload.trim_price or ctx["trim_price"] or 0)
+    if price <= 0:
+        return {"error": NO_PRICE}
+    if trim <= 0:
+        return {"error": NO_TRIM_PRICE}
+    return {"price": price, "trim_price": trim}
+
+
+@router.post("/api/acts/{kind}/{token}")
+async def acts_salmon_calc(kind: str, token: str, payload: SalmonPayload):
     """Считает разбор, ничего не записывая: цифры на экране пересчитываются на
     каждый ввод, а фиксация — отдельным действием человека."""
+    if not _kind_or_404(kind):
+        return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
     # по ссылке филиала разбор делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or payload.org)
+    ctx = await _salmon_context(sc, sc["org"] or payload.org, kind)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
-    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
-    if price <= 0:
-        return JSONResponse({"ok": False, "error": NO_PRICE})
-    res = A.split_salmon(price, payload.weight_raw, payload.weight_slice,
-                         payload.weight_trim)
+    pr = _prices(ctx, payload)
+    if pr.get("error"):
+        return JSONResponse({"ok": False, "error": pr["error"]})
+    res = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
+                      payload.weight_trim, trim_price=pr["trim_price"],
+                      w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
+                      kind=kind)
     res["products"] = ctx["products"]
     res["branch"] = ctx["branch"]
     return JSONResponse(res)
 
 
-@router.post("/api/acts/salmon/{token}/save")
-async def acts_salmon_save(token: str, payload: SalmonPayload):
+@router.post("/api/acts/{kind}/{token}/save")
+async def acts_salmon_save(kind: str, token: str, payload: SalmonPayload):
     """Фиксирует разбор в нашей базе. В iiko поштучно не уходит: администратор
     заносит один сводный акт за период руками, и второй документ на тот же вес
     задвоил бы списание. Считаем здесь заново — числам из браузера не верим."""
@@ -809,18 +845,22 @@ async def acts_salmon_save(token: str, payload: SalmonPayload):
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _salmon_context(sc, sc["org"] or payload.org)
+    if not _kind_or_404(kind):
+        return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
+    ctx = await _salmon_context(sc, sc["org"] or payload.org, kind)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
-    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
-    if price <= 0:
-        return JSONResponse({"ok": False, "error": NO_PRICE})
-    calc = A.split_salmon(price, payload.weight_raw, payload.weight_slice,
-                          payload.weight_trim)
+    pr = _prices(ctx, payload)
+    if pr.get("error"):
+        return JSONResponse({"ok": False, "error": pr["error"]})
+    calc = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
+                       payload.weight_trim, trim_price=pr["trim_price"],
+                       w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
+                       kind=kind)
     if not calc.get("ok"):
         return JSONResponse(calc)
-    aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, price,
-                         A.TRIM_PRICE, payload.note or "")
+    aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, pr["price"],
+                         pr["trim_price"], payload.note or "", kind=kind)
     return JSONResponse({**calc, "saved": True, "id": aid})
 
 
@@ -841,8 +881,8 @@ def _all_branch_names() -> Dict[str, str]:
     return {r[0]: (r[1] or "Филиал") for r in rows if r[0]}
 
 
-@router.get("/api/acts/salmon/{token}/period")
-async def acts_salmon_period(token: str, org: Optional[str] = None,
+@router.get("/api/acts/{kind}/{token}/period")
+async def acts_salmon_period(kind: str, token: str, org: Optional[str] = None,
                              date_from: Optional[str] = None, date_to: Optional[str] = None,
                              only_open: bool = False):
     """Журнал разборов филиала и свод за период — то, что администратор заносит
@@ -851,14 +891,19 @@ async def acts_salmon_period(token: str, org: Optional[str] = None,
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
+    if not _kind_or_404(kind):
+        return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
     b = _branch_or_403(sc, sc["org"] or org)
     if not b:
         return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
     p = _period_bounds(date_from, date_to)
-    rows = get_salmon_acts([b["organization_id"]], p["from"], p["to"], only_open=only_open)
+    rows = get_salmon_acts([b["organization_id"]], p["from"], p["to"],
+                           only_open=only_open, kind=kind)
+    spec = A.kind_spec(kind)
     return JSONResponse({"branch": b, "period": p, "only_open": only_open,
                          "acts": rows, "total": A.summarize(rows),
-                         "trim_price": A.TRIM_PRICE})
+                         "kind": spec["key"], "teriyaki": spec["teriyaki"],
+                         "trim_price": spec["trim_price"]})
 
 
 class SalmonPostedPayload(BaseModel):
@@ -866,8 +911,8 @@ class SalmonPostedPayload(BaseModel):
     ids: List[int]                 # ровно те разборы, что человек видел в своде
 
 
-@router.post("/api/acts/salmon/{token}/posted")
-async def acts_salmon_posted(token: str, payload: SalmonPostedPayload):
+@router.post("/api/acts/{kind}/{token}/posted")
+async def acts_salmon_posted(kind: str, token: str, payload: SalmonPostedPayload):
     """«Свод занесён в iiko вручную» — закрывает пачку разборов."""
     from database import mark_salmon_posted
     sc = scope_of_token(token)
@@ -880,8 +925,8 @@ async def acts_salmon_posted(token: str, payload: SalmonPostedPayload):
     return JSONResponse({"ok": True, "closed": n})
 
 
-@router.post("/api/acts/salmon/{token}/delete/{act_id}")
-async def acts_salmon_delete(token: str, act_id: int, org: Optional[str] = None):
+@router.post("/api/acts/{kind}/{token}/delete/{act_id}")
+async def acts_salmon_delete(kind: str, token: str, act_id: int, org: Optional[str] = None):
     """Убрать ошибочный разбор — пока свод не занесён в iiko. После этого нельзя:
     сумма на экране разошлась бы с уже проведённым документом."""
     from database import delete_salmon_act
@@ -896,8 +941,8 @@ async def acts_salmon_delete(token: str, act_id: int, org: Optional[str] = None)
                         {"ok": False, "error": "разбор уже занесён в iiko или не ваш"})
 
 
-@router.get("/api/acts/salmon/{token}/network")
-async def acts_salmon_network(token: str, date_from: Optional[str] = None,
+@router.get("/api/acts/{kind}/{token}/network")
+async def acts_salmon_network(kind: str, token: str, date_from: Optional[str] = None,
                               date_to: Optional[str] = None):
     """Публичная таблица по сети: себестоимость нарезки и % отхода по каждому
     филиалу. Видна любому филиалу — сравнить себя не с кем, если показывать
@@ -908,14 +953,17 @@ async def acts_salmon_network(token: str, date_from: Optional[str] = None,
         return JSONResponse({"error": "bad token"}, status_code=404)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
+    if not _kind_or_404(kind):
+        return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
     p = _period_bounds(date_from, date_to)
-    rows = get_salmon_acts(all_salmon_orgs(), p["from"], p["to"], limit=5000)
+    rows = get_salmon_acts(all_salmon_orgs(kind), p["from"], p["to"], limit=5000, kind=kind)
     mine = {b["organization_id"] for b in sc["branches"]}
     branches = A.by_branch(rows, _all_branch_names())
     for r in branches:
         r["mine"] = r["organization_id"] in mine
-    return JSONResponse({"period": p, "branches": branches,
-                         "total": A.summarize(rows), "trim_price": A.TRIM_PRICE})
+    spec = A.kind_spec(kind)
+    return JSONResponse({"period": p, "branches": branches, "kind": spec["key"],
+                         "total": A.summarize(rows), "trim_price": spec["trim_price"]})
 
 
 # ── Бумажные журналы: галочки и неделя истории ───────────────────────────────

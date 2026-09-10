@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Glass } from './ui'
 import { tenge } from '../lib/format'
 import type { Scope } from './salmonKit'
-import { Button, Eyebrow, PHOTO, Segmented, field, iso, kg, pc, periodBounds, plural, td, tdR, th, wasteTone } from './salmonKit'
+import { Button, Eyebrow, GLYPH, Segmented, field, iso, kg, pc, periodBounds, photosOf, plural, td, tdR, th, wasteTone } from './salmonKit'
 
 /* Свод разборов за период — то, что администратор заносит в iiko ОДНИМ актом.
 
@@ -13,23 +13,31 @@ import { Button, Eyebrow, PHOTO, Segmented, field, iso, kg, pc, periodBounds, pl
 type Act = {
   id: number; created_at: string; organization_id: string
   weight_raw: number; weight_slice: number; weight_trim: number; weight_waste: number
+  weight_fry?: number; weight_teriyaki?: number
   price_per_kg: number; slice_price: number; posted_at?: string | null
 }
 type Total = {
   acts: number; raw: number; slice: number; trim: number; waste: number
-  slice_price: number; raw_price: number
+  teriyaki: number; fry: number; shrink: number
+  slice_price: number; raw_price: number; teriyaki_price: number
   slice_pct: number; trim_pct: number; waste_pct: number
+  teriyaki_pct: number; teriyaki_yield_pct: number
   raw_sum: number; slice_sum: number; trim_sum: number
 }
-type Data = { branch?: { name: string }; period?: { from: string; to: string }; acts?: Act[]; total?: Total; error?: string }
+type Data = {
+  branch?: { name: string }; period?: { from: string; to: string }
+  acts?: Act[]; total?: Total; teriyaki?: boolean; error?: string
+}
 
 /** Крупная строка свода: вес и доля. Это и переписывают в iikoOffice. */
-function Sum({ photo, label, w, pct, tone, price }: {
-  photo: string; label: string; w: number; pct?: number; tone?: string; price?: number
+function Sum({ photo, glyph, label, w, pct, tone, price }: {
+  photo?: string; glyph?: string; label: string; w: number; pct?: number; tone?: string; price?: number
 }) {
   return (
     <div style={{ display: 'flex', gap: 11, alignItems: 'center', minWidth: 0 }}>
-      <img src={photo} alt="" className="sal-photo" style={{ width: 46, height: 46, objectFit: 'contain', flex: 'none' }} />
+      {photo
+        ? <img src={photo} alt="" className="sal-photo" style={{ width: 46, height: 46, objectFit: 'contain', flex: 'none' }} />
+        : <span aria-hidden style={{ width: 46, fontSize: 26, textAlign: 'center', flex: 'none', opacity: .85 }}>{glyph || '⬚'}</span>}
       <div style={{ minWidth: 0 }}>
         <div style={{ fontSize: 11.5, color: 'var(--mute)' }}>{label}</div>
         <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: '-.02em', fontVariantNumeric: 'tabular-nums', color: tone || 'var(--hi)' }}>
@@ -44,7 +52,9 @@ function Sum({ photo, label, w, pct, tone, price }: {
   )
 }
 
-export default function SalmonPeriod({ token, org, reload }: { token: string; org: string; reload: number }) {
+export default function SalmonPeriod({ token, org, kind, reload }: {
+  token: string; org: string; kind: string; reload: number
+}) {
   const [scope, setScope] = useState<Scope>('open')
   const now = new Date()
   const [from, setFrom] = useState(iso(new Date(now.getFullYear(), now.getMonth(), 1)))
@@ -58,9 +68,9 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
     const b = periodBounds(scope, from, to)
     const q = new URLSearchParams({ org, date_from: b.from, date_to: b.to })
     if (scope === 'open') q.set('only_open', 'true')
-    fetch(`/api/acts/salmon/${token}/period?${q}`)
+    fetch(`/api/acts/${kind}/${token}/period?${q}`)
       .then((r) => r.json()).then(setD).catch((e) => setD({ error: String(e.message || e) }))
-  }, [token, org, scope, from, to])
+  }, [token, org, kind, scope, from, to])
 
   useEffect(load, [load, reload])
 
@@ -68,13 +78,14 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
     const ids = (d?.acts || []).map((a) => a.id)
     if (!ids.length) return
     const t = d!.total!
-    const q = `Свод занесён в iiko: стейк ${kg(t.raw)} кг → нарезка ${kg(t.slice)}, `
-      + `обрезки ${kg(t.trim)}, отход ${kg(t.waste)}. Закрыть ${ids.length} `
+    const q = `Свод занесён в iiko: вход ${kg(t.raw)} кг → нарезка ${kg(t.slice)}, `
+      + `обрезки ${kg(t.trim)}${t.teriyaki ? `, терияки ${kg(t.teriyaki)}` : ''}, `
+      + `отход ${kg(t.waste)}. Закрыть ${ids.length} `
       + `${plural(ids.length, 'разбор', 'разбора', 'разборов')}?`
     if (!window.confirm(q)) return
     setBusy(true)
     try {
-      await fetch(`/api/acts/salmon/${token}/posted`, {
+      await fetch(`/api/acts/${kind}/${token}/posted`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org, ids }),
       })
@@ -85,7 +96,7 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
   async function del(id: number) {
     if (askDel !== id) { setAskDel(id); setTimeout(() => setAskDel((c) => (c === id ? 0 : c)), 4000); return }
     setAskDel(0)
-    await fetch(`/api/acts/salmon/${token}/delete/${id}?org=${org}`, { method: 'POST' })
+    await fetch(`/api/acts/${kind}/${token}/delete/${id}?org=${org}`, { method: 'POST' })
     load()
   }
 
@@ -93,6 +104,10 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
   const t = d.total || null
   const acts = d.acts || []
   const open = scope === 'open'
+  const ph = photosOf(kind)
+  // терияки показываем, только если его действительно жарили: у угря его нет,
+  // да и у лосося не в каждом периоде
+  const fried = (t?.teriyaki || 0) > 0
 
   return (
     <Glass span={12}>
@@ -121,16 +136,23 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
       ) : (
         <>
           <div style={{ marginTop: 14, display: 'grid', gap: 14, gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))' }}>
-            <Sum photo={PHOTO.raw} label={`Переработано стейка · ${t.acts} ${plural(t.acts, 'разбор', 'разбора', 'разборов')}`} w={t.raw} price={t.raw_price} />
-            <Sum photo={PHOTO.slice} label="Нарезка" w={t.slice} pct={t.slice_pct} price={t.slice_price} tone="var(--grn)" />
-            <Sum photo={PHOTO.trim} label="Обрезки" w={t.trim} pct={t.trim_pct} tone="var(--amb)" />
-            <Sum photo={PHOTO.waste} label="Отход" w={t.waste} pct={t.waste_pct} tone={wasteTone(t.waste_pct)} />
+            <Sum photo={ph.raw} glyph={GLYPH.raw} label={`Переработано · ${t.acts} ${plural(t.acts, 'разбор', 'разбора', 'разборов')}`} w={t.raw} price={t.raw_price} />
+            <Sum photo={ph.slice} glyph={GLYPH.slice} label="Нарезка" w={t.slice} pct={t.slice_pct} price={t.slice_price} tone="var(--grn)" />
+            <Sum photo={ph.trim} glyph={GLYPH.trim} label="Обрезки" w={t.trim} pct={t.trim_pct} tone="var(--amb)" />
+            {fried && (
+              <Sum glyph="🍢" label="Терияки" w={t.teriyaki} pct={t.teriyaki_pct}
+                price={t.teriyaki_price} tone="var(--amb)" />
+            )}
+            <Sum photo={ph.waste} glyph={GLYPH.waste} label="Отход" w={t.waste} pct={t.waste_pct} tone={wasteTone(t.waste_pct)} />
           </div>
 
           <div style={{ marginTop: 12, fontSize: 12.5, color: 'var(--mute)' }}>
             Себестоимость нарезки за период — <b style={{ color: 'var(--hi)' }}>{tenge(t.slice_price)}/кг</b>,
             средний отход — <b style={{ color: wasteTone(t.waste_pct) }}>{pc(t.waste_pct)}</b>.
             Проценты средневзвешенные: разбор на 40 кг весит больше, чем на два.
+            {fried && <> В жарку ушло <b style={{ color: 'var(--hi)' }}>{kg(t.fry)} кг</b> обрезков,
+              со сковороды снято <b style={{ color: 'var(--hi)' }}>{kg(t.teriyaki)} кг</b> —
+              ужарка <b style={{ color: 'var(--amb)' }}>{kg(t.shrink)} кг</b>, выход {pc(t.teriyaki_yield_pct)}.</>}
           </div>
 
           {open && (
@@ -147,9 +169,10 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
           <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16 }}>
             <thead><tr>
               <th style={th}>Когда</th>
-              <th style={{ ...th, textAlign: 'right' }}>Стейк</th>
+              <th style={{ ...th, textAlign: 'right' }}>Вход</th>
               <th style={{ ...th, textAlign: 'right' }}>Нарезка</th>
               <th style={{ ...th, textAlign: 'right' }}>Обрезки</th>
+              {fried && <th style={{ ...th, textAlign: 'right' }}>Терияки</th>}
               <th style={{ ...th, textAlign: 'right' }}>Отход</th>
               <th style={{ ...th, textAlign: 'right' }}>Нарезка ₸/кг</th>
               <th style={{ ...th, textAlign: 'right' }}></th>
@@ -166,6 +189,12 @@ export default function SalmonPeriod({ token, org, reload }: { token: string; or
                     <td style={tdR}>{kg(a.weight_raw)}</td>
                     <td style={tdR}>{kg(a.weight_slice)}</td>
                     <td style={tdR}>{kg(a.weight_trim)}</td>
+                    {fried && (
+                      <td style={tdR}>
+                        {a.weight_teriyaki ? kg(a.weight_teriyaki) : '—'}
+                        {a.weight_fry ? <span style={{ color: 'var(--mute)', fontSize: 11 }}> из {kg(a.weight_fry)}</span> : null}
+                      </td>
+                    )}
                     <td style={{ ...tdR, color: wasteTone(wp) }}>{kg(a.weight_waste)} · {pc(wp)}</td>
                     <td style={tdR}>{tenge(a.slice_price)}</td>
                     <td style={{ ...tdR, width: 88 }}>

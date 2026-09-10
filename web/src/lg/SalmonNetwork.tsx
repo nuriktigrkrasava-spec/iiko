@@ -14,11 +14,14 @@ import { Eyebrow, Segmented, field, iso, kg, pc, periodBounds, td, tdR, th, wast
 type Row = {
   organization_id: string; name: string; mine: boolean
   acts: number; raw: number; slice: number; trim: number; waste: number
+  teriyaki: number; teriyaki_yield_pct: number
   slice_price: number; slice_pct: number; trim_pct: number; waste_pct: number
 }
 type Data = { period?: { from: string; to: string }; branches?: Row[]; total?: Row; error?: string }
 
-export default function SalmonNetwork({ token, reload }: { token: string; reload: number }) {
+export default function SalmonNetwork({ token, kind, reload }: {
+  token: string; kind: string; reload: number
+}) {
   const [scope, setScope] = useState<Scope>('month')
   const now = new Date()
   const [from, setFrom] = useState(iso(new Date(now.getFullYear(), now.getMonth(), 1)))
@@ -28,19 +31,22 @@ export default function SalmonNetwork({ token, reload }: { token: string; reload
 
   const load = useCallback(() => {
     const b = periodBounds(scope, from, to)
-    fetch(`/api/acts/salmon/${token}/network?${new URLSearchParams({ date_from: b.from, date_to: b.to })}`)
+    fetch(`/api/acts/${kind}/${token}/network?${new URLSearchParams({ date_from: b.from, date_to: b.to })}`)
       .then((r) => r.json()).then(setD).catch((e) => setD({ error: String(e.message || e) }))
-  }, [token, scope, from, to])
+  }, [token, kind, scope, from, to])
 
   useEffect(load, [load, reload])
 
   const rows = d?.branches || []
+  // выход жарки — тоже сравнение филиалов: из одних и тех же обрезков у одного
+  // выходит 70 % терияки, у другого 55. Колонка появляется, только если жарили
+  const fried = rows.some((r) => (r.teriyaki || 0) > 0)
   const worst = Math.max(10, ...rows.map((r) => r.waste_pct))
   const cheapest = Math.min(...rows.filter((r) => r.slice_price > 0).map((r) => r.slice_price))
 
   return (
     <Glass span={12}>
-      <Eyebrow t="Разбор по сети" hint="открыто всем филиалам" />
+      <Eyebrow t={kind === 'eel' ? 'Угорь по сети' : 'Разбор по сети'} hint="открыто всем филиалам" />
 
       <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <Segmented id="salmon-net-scope" value={scope} onChange={setScope} options={[
@@ -66,8 +72,9 @@ export default function SalmonNetwork({ token, reload }: { token: string; reload
             <table style={{ width: '100%', minWidth: 520, borderCollapse: 'collapse' }}>
               <thead><tr>
                 <th style={th}>Филиал</th>
-                <th style={{ ...th, textAlign: 'right' }}>Стейк, кг</th>
+                <th style={{ ...th, textAlign: 'right' }}>Вход, кг</th>
                 <th style={{ ...th, textAlign: 'right' }}>Нарезка ₸/кг</th>
+                {fried && <th style={{ ...th, textAlign: 'right' }}>Выход жарки</th>}
                 <th style={{ ...th, textAlign: 'right', width: '34%' }}>Отход</th>
               </tr></thead>
               <tbody>
@@ -84,6 +91,11 @@ export default function SalmonNetwork({ token, reload }: { token: string; reload
                     <td style={{ ...tdR, color: r.slice_price === cheapest ? 'var(--grn)' : undefined, fontWeight: r.slice_price === cheapest ? 700 : 400 }}>
                       {tenge(r.slice_price)}
                     </td>
+                    {fried && (
+                      <td style={tdR}>
+                        {r.teriyaki ? pc(r.teriyaki_yield_pct) : '—'}
+                      </td>
+                    )}
                     <td style={tdR}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 9, justifyContent: 'flex-end' }}>
                         <span className="sal-bar">
@@ -104,7 +116,7 @@ export default function SalmonNetwork({ token, reload }: { token: string; reload
 
           {d?.total && (
             <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--mute)' }}>
-              По сети за период: стейка <b style={{ color: 'var(--hi)' }}>{kg(d.total.raw)} кг</b>,
+              По сети за период: входа <b style={{ color: 'var(--hi)' }}>{kg(d.total.raw)} кг</b>,
               нарезка <b style={{ color: 'var(--hi)' }}>{tenge(d.total.slice_price)}/кг</b>,
               средний отход <b style={{ color: wasteTone(d.total.waste_pct) }}>{pc(d.total.waste_pct)}</b>.
             </div>

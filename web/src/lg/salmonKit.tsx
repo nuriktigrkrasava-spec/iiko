@@ -12,6 +12,18 @@ import wastePhoto from '../assets/salmon/waste.webp'
 
 export const PHOTO = { raw: steakPhoto, slice: slicePhoto, trim: trimPhoto, waste: wastePhoto }
 
+/* Фото сняты для лосося. Угря так же не сфотографировали — до тех пор у него
+   знаки: узнать позицию всё равно надо с одного взгляда, а чужая рыба на
+   картинке хуже, чем честный значок. */
+export const GLYPH = { raw: '🐟', slice: '🍣', trim: '✂️', waste: '🦴' }
+
+export type Slot = 'raw' | 'slice' | 'trim' | 'waste'
+
+/** Картинки вида разбора: у лосося фото, у остальных — undefined, и плитка
+    сама покажет знак. */
+export const photosOf = (kind: string): Partial<Record<Slot, string>> =>
+  kind === 'eel' ? {} : PHOTO
+
 export const kg = (n: number | null | undefined) =>
   (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })
 
@@ -77,9 +89,9 @@ export function Eyebrow({ t, hint }: { t: string; hint?: ReactNode }) {
    и подписана процентом — ради него весь экран и открывают. */
 
 export function Tile({
-  photo, label, hint, value, onChange, placeholder, readOnly, tone, foot,
+  photo, glyph, label, hint, value, onChange, placeholder, readOnly, tone, foot,
 }: {
-  photo: string; label: string; hint?: string
+  photo?: string; glyph?: string; label: string; hint?: string
   value: string; onChange?: (v: string) => void
   placeholder?: string; readOnly?: boolean; tone?: string; foot?: ReactNode
 }) {
@@ -94,8 +106,14 @@ export function Tile({
       <div style={{ position: 'relative', height: 74, display: 'grid', placeItems: 'center' }}>
         {/* мягкая тень под вырезом: без неё фото висит в воздухе */}
         <span aria-hidden className="sal-shade" />
-        <img src={photo} alt="" className="sal-photo"
-          style={{ maxHeight: 74, maxWidth: '86%', objectFit: 'contain', position: 'relative' }} />
+        {photo ? (
+          <img src={photo} alt="" className="sal-photo"
+            style={{ maxHeight: 74, maxWidth: '86%', objectFit: 'contain', position: 'relative' }} />
+        ) : (
+          <span aria-hidden style={{ position: 'relative', fontSize: 34, lineHeight: 1, opacity: .85 }}>
+            {glyph || '⬚'}
+          </span>
+        )}
       </div>
       <div style={{ marginTop: 9, fontSize: 11.5, color: 'var(--mute)' }}>
         {label}{hint && <span style={{ opacity: .75 }}> · {hint}</span>}

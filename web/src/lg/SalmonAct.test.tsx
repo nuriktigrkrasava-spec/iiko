@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { periodBounds, wasteTone } from './salmonKit'
 import SalmonAct from './SalmonAct'
 
@@ -17,13 +17,33 @@ const CTX = {
     waste: { id: '6', name: 'Отход лосося' },
   },
   price_per_kg: 9300, price_from: 'ЦЕХ · 2026-08-30', trim_price: 8800,
+  kind: 'salmon', title: 'Разбор лосося', raw_label: 'Стейк в разбор',
+  raw_short: 'стейк', teriyaki: true,
+  kinds: [{ key: 'salmon', title: 'Разбор лосося', tab: 'Лосось' },
+          { key: 'eel', title: 'Разбор угря', tab: 'Угорь' }],
+}
+
+/* Угорь разбирается так же, но без жарки, и цена обрезков у него ещё не
+   константа учёта — её спрашивают полем. */
+const EEL = {
+  ...CTX,
+  products: {
+    raw: { id: '11', name: 'Угорь целый' },
+    slice: { id: '13', name: 'П/Ф НАРЕЗКА УГОРЬ' },
+    trim: { id: '12', name: 'П/Ф ОБРЕЗКИ УГОРЬ' },
+    waste: { id: '16', name: 'Отход угря' },
+  },
+  price_per_kg: 14000, price_from: 'ЦЕХ · 2026-09-01', trim_price: 0,
+  kind: 'eel', title: 'Разбор угря', raw_label: 'Угорь в разбор',
+  raw_short: 'угорь', teriyaki: false,
 }
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
     ok: true,
     json: async () => (String(url).includes('/network') ? { branches: [] }
-      : String(url).includes('/period') ? { acts: [], total: { acts: 0 } } : CTX),
+      : String(url).includes('/period') ? { acts: [], total: { acts: 0 } }
+      : String(url).includes('/api/acts/eel/') ? EEL : CTX),
   })) as unknown as typeof fetch)
 })
 
@@ -42,6 +62,36 @@ describe('экран разбора', () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
     expect(screen.queryByText(/Провести акт в iiko/)).toBeNull()
+  })
+})
+
+describe('терияки: ужарка вводится, а не додумывается', () => {
+  it('два веса — что положили жарить и что сняли', async () => {
+    render(<SalmonAct token="1.sig" />)
+    await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
+    expect(screen.getByText(/^В жарку/)).toBeTruthy()
+    expect(screen.getByText(/^Терияки/)).toBeTruthy()
+    expect(screen.getByText('обрезков на сковороду')).toBeTruthy()
+    expect(screen.getByText('сколько сняли')).toBeTruthy()
+  })
+})
+
+describe('переключение рыбы', () => {
+  it('угорь спрашивает свой вход, цену обрезков и не знает жарки', async () => {
+    render(<SalmonAct token="1.sig" />)
+    await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
+
+    fireEvent.click(screen.getByText('Угорь'))
+    await waitFor(() => expect(screen.getByText(/Угорь в разбор/)).toBeTruthy())
+
+    expect(screen.getByText('угорь − нарезка − обрезки')).toBeTruthy()
+    expect(screen.queryByText(/^В жарку/)).toBeNull()
+    expect(screen.queryByText(/^Терияки/)).toBeNull()
+    // цена обрезков угря ещё не константа — без поля разбор не собрать
+    expect(screen.getByPlaceholderText('почём считать')).toBeTruthy()
+    // и запросы уходят на свой разбор, а не на лососёвый
+    expect((fetch as unknown as { mock: { calls: [string][] } }).mock.calls
+      .some(([u]) => String(u).includes('/api/acts/eel/'))).toBe(true)
   })
 })
 
