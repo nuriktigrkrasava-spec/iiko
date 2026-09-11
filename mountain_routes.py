@@ -717,7 +717,6 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
         logger.warning(f"[acts] номенклатура {real_org}: {e!r}")
         catalog = []
     prods = A.find_products(catalog, spec["key"])
-    price, price_from = 0.0, ""
 
     async def _price_at(org_id: str, product_id: str):
         st = await api.price_stats(org_id, product_id, 60, {"id": uid})
@@ -725,28 +724,55 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
         return (float(best.get("price_per_unit") or 0),
                 f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·"))
 
-    if prods.get("raw"):
+    neighbours: List[Dict[str, Any]] = []
+
+    async def _price_of(role: str):
+        """Цена позиции из накладных: сперва свой филиал, потом соседи.
+
+        Руками цену не спрашиваем, пока её можно найти: вбитая с потолка цифра
+        превращает себестоимость в фантазию, а поле остаётся — переписать
+        разовый закуп.
+        """
+        prod = prods.get(role)
+        if not prod:
+            return 0.0, ""
         try:
-            price, price_from = await _price_at(real_org, prods["raw"]["id"])
+            price, src = await _price_at(real_org, prod["id"])
         except Exception as e:
-            logger.warning(f"[acts] цена входа {real_org}: {e!r}")
-        # Бывает, что в этот филиал П/Ф не приходил (новый филиал, перерыв в
-        # поставках) — тогда берём цену там, где его закупали: позиция общая.
-        if price <= 0:
-            others = [r for r in api.get_restaurants(uid)
-                      if r["organization_id"] != real_org]
-            others.sort(key=lambda r: 0 if "цех" in (r.get("organization_name") or "").lower() else 1)
-            for r in others[:4]:
-                try:
-                    p2, from2 = await _price_at(r["organization_id"], prods["raw"]["id"])
-                except Exception:
-                    continue
-                if p2 > 0:
-                    price = p2
-                    price_from = f'{from2} · закуп: {r.get("organization_name")}'
-                    break
+            logger.warning(f"[acts] цена {role} {real_org}: {e!r}")
+            price, src = 0.0, ""
+        if price > 0:
+            return price, src
+        # Бывает, что в этот филиал позиция не приходила (новый филиал, перерыв
+        # в поставках) — тогда берём цену там, где её закупали: товар общий.
+        nonlocal neighbours
+        if not neighbours:
+            neighbours = [r for r in api.get_restaurants(uid)
+                          if r["organization_id"] != real_org]
+            neighbours.sort(
+                key=lambda r: 0 if "цех" in (r.get("organization_name") or "").lower() else 1)
+        for r in neighbours[:4]:
+            try:
+                p2, from2 = await _price_at(r["organization_id"], prod["id"])
+            except Exception:
+                continue
+            if p2 > 0:
+                return p2, f'{from2} · закуп: {r.get("organization_name")}'
+        return 0.0, ""
+
+    price, price_from = await _price_of("raw")
+    # Соус терияки приходит накладной как обычный товар — цену берём оттуда же,
+    # откуда цену рыбы, а не константой: соус дорожает чаще, чем правят код.
+    sauce_price, sauce_from = await _price_of("sauce")
+    # Обрезки: у лосося это константа учёта (по накладным они не приходят), у
+    # угря её не назначали — там обрезки в накладных есть, и цена берётся из них.
+    trim_price, trim_from = float(spec["trim_price"] or 0), ""
+    if trim_price <= 0:
+        trim_price, trim_from = await _price_of("trim")
     return {"branch": b, "products": prods, "price_per_kg": price,
-            "price_from": price_from, "trim_price": spec["trim_price"],
+            "price_from": price_from, "trim_price": trim_price,
+            "trim_from": trim_from, "trim_const": bool(spec["trim_price"]),
+            "sauce_price": sauce_price, "sauce_from": sauce_from,
             "kind": spec["key"], "title": spec["title"],
             "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
             "teriyaki": spec["teriyaki"],
@@ -787,27 +813,39 @@ class SalmonPayload(BaseModel):
     weight_trim: float = 0.0                 # сколько вышло обрезков ВСЕГО
     weight_fry: float = 0.0                  # сколько обрезков положили жарить
     weight_teriyaki: float = 0.0             # сколько терияки сняли со сковороды
+    weight_sauce: float = 0.0                # ГРАММЫ соуса терияки на эту жарку
     price_per_kg: Optional[float] = None     # переопределение цены, если закуп разовый
-    trim_price: Optional[float] = None       # цена обрезков, пока она не константа
+    trim_price: Optional[float] = None       # цена обрезков, если её нет в накладных
+    sauce_price: Optional[float] = None      # цена соуса, если закуп разовый
     note: Optional[str] = ""                 # чем разбор отличался, если отличался
 
 
 NO_PRICE = ("Нет цены входа: в накладных за 60 дней его не было. "
             "Впиши цену вручную.")
 NO_TRIM_PRICE = "Цена обрезков не задана — впиши, почём их считать."
+NO_SAUCE_PRICE = ("Соуса терияки нет в накладных за 60 дней — впиши его цену, "
+                  "₸/кг, иначе граммы не во что пересчитать.")
 
 
 def _prices(ctx: Dict[str, Any], payload: "SalmonPayload") -> Dict[str, Any]:
-    """Цена входа и цена обрезков: обе можно переписать руками. У лосося обрезки
-    стоят константу учёта, у угря её ещё не назначили — тогда цифру даёт человек,
-    и разбор не ждёт правки в коде."""
+    """Цены разбора: вход, обрезки и соус. Все три ищутся в накладных, и все три
+    можно переписать руками — бывает разовый закуп по другой цене.
+
+    Обрезки лосося по накладным не приходят ни разу, поэтому там стоит константа
+    учёта; у угря её не назначали, и цену даёт либо накладная, либо человек.
+    Соус спрашиваем только когда его в самом деле лили: разбор без жарки не
+    должен упираться в цену того, чего в нём нет.
+    """
     price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
     trim = float(payload.trim_price or ctx["trim_price"] or 0)
+    sauce = float(payload.sauce_price or ctx.get("sauce_price") or 0)
     if price <= 0:
         return {"error": NO_PRICE}
     if trim <= 0:
         return {"error": NO_TRIM_PRICE}
-    return {"price": price, "trim_price": trim}
+    if float(payload.weight_sauce or 0) > 0 and sauce <= 0:
+        return {"error": NO_SAUCE_PRICE}
+    return {"price": price, "trim_price": trim, "sauce_price": sauce}
 
 
 @router.post("/api/acts/{kind}/{token}")
@@ -830,7 +868,8 @@ async def acts_salmon_calc(kind: str, token: str, payload: SalmonPayload):
     res = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
                       payload.weight_trim, trim_price=pr["trim_price"],
                       w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
-                      kind=kind)
+                      kind=kind,
+                      g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
     res["products"] = ctx["products"]
     res["branch"] = ctx["branch"]
     return JSONResponse(res)
@@ -856,7 +895,8 @@ async def acts_salmon_save(kind: str, token: str, payload: SalmonPayload):
     calc = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
                        payload.weight_trim, trim_price=pr["trim_price"],
                        w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
-                       kind=kind)
+                       kind=kind,
+                       g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
     if not calc.get("ok"):
         return JSONResponse(calc)
     aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, pr["price"],

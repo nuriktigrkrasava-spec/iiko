@@ -171,6 +171,92 @@ def test_teriyaki_heavier_than_the_pan_is_refused():
     print("  [OK] привес после жарки и незаполненный выход не считаются")
 
 
+# ── Соус терияки: граммы свои, деньги со стороны ────────────────────────────
+
+def test_sauce_makes_the_teriyaki_more_expensive():
+    """200 г соуса по 4 000 ₸/кг — это 800 ₸ сверху, и они ложатся на терияки."""
+    dry = acts.split_salmon(9300, 10, 8, 2, w_fry=2, w_teriyaki=1.4)
+    r = acts.split_salmon(9300, 10, 8, 2, w_fry=2, w_teriyaki=1.4,
+                          g_sauce=200, sauce_price=4000)
+    assert r["ok"], r
+    assert r["sauce"]["grams"] == 200.0 and r["sauce"]["sum"] == 800.0, r
+    assert r["teriyaki"]["sum"] == dry["teriyaki"]["sum"] + 800.0, r
+    assert r["teriyaki"]["price_per_kg"] == round(18400 / 1.4, 2), r
+    print(f"  [OK] соус 800 ₸ → терияки {r['teriyaki']['price_per_kg']} ₸/кг вместо "
+          f"{dry['teriyaki']['price_per_kg']}")
+
+
+def test_sauce_does_not_touch_the_fish_money():
+    """Соус пришёл своей накладной. Нарезка, отход и сходимость акта — по рыбе,
+    иначе акт на 93 000 ₸ входа перестал бы сходиться."""
+    dry = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.2)
+    wet = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.2,
+                            g_sauce=350, sauce_price=5200)
+    assert wet["slice"] == dry["slice"], (dry["slice"], wet["slice"])
+    assert wet["waste"] == dry["waste"] and wet["waste_pct"] == dry["waste_pct"], wet
+    assert wet["check"] == dry["check"], (dry["check"], wet["check"])
+    assert abs(wet["check"] - wet["raw"]["sum"]) < 0.01, wet
+    print("  [OK] соус дорожает только терияки: акт сошёлся со входом")
+
+
+def test_sauce_per_kilo_is_the_number_that_catches_the_overpour():
+    """Граммы соуса сами по себе ни о чём: сравнивают «сколько на килограмм»."""
+    r = acts.split_salmon(9300, 10, 8, 2, w_fry=2, w_teriyaki=1.5,
+                          g_sauce=300, sauce_price=4000)
+    assert r["sauce_g_per_kg"] == 200.0, r              # 300 г на 1.5 кг
+    print(f"  [OK] {r['sauce_g_per_kg']} г соуса на килограмм терияки")
+
+
+def test_sauce_without_teriyaki_is_refused():
+    """Соус льют на сковороду. Граммы без выхода — промах полем, а не разбор."""
+    bad = acts.split_salmon(9300, 10, 8, 2, g_sauce=200, sauce_price=4000)
+    assert not bad["ok"] and "соус" in bad["error"].lower(), bad
+    print("  [OK] соус без терияки не считается, а объясняется")
+
+
+def test_eel_has_no_sauce():
+    """У угря жарки нет — соус в его разбор не заедет даже полем."""
+    r = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, kind="eel",
+                       g_sauce=500, sauce_price=4000)
+    assert r["ok"] and r["sauce"]["grams"] == 0.0 and r["sauce"]["sum"] == 0.0, r
+    print("  [OK] угорь считается без соуса")
+
+
+def test_sauce_found_in_the_catalog_and_not_confused_with_the_fish():
+    """«Соус Терияки» и «П/Ф Лосось терияки» — разные товары. Спутать их значит
+    списать бутылку соуса вместо килограмма рыбы."""
+    catalog = [
+        {"id": "1", "name": "П/Ф ЛОСОСЬ СТЕЙК", "unit": "кг"},
+        {"id": "2", "name": "П/Ф ОБРЕЗКИ ЛОСОСЬ", "unit": "кг"},
+        {"id": "3", "name": "П/Ф НАРЕЗКА ЛОСОСЬ", "unit": "кг"},
+        {"id": "6", "name": "Отход лосося", "unit": "кг"},
+        {"id": "7", "name": "Соус Терияки", "unit": "кг"},      # раньше П/Ф
+        {"id": "4", "name": "П/Ф Лосось терияки", "unit": "кг"},
+    ]
+    p = acts.find_products(catalog)
+    assert p["teriyaki"]["id"] == "4", p
+    assert p["sauce"]["id"] == "7", p
+    print("  [OK] соус нашёлся отдельно от П/Ф терияки")
+
+
+def test_period_counts_the_sauce_with_its_own_price():
+    """В своде соус — свои граммы и свои деньги: цену берём ту, что была в
+    разборе, иначе занесённый в iiko свод поехал бы от новой накладной."""
+    rows = [{"organization_id": "A", "weight_raw": 10, "weight_slice": 8,
+             "weight_trim": 0.0, "weight_fry": 1.8, "weight_teriyaki": 1.2,
+             "weight_waste": 0.2, "price_per_kg": 9300, "trim_price": 8800,
+             "weight_sauce": 240, "sauce_price": 4000}]
+    s = acts.summarize(rows)
+    assert s["sauce"] == 240.0 and s["sauce_sum"] == 960.0, s
+    assert s["sauce_g_per_kg"] == 200.0, s
+    assert s["teriyaki_sum"] == 15840.0 + 960.0, s          # 1.8 × 8800 + соус
+    assert s["teriyaki_price"] == round(16800 / 1.2, 2), s
+    dry = acts.summarize([{**rows[0], "weight_sauce": 0, "sauce_price": 0}])
+    assert s["slice_price"] == dry["slice_price"], (s, dry)
+    print(f"  [OK] за период {s['sauce']} г соуса на {s['sauce_sum']} ₸, "
+          f"нарезка не сдвинулась")
+
+
 def test_period_counts_the_frying_loss():
     """В своде терияки — своим весом, а деньгами он остаётся обрезками, что
     ушли в жарку: себестоимость нарезки от ужарки не двигается."""

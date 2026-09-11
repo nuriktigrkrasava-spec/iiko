@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import steakPhoto from '../assets/salmon/steak.webp'
 import slicePhoto from '../assets/salmon/slice.webp'
 import trimPhoto from '../assets/salmon/trim.webp'
+import teriyakiPhoto from '../assets/salmon/teriyaki.webp'
 import wastePhoto from '../assets/salmon/waste.webp'
 
 /* Общее для трёх карточек разбора: фото позиций, поля и мелкая типографика.
@@ -10,14 +11,18 @@ import wastePhoto from '../assets/salmon/waste.webp'
    Фото здесь не украшение. На весах стоит человек, который путает нарезку с
    обрезками — подпись он читает второй, а картинку узнаёт сразу. */
 
-export const PHOTO = { raw: steakPhoto, slice: slicePhoto, trim: trimPhoto, waste: wastePhoto }
+export const PHOTO = {
+  raw: steakPhoto, slice: slicePhoto, trim: trimPhoto,
+  teriyaki: teriyakiPhoto, waste: wastePhoto,
+}
 
 /* Фото сняты для лосося. Угря так же не сфотографировали — до тех пор у него
    знаки: узнать позицию всё равно надо с одного взгляда, а чужая рыба на
-   картинке хуже, чем честный значок. */
-export const GLYPH = { raw: '🐟', slice: '🍣', trim: '✂️', waste: '🦴' }
+   картинке хуже, чем честный значок. Соус тоже пока знаком: бутылка на фото
+   от бутылки на полке не отличается ничем, а вот кусок со сковороды — да. */
+export const GLYPH = { raw: '🐟', slice: '🍣', trim: '✂️', teriyaki: '🍢', sauce: '🍯', waste: '🦴' }
 
-export type Slot = 'raw' | 'slice' | 'trim' | 'waste'
+export type Slot = 'raw' | 'slice' | 'trim' | 'teriyaki' | 'waste'
 
 /** Картинки вида разбора: у лосося фото, у остальных — undefined, и плитка
     сама покажет знак. */
@@ -89,11 +94,13 @@ export function Eyebrow({ t, hint }: { t: string; hint?: ReactNode }) {
    и подписана процентом — ради него весь экран и открывают. */
 
 export function Tile({
-  photo, glyph, label, hint, value, onChange, placeholder, readOnly, tone, foot,
+  photo, glyph, label, hint, value, onChange, placeholder, readOnly, tone, foot, unit = 'кг',
 }: {
   photo?: string; glyph?: string; label: string; hint?: string
   value: string; onChange?: (v: string) => void
   placeholder?: string; readOnly?: boolean; tone?: string; foot?: ReactNode
+  /** Соус льют половником и меряют граммами: «0,2 кг» повар прочитает как ноль. */
+  unit?: string
 }) {
   const still = useReducedMotion()
   return (
@@ -122,12 +129,12 @@ export function Tile({
         <div style={{
           marginTop: 3, fontSize: 22, fontWeight: 700, letterSpacing: '-.02em',
           fontVariantNumeric: 'tabular-nums', color: tone || 'var(--hi)',
-        }}>{value || '—'}<span style={{ fontSize: 13, fontWeight: 500, color: 'var(--mute)' }}> кг</span></div>
+        }}>{value || '—'}<span style={{ fontSize: 13, fontWeight: 500, color: 'var(--mute)' }}> {unit}</span></div>
       ) : (
         <div style={{ marginTop: 3, display: 'flex', alignItems: 'baseline', gap: 4 }}>
           <input value={value} inputMode="decimal" placeholder={placeholder}
             onChange={(e) => onChange?.(e.target.value)} />
-          <span style={{ fontSize: 13, color: 'var(--mute)' }}>кг</span>
+          <span style={{ fontSize: 13, color: 'var(--mute)' }}>{unit}</span>
         </div>
       )}
       {foot && <div style={{ marginTop: 4, fontSize: 11.5, color: 'var(--mute)' }}>{foot}</div>}

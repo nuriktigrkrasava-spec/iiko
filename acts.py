@@ -16,20 +16,30 @@
 именно ужарку этот акт и должен показывать. Отход разбора от жарки не меняется —
 терияки берут не из стейка.
 
+Со сковороды терияки выходит не одной рыбой: туда же уходит СОУС, и его граммы
+пишут в акт. Соус приходит своей накладной и своей ценой из iiko, поэтому он
+деньги в разбор ДОБАВЛЯЕТ, а не переносит внутри него: сумма акта, нарезка и
+отход от соуса не двигаются — сходимость считается по рыбе. Дорожает только
+килограмм терияки, и вместе с ним видно «сколько соуса на килограмм» — цифра, на
+которой перелив соуса и ловится.
+
 Оператор взвешивает то, что реально держит в руках: вход, нарезку и обрезки, а
-у терияки — что положил жарить и что снял со сковороды. Отход не взвешивают: он
-остаток веса, и именно он говорит, насколько аккуратно разобрали рыбу.
+у терияки — что положил жарить, что снял со сковороды и сколько граммов соуса
+ушло. Отход не взвешивают: он остаток веса, и именно он говорит, насколько
+аккуратно разобрали рыбу.
 """
 from typing import Any, Dict, Iterable, List, Optional
 
 TRIM_PRICE = 8800.0          # ₸/кг, себестоимость обрезков лосося — константа учёта
-EEL_TRIM_PRICE = 0.0         # у угря цена обрезков ещё не назначена: 0 = спросим её
-                             # в акте полем, чтобы разбор не ждал константы
+EEL_TRIM_PRICE = 0.0         # у угря цена обрезков ещё не назначена: 0 = ищем её в
+                             # накладных, а не найдём — спросим полем в акте
 
 # ── Виды разбора ─────────────────────────────────────────────────────────────
 # names — как позиция называется в номенклатуре (проверено на сервере Алиева);
 # words — по каким словам искать, если филиал назвал её по-своему: у каждого
-# филиала свой сервер и свой справочник, а разбор один и тот же.
+# филиала свой сервер и свой справочник, а разбор один и тот же;
+# avoid  — слова, по которым похожая позиция отсеивается: «Соус терияки» — не
+# «П/Ф Лосось терияки», а спутать их значит списать соус вместо рыбы.
 KINDS: Dict[str, Dict[str, Any]] = {
     "salmon": {
         "key": "salmon",
@@ -46,6 +56,7 @@ KINDS: Dict[str, Dict[str, Any]] = {
             "trim": ["П/Ф ОБРЕЗКИ ЛОСОСЬ"],
             "waste": ["Отход лосося"],
             "teriyaki": ["П/Ф ЛОСОСЬ ТЕРИЯКИ"],
+            "sauce": ["СОУС ТЕРИЯКИ", "ТЕРИЯКИ СОУС", "Соус Терияки"],
         },
         "words": {
             "raw": [["лосос"], ["стейк"]],
@@ -53,6 +64,10 @@ KINDS: Dict[str, Dict[str, Any]] = {
             "trim": [["лосос"], ["обрезк"]],
             "waste": [["лосос"], ["отход"]],
             "teriyaki": [["лосос"], ["терияк"]],
+            "sauce": [["терияк"], ["соус"]],
+        },
+        "avoid": {
+            "teriyaki": ["соус"],            # соус терияки — не П/Ф из обрезков
         },
     },
     "eel": {
@@ -100,7 +115,9 @@ def kind_spec(kind: Optional[str]) -> Dict[str, Any]:
 
 
 def roles_of(spec: Dict[str, Any]) -> List[str]:
-    return ["raw", "slice", "trim", "waste"] + (["teriyaki"] if spec["teriyaki"] else [])
+    """Позиции разбора. Соус ищется только там, где жарят: в разборе угря его
+    нет, и пустая строка «соус не найден» там была бы враньём."""
+    return ["raw", "slice", "trim", "waste"] + (["teriyaki", "sauce"] if spec["teriyaki"] else [])
 
 
 def _norm(s: str) -> str:
@@ -124,9 +141,12 @@ def find_products(catalog: list, kind: str = DEFAULT_KIND) -> Dict[str, Optional
     out: Dict[str, Optional[Dict[str, Any]]] = {r: None for r in roles}
     items = [(_norm(p.get("name") or ""), p) for p in (catalog or [])]
 
+    def _ok(role: str, n: str) -> bool:
+        return not any(b in n for b in spec.get("avoid", {}).get(role, []))
+
     for role in roles:
         for n, p in items:
-            if any(n.startswith(_norm(x)) for x in spec["names"].get(role, [])):
+            if _ok(role, n) and any(n.startswith(_norm(x)) for x in spec["names"].get(role, [])):
                 out[role] = _prod(p)
                 break
 
@@ -134,7 +154,8 @@ def find_products(catalog: list, kind: str = DEFAULT_KIND) -> Dict[str, Optional
         if out[role] is not None:
             continue
         for n, p in items:
-            if all(any(w in n for w in grp) for grp in spec["words"].get(role, [])):
+            if _ok(role, n) and all(any(w in n for w in grp)
+                                    for grp in spec["words"].get(role, [])):
                 out[role] = _prod(p)
                 break
 
@@ -150,7 +171,8 @@ def find_products(catalog: list, kind: str = DEFAULT_KIND) -> Dict[str, Optional
 def split_act(price_per_kg: float, w_raw: float, w_slice: float,
               w_trim: float = 0.0, trim_price: Optional[float] = None,
               w_teriyaki: float = 0.0, w_fry: float = 0.0,
-              kind: str = DEFAULT_KIND) -> Dict[str, Any]:
+              kind: str = DEFAULT_KIND,
+              g_sauce: float = 0.0, sauce_price: float = 0.0) -> Dict[str, Any]:
     """Разбор в весах и деньгах. Только арифметика, в iiko не ходит.
 
     price_per_kg — цена входа из накладной;
@@ -161,6 +183,10 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
     w_teriyaki   — сколько терияки сняли со сковороды. Разница с w_fry — ужарка:
                    вес ушёл, деньги остались, поэтому килограмм терияки дороже
                    килограмма обрезков ровно на ужарку. Пусто = жарки не было;
+    g_sauce      — сколько ГРАММОВ соуса терияки ушло на эту жарку. Граммы, а не
+                   килограммы: соус льют половником, и в килограммах повар
+                   ошибается на порядок;
+    sauce_price  — цена соуса из накладных, ₸ за килограмм;
     отход        — остаток веса: вход − нарезка − обрезки. Себестоимость 0 ₸,
                    поэтому отход НЕ уменьшает стоимость нарезки — только вес.
     """
@@ -169,8 +195,9 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
     price_per_kg = float(price_per_kg or 0)
     w_raw, w_slice, w_trim = float(w_raw or 0), float(w_slice or 0), float(w_trim or 0)
     w_ter, w_fry = float(w_teriyaki or 0), float(w_fry or 0)
+    g_sauce, sauce_price = float(g_sauce or 0), float(sauce_price or 0)
     if not spec["teriyaki"]:
-        w_ter = w_fry = 0.0
+        w_ter = w_fry = g_sauce = 0.0
     # Жарку записали одним весом — значит, ужарку не мерили: считаем «сколько
     # положили, столько и сняли», это старая форма разбора и она честнее нуля.
     if w_ter > 0 and w_fry <= 0:
@@ -178,7 +205,7 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
 
     if w_raw <= 0:
         return {"ok": False, "error": f"Вес {spec['raw_gen']} должен быть больше нуля"}
-    if w_slice < 0 or w_trim < 0 or w_ter < 0 or w_fry < 0:
+    if w_slice < 0 or w_trim < 0 or w_ter < 0 or w_fry < 0 or g_sauce < 0:
         return {"ok": False, "error": "Вес не может быть отрицательным"}
     if w_fry > w_trim + 1e-9:
         # Терияки жарят ИЗ обрезков: больше, чем обрезков, туда не положить.
@@ -189,6 +216,10 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
     if w_ter > w_fry + 1e-9:
         return {"ok": False,
                 "error": "Терияки тяжелее обрезков, что пошли в жарку — при жарке вес уходит"}
+    if g_sauce > 0 and w_ter <= 0:
+        # Соус льют на сковороду. Соус без терияки — это либо забытый выход,
+        # либо граммы попали не в то поле; молча прибавить их некуда.
+        return {"ok": False, "error": "Соус вписан, а терияки нет — соус идёт в жарку"}
     w_waste = round(w_raw - w_slice - w_trim, 3)
     if w_waste < 0:
         return {"ok": False,
@@ -198,12 +229,16 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
     w_shrink = round(w_fry - w_ter, 3)              # ужарка: вес ушёл, деньги нет
     raw_sum = round(price_per_kg * w_raw, 2)
     trim_sum = round(trim_price * w_trim_left, 2)
-    ter_sum = round(trim_price * w_fry, 2)          # деньги обрезков, ушедших в жарку
+    ter_fish_sum = round(trim_price * w_fry, 2)     # деньги обрезков, ушедших в жарку
     waste_sum = 0.0                       # отход по нулю: так ведётся учёт
-    slice_sum = round(raw_sum - trim_sum - ter_sum, 2)
+    slice_sum = round(raw_sum - trim_sum - ter_fish_sum, 2)
     if slice_sum < 0:
         return {"ok": False,
                 "error": f"Обрезки по {trim_price:.0f} ₸ дороже всего {spec['raw_gen']} — проверь цену"}
+    # Соус — деньги СО СТОРОНЫ: он пришёл своей накладной, а не из этой рыбы.
+    # Поэтому он прибавляется к терияки и не участвует в сходимости акта.
+    sauce_sum = round(sauce_price * g_sauce / 1000, 2)
+    ter_sum = round(ter_fish_sum + sauce_sum, 2)
     per_kg = round(slice_sum / w_slice, 2) if w_slice > 0 else 0.0
     ter_per_kg = round(ter_sum / w_ter, 2) if w_ter > 0 else 0.0
 
@@ -214,9 +249,15 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
         "slice": {"weight": w_slice, "price_per_kg": per_kg, "sum": slice_sum},
         "trim": {"weight": w_trim_left, "price_per_kg": trim_price, "sum": trim_sum},
         "teriyaki": {"weight": w_ter, "price_per_kg": ter_per_kg, "sum": ter_sum,
-                     "from_trim": w_fry, "shrink": w_shrink},
+                     "from_trim": w_fry, "shrink": w_shrink,
+                     "trim_sum": ter_fish_sum, "sauce_sum": sauce_sum},
+        # соус отдельной строкой: в iiko он списывается своим товаром и своими
+        # граммами, а не растворяется в цене терияки
+        "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
+                  "price_per_kg": sauce_price, "sum": sauce_sum},
         "waste": {"weight": w_waste, "price_per_kg": 0.0, "sum": waste_sum},
         "trim_price": trim_price,
+        "sauce_price": sauce_price,
         "slice_pct": round(w_slice / w_raw * 100, 1),
         "trim_pct": round(w_trim_left / w_raw * 100, 1),
         "teriyaki_pct": round(w_ter / w_raw * 100, 1),
@@ -225,7 +266,11 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
         "teriyaki_yield_pct": round(w_ter / w_fry * 100, 1) if w_fry > 0 else 0.0,
         "shrink_pct": round(w_shrink / w_fry * 100, 1) if w_fry > 0 else 0.0,
         "waste_pct": round(w_waste / w_raw * 100, 1),
-        "check": round(trim_sum + ter_sum + waste_sum + slice_sum, 2),  # = стоимости входа
+        # соуса на килограмм терияки: по этой цифре и видно перелив
+        "sauce_g_per_kg": round(g_sauce / w_ter, 1) if w_ter > 0 else 0.0,
+        # сходимость считается по рыбе: соус в неё не входит, иначе акт на вход
+        # 93 000 ₸ никогда бы не сошёлся
+        "check": round(trim_sum + ter_fish_sum + waste_sum + slice_sum, 2),
     }
 
 
@@ -242,10 +287,13 @@ def summarize(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
     Проценты и себестоимость — средневзвешенные, а не среднее по актам: разбор
     на 40 кг и разбор на 2 кг не имеют одинакового веса в оценке филиала.
+
+    Соус считается своими граммами и своей ценой: он деньги добавляет, поэтому
+    сидит в стоимости терияки и НЕ трогает себестоимость нарезки.
     """
     n = 0
-    raw = slice_w = trim = waste = ter = fry = 0.0
-    raw_sum = slice_sum = trim_sum = ter_sum = 0.0
+    raw = slice_w = trim = waste = ter = fry = sauce_g = 0.0
+    raw_sum = slice_sum = trim_sum = ter_fish_sum = sauce_sum = 0.0
     for r in rows:
         n += 1
         w_raw = float(r.get("weight_raw") or 0)
@@ -254,26 +302,37 @@ def summarize(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         w_ter = float(r.get("weight_teriyaki") or 0)
         # в старых разборах ужарку не писали: сколько сняли, столько и клали
         w_fry = float(r.get("weight_fry") or 0) or w_ter
+        g_s = float(r.get("weight_sauce") or 0)      # граммы, а не килограммы
         raw += w_raw
         slice_w += w_slice
         trim += w_trim
         ter += w_ter
         fry += w_fry
+        sauce_g += g_s
         waste += float(r.get("weight_waste") or 0)
         price = float(r.get("price_per_kg") or 0)
         tprice = float(r.get("trim_price") or TRIM_PRICE)
+        sprice = float(r.get("sauce_price") or 0)
         raw_sum += price * w_raw
         trim_sum += tprice * w_trim
-        ter_sum += tprice * w_fry
+        ter_fish_sum += tprice * w_fry
+        # цену соуса берём ту, что была в разборе: пересчёт задним числом по
+        # сегодняшней накладной сдвинул бы уже занесённый в iiko свод
+        sauce_sum += sprice * g_s / 1000
         # терияки оплачен обрезочной ценой того, что ушло в жарку, и на нарезку
-        # не влияет: деньги переезжают внутри обрезков
+        # не влияет: деньги переезжают внутри обрезков. Соус к нарезке тоже не
+        # относится — он пришёл со своего склада
         slice_sum += price * w_raw - tprice * w_trim - tprice * w_fry
+    ter_sum = ter_fish_sum + sauce_sum
     return {
         "acts": n,
         "raw": round(raw, 3), "slice": round(slice_w, 3),
         "trim": round(trim, 3), "waste": round(waste, 3),
         "teriyaki": round(ter, 3), "fry": round(fry, 3),
         "shrink": round(fry - ter, 3),
+        "sauce": round(sauce_g, 1), "sauce_sum": round(sauce_sum, 2),
+        "sauce_g_per_kg": round(sauce_g / ter, 1) if ter > 0 else 0.0,
+        "sauce_price": round(sauce_sum / sauce_g * 1000, 2) if sauce_g > 0 else 0.0,
         "raw_sum": round(raw_sum, 2), "slice_sum": round(slice_sum, 2),
         "trim_sum": round(trim_sum, 2), "teriyaki_sum": round(ter_sum, 2),
         "slice_price": round(slice_sum / slice_w, 2) if slice_w > 0 else 0.0,

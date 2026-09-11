@@ -125,6 +125,26 @@ def test_frying_loss_survives_the_round_trip():
     print(f"  [OK] ужарка 0.7 кг доехала до свода, терияки {s['teriyaki_price']:.0f} ₸/кг")
 
 
+def test_sauce_survives_the_round_trip_with_its_price():
+    """Соус — граммы и цена того дня. Цену храним в строке: свод за прошлый
+    месяц не должен переезжать от новой накладной."""
+    calc = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.3,
+                             g_sauce=260, sauce_price=4200)
+    assert calc["ok"], calc
+    aid = D.add_salmon_act(A, 1, calc, 9300, acts.TRIM_PRICE)
+    row = [r for r in D.get_salmon_acts([A]) if r["id"] == aid][0]
+    assert row["weight_sauce"] == 260 and row["sauce_price"] == 4200, row
+    s = acts.summarize([row])
+    assert s["sauce"] == 260.0 and s["sauce_sum"] == 1092.0, s     # 0.26 кг × 4 200
+    assert s["sauce_g_per_kg"] == 200.0, s
+    # рыбные деньги от соуса не поехали
+    dry = acts.summarize([{**row, "weight_sauce": 0, "sauce_price": 0}])
+    assert s["slice_price"] == dry["slice_price"], (s, dry)
+    assert s["teriyaki_sum"] == dry["teriyaki_sum"] + 1092.0, (s, dry)
+    print(f"  [OK] соус {s['sauce']} г на {s['sauce_sum']} ₸ доехал до свода, "
+          f"нарезка {s['slice_price']:.0f} ₸/кг не сдвинулась")
+
+
 if __name__ == "__main__":
     failed = 0
     for t in (test_saved_act_comes_back_with_all_weights, test_period_filters_by_date_and_branch,
@@ -133,6 +153,7 @@ if __name__ == "__main__":
               test_foreign_branch_cannot_close_or_delete, test_posted_act_cannot_be_deleted,
               test_network_table_lists_every_branch_that_worked,
               test_eel_acts_do_not_mix_into_the_salmon_summary,
+              test_sauce_survives_the_round_trip_with_its_price,
               test_frying_loss_survives_the_round_trip):
         print(f"\n>>> {t.__name__}")
         try:

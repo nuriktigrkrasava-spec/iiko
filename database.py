@@ -2868,10 +2868,14 @@ def _ensure_salmon(conn):
     # Дописано позже, поэтому колонками, а не новой таблицей:
     #  • терияки — часть обрезков, обжаренная с соусом (weight_fry — сколько
     #    обрезков положили жарить, weight_teriyaki — сколько сняли);
+    #  • weight_sauce — ГРАММЫ соуса терияки на эту жарку, sauce_price — его цена
+    #    из накладных на тот день: свод пересчитывается по сохранённой цене,
+    #    иначе новая накладная сдвинула бы уже занесённый в iiko акт;
     #  • kind — вид разбора: лосось был первым и в старых строках не записан,
     #    поэтому пустой kind читается как 'salmon'.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(salmon_acts)").fetchall()}
     for col, decl in (("weight_teriyaki", "REAL"), ("weight_fry", "REAL"),
+                      ("weight_sauce", "REAL"), ("sauce_price", "REAL"),
                       ("kind", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE salmon_acts ADD COLUMN {col} {decl}")
@@ -2882,17 +2886,19 @@ def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],
                    kind: str = "salmon") -> int:
     """Фиксируем разбор. calc — результат acts.split_act."""
     ter = calc.get("teriyaki") or {}
+    sauce = calc.get("sauce") or {}
     conn = get_db()
     _ensure_salmon(conn)
     cur = conn.execute(
         "INSERT INTO salmon_acts (organization_id, kind, created_at, created_by, weight_raw, "
-        "weight_slice, weight_trim, weight_fry, weight_teriyaki, weight_waste, price_per_kg, "
-        "trim_price, slice_price, note) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "weight_slice, weight_trim, weight_fry, weight_teriyaki, weight_sauce, sauce_price, "
+        "weight_waste, price_per_kg, trim_price, slice_price, note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (org_id, kind or "salmon", datetime.now().isoformat(), int(created_by or 0),
          float(calc["raw"]["weight"]), float(calc["slice"]["weight"]),
          float(calc["trim"]["weight"]),
          float(ter.get("from_trim") or 0), float(ter.get("weight") or 0),
+         float(sauce.get("grams") or 0), float(sauce.get("price_per_kg") or 0),
          float(calc["waste"]["weight"]),
          float(price_per_kg or 0), float(trim_price or 0),
          float(calc["slice"]["price_per_kg"] or 0), (note or "")[:300]))
