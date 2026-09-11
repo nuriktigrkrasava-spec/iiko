@@ -281,12 +281,13 @@ export default function SalmonAct({ token }: { token: string }) {
             <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
               <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)}</b></span>
               <span>В обрезки <b style={{ color: 'var(--hi)' }}>{pc(w.trim_pct)}</b></span>
-              <span>
-                Сходимость:&nbsp;
-                <b style={{ color: Math.abs((w.check || 0) - w.raw!.sum) < 0.01 ? 'var(--grn)' : 'var(--red)' }}>
-                  {tenge(w.check || 0)} из {tenge(w.raw!.sum)}
-                </b>
-              </span>
+              {/* Здесь стояла «Сходимость: X из Y» зелёным. Она не могла не
+                  сойтись: нарезка считается как «вход − обрезки», а сходимость —
+                  как «обрезки + отход + нарезка», то есть тот же вход длинной
+                  записью. Она показывала зелёное даже когда всё ушло в отход.
+                  Галочка, которая не умеет краснеть, приучает верить цифрам,
+                  которых никто не проверял. Настоящий контроль здесь — процент
+                  отхода слева, он и остался. */}
               <span style={{ marginLeft: 'auto' }}>
                 себестоимость нарезки — <b style={{ color: 'var(--hi)' }}>{tenge(w.slice!.price_per_kg)}/кг</b>
               </span>

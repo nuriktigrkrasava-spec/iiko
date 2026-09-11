@@ -15,6 +15,7 @@ import { Button, Eyebrow, GLYPH, Segmented, field, iso, kg, pc, periodBounds, ph
 type Act = {
   id: number; created_at: string; organization_id: string
   weight_raw: number; weight_slice: number; weight_trim: number; weight_waste: number
+  weight_fry?: number        // старые разборы: часть обрезков лежит здесь
   price_per_kg: number; slice_price: number; posted_at?: string | null
 }
 type Total = {
@@ -168,6 +169,9 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
             <tbody>
               {acts.map((a) => {
                 const wp = a.weight_raw ? Math.round(a.weight_waste / a.weight_raw * 1000) / 10 : 0
+                // до выноса жарки ушедшее на сковороду вычиталось из обрезков —
+                // без него строка не сходится: вход ≠ нарезка + обрезки + отход
+                const trim = a.weight_trim + (a.weight_fry || 0)
                 return (
                   <tr key={a.id}>
                     <td style={td}>
@@ -176,7 +180,7 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
                     </td>
                     <td style={tdR}>{kg(a.weight_raw)}</td>
                     <td style={tdR}>{kg(a.weight_slice)}</td>
-                    <td style={tdR}>{kg(a.weight_trim)}</td>
+                    <td style={tdR}>{kg(trim)}</td>
                     <td style={{ ...tdR, color: wasteTone(wp) }}>{kg(a.weight_waste)} · {pc(wp)}</td>
                     <td style={tdR}>{tenge(a.slice_price)}</td>
                     <td style={{ ...tdR, width: 88 }}>

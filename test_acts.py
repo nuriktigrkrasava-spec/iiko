@@ -36,12 +36,28 @@ def test_waste_costs_nothing_and_only_takes_weight():
 
 
 def test_money_does_not_leak():
-    """Обрезки плюс нарезка равны стоимости входа — копейки не теряются."""
+    """Обрезки плюс нарезка равны стоимости входа — копейки не теряются.
+
+    Сама по себе эта сумма тождественна входу (нарезка и есть остаток), и
+    показывать её оператору как «сходимость» нельзя. Но как сторож она рабочая:
+    поймает, если отход начнёт стоить денег. Поэтому рядом проверяем то, что
+    тождеством НЕ является, — что каждая строка это свой вес на свою цену.
+    """
     for price, raw, sl, trim in ((9300, 10, 8, 2), (9990, 7.3, 5.1, 1.85), (12000, 22.4, 15.2, 6.15)):
         r = acts.split_salmon(price, raw, sl, trim)
         assert r["ok"], r
         assert abs(r["check"] - r["raw"]["sum"]) < 0.01, (price, raw, r)
-    print("  [OK] на трёх наборах сумма выходов сошлась со стоимостью входа")
+        assert r["waste"]["sum"] == 0.0, r
+        for line in ("raw", "slice", "trim"):
+            w, p, total = (r[line]["weight"], r[line]["price_per_kg"], r[line]["sum"])
+            if w <= 0:
+                continue
+            # Цена в строке — это сумма, делённая на вес, и округлённая до копеек.
+            # Обратно (вес × цену) сходится уже не до копейки: 5.1 × 11 107.25 это
+            # 56 646.98 против 56 647.00 в сумме. Проверяем в ту сторону, в
+            # которую считали, иначе тест ловит собственное округление.
+            assert abs(round(total / w, 2) - p) <= 0.01, (line, r[line])
+    print("  [OK] на трёх наборах цена строки = её сумма на её вес, отход по нулю")
 
 
 def test_impossible_weights_are_refused():
@@ -227,6 +243,32 @@ ROWS_TER = [
     {"organization_id": "A", "weight_raw": 10, "weight_slice": 8, "weight_trim": 0.8,
      "weight_teriyaki": 1.0, "weight_waste": 0.2, "price_per_kg": 9300, "trim_price": 8800},
 ]
+
+
+def test_old_acts_do_not_lose_the_fried_trim():
+    """Разборы, записанные ДО выноса жарки, хранят обрезки в двух колонках:
+    weight_trim — остаток, weight_fry — то, что ушло на сковороду. Пока жарка
+    считалась внутри акта, свод складывал обе. После выноса weight_fry перестал
+    учитываться — и килограммы вместе с деньгами исчезали, а стоимость входа
+    целиком ложилась на нарезку: 11 405 ₸/кг вместо 9 425.
+
+    Обрезки есть обрезки: сколько их вышло из рыбы, столько и в своде. Что с
+    ними сделали потом — вопрос другого документа.
+    """
+    old = {"organization_id": "A", "weight_raw": 10, "weight_slice": 8,
+           "weight_trim": 0.2, "weight_fry": 1.8, "weight_teriyaki": 1.2,
+           "weight_waste": 0.0, "price_per_kg": 9300, "trim_price": 8800}
+    s = acts.summarize([old])
+    assert s["trim"] == 2.0, s                          # 0.2 остатка + 1.8 со сковороды
+    assert s["trim_sum"] == 17600.0, s                  # 2.0 × 8800
+    assert s["slice_price"] == 9425.0, s                # (93 000 − 17 600) / 8
+
+    # новый разбор пишет все обрезки одной колонкой — там прибавлять нечего
+    new = {**old, "weight_trim": 2.0, "weight_fry": 0, "weight_teriyaki": 0}
+    assert acts.summarize([new])["trim"] == 2.0, new
+    assert acts.summarize([new])["slice_price"] == s["slice_price"], new
+    print("  [OK] старый разбор не теряет обрезки со сковороды: "
+          f"{s['trim']} кг, нарезка {s['slice_price']} ₸/кг")
 
 
 def test_period_totals_are_sums():

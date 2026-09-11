@@ -226,7 +226,12 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
         "slice_pct": round(w_slice / w_raw * 100, 1),
         "trim_pct": round(w_trim / w_raw * 100, 1),
         "waste_pct": round(w_waste / w_raw * 100, 1),
-        "check": round(trim_sum + waste_sum + slice_sum, 2),   # = стоимости входа
+        # Сумма разложенных строк. Оператору её показывать нельзя — она равна
+        # стоимости входа тождественно (нарезка и есть остаток), и зелёная
+        # «сходимость» на экране горела бы даже когда всё ушло в отход. А вот
+        # как инвариант в тестах она рабочая: поймает, если отход вдруг начнёт
+        # стоить денег или в разложение заедет чужое слагаемое.
+        "check": round(trim_sum + waste_sum + slice_sum, 2),
     }
 
 
@@ -307,7 +312,13 @@ def summarize(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         n += 1
         w_raw = float(r.get("weight_raw") or 0)
         w_slice = float(r.get("weight_slice") or 0)
-        w_trim = float(r.get("weight_trim") or 0)
+        # Разборы, записанные ДО выноса жарки, держат обрезки в двух колонках:
+        # weight_trim — остаток, weight_fry — то, что ушло на сковороду; при
+        # записи второе вычиталось из первого. Обрезки есть обрезки, и в своде
+        # их столько, сколько вышло из рыбы. Не сложить их обратно — значит
+        # потерять килограммы вместе с деньгами и завысить нарезку. У новых
+        # разборов weight_fry пуст, и слагаемое ничего не меняет.
+        w_trim = float(r.get("weight_trim") or 0) + float(r.get("weight_fry") or 0)
         raw += w_raw
         slice_w += w_slice
         trim += w_trim
