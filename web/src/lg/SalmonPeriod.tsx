@@ -5,6 +5,8 @@ import type { Scope } from './salmonKit'
 import { Button, Eyebrow, GLYPH, Segmented, field, iso, kg, pc, periodBounds, photosOf, plural, td, tdR, th, wasteTone } from './salmonKit'
 
 /* Свод разборов за период — то, что администратор заносит в iiko ОДНИМ актом.
+   Жарки здесь нет: у неё свой свод и свой акт, и смешивать их нельзя — тут
+   списывают рыбу, там обрезки и соус.
 
    По умолчанию открыт «к занесению»: копятся разборы, которых ещё нет в iiko.
    Занёс — нажал «Занёс в iiko», пачка закрывается, счёт идёт заново. Календарные
@@ -13,22 +15,17 @@ import { Button, Eyebrow, GLYPH, Segmented, field, iso, kg, pc, periodBounds, ph
 type Act = {
   id: number; created_at: string; organization_id: string
   weight_raw: number; weight_slice: number; weight_trim: number; weight_waste: number
-  weight_fry?: number; weight_teriyaki?: number
-  weight_sauce?: number; sauce_price?: number
   price_per_kg: number; slice_price: number; posted_at?: string | null
 }
 type Total = {
   acts: number; raw: number; slice: number; trim: number; waste: number
-  teriyaki: number; fry: number; shrink: number
-  sauce: number; sauce_sum: number; sauce_g_per_kg: number; sauce_price: number
-  slice_price: number; raw_price: number; teriyaki_price: number
+  slice_price: number; raw_price: number
   slice_pct: number; trim_pct: number; waste_pct: number
-  teriyaki_pct: number; teriyaki_yield_pct: number
   raw_sum: number; slice_sum: number; trim_sum: number
 }
 type Data = {
   branch?: { name: string }; period?: { from: string; to: string }
-  acts?: Act[]; total?: Total; teriyaki?: boolean; error?: string
+  acts?: Act[]; total?: Total; error?: string
 }
 
 /** Крупная строка свода: вес и доля. Это и переписывают в iikoOffice. */
@@ -81,8 +78,7 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
     if (!ids.length) return
     const t = d!.total!
     const q = `Свод занесён в iiko: вход ${kg(t.raw)} кг → нарезка ${kg(t.slice)}, `
-      + `обрезки ${kg(t.trim)}${t.teriyaki ? `, терияки ${kg(t.teriyaki)}` : ''}`
-      + `${t.sauce ? ` (соуса ${kg(t.sauce)} г)` : ''}, `
+      + `обрезки ${kg(t.trim)}, `
       + `отход ${kg(t.waste)}. Закрыть ${ids.length} `
       + `${plural(ids.length, 'разбор', 'разбора', 'разборов')}?`
     if (!window.confirm(q)) return
@@ -108,11 +104,6 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
   const acts = d.acts || []
   const open = scope === 'open'
   const ph = photosOf(kind)
-  // терияки показываем, только если его действительно жарили: у угря его нет,
-  // да и у лосося не в каждом периоде
-  const fried = (t?.teriyaki || 0) > 0
-  // соус — колонка того же порядка: пока его не лили, пустой столбец лишний
-  const sauced = fried && (t?.sauce || 0) > 0
 
   return (
     <Glass span={12}>
@@ -144,10 +135,6 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
             <Sum photo={ph.raw} glyph={GLYPH.raw} label={`Переработано · ${t.acts} ${plural(t.acts, 'разбор', 'разбора', 'разборов')}`} w={t.raw} price={t.raw_price} />
             <Sum photo={ph.slice} glyph={GLYPH.slice} label="Нарезка" w={t.slice} pct={t.slice_pct} price={t.slice_price} tone="var(--grn)" />
             <Sum photo={ph.trim} glyph={GLYPH.trim} label="Обрезки" w={t.trim} pct={t.trim_pct} tone="var(--amb)" />
-            {fried && (
-              <Sum photo={ph.teriyaki} glyph={GLYPH.teriyaki} label="Терияки" w={t.teriyaki}
-                pct={t.teriyaki_pct} price={t.teriyaki_price} tone="var(--amb)" />
-            )}
             <Sum photo={ph.waste} glyph={GLYPH.waste} label="Отход" w={t.waste} pct={t.waste_pct} tone={wasteTone(t.waste_pct)} />
           </div>
 
@@ -155,13 +142,6 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
             Себестоимость нарезки за период — <b style={{ color: 'var(--hi)' }}>{tenge(t.slice_price)}/кг</b>,
             средний отход — <b style={{ color: wasteTone(t.waste_pct) }}>{pc(t.waste_pct)}</b>.
             Проценты средневзвешенные: разбор на 40 кг весит больше, чем на два.
-            {fried && <> В жарку ушло <b style={{ color: 'var(--hi)' }}>{kg(t.fry)} кг</b> обрезков,
-              со сковороды снято <b style={{ color: 'var(--hi)' }}>{kg(t.teriyaki)} кг</b> —
-              ужарка <b style={{ color: 'var(--amb)' }}>{kg(t.shrink)} кг</b>, выход {pc(t.teriyaki_yield_pct)}.</>}
-            {fried && (t.sauce || 0) > 0 && <> Соуса ушло <b style={{ color: 'var(--hi)' }}>{kg(t.sauce)} г</b> на{' '}
-              <b style={{ color: 'var(--hi)' }}>{tenge(t.sauce_sum)}</b> — это{' '}
-              <b style={{ color: 'var(--hi)' }}>{kg(t.sauce_g_per_kg)} г</b> на килограмм терияки.
-              Соус со своего склада: себестоимость нарезки он не двигает.</>}
           </div>
 
           {open && (
@@ -181,8 +161,6 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
               <th style={{ ...th, textAlign: 'right' }}>Вход</th>
               <th style={{ ...th, textAlign: 'right' }}>Нарезка</th>
               <th style={{ ...th, textAlign: 'right' }}>Обрезки</th>
-              {fried && <th style={{ ...th, textAlign: 'right' }}>Терияки</th>}
-              {sauced && <th style={{ ...th, textAlign: 'right' }}>Соус, г</th>}
               <th style={{ ...th, textAlign: 'right' }}>Отход</th>
               <th style={{ ...th, textAlign: 'right' }}>Нарезка ₸/кг</th>
               <th style={{ ...th, textAlign: 'right' }}></th>
@@ -199,13 +177,6 @@ export default function SalmonPeriod({ token, org, kind, reload }: {
                     <td style={tdR}>{kg(a.weight_raw)}</td>
                     <td style={tdR}>{kg(a.weight_slice)}</td>
                     <td style={tdR}>{kg(a.weight_trim)}</td>
-                    {fried && (
-                      <td style={tdR}>
-                        {a.weight_teriyaki ? kg(a.weight_teriyaki) : '—'}
-                        {a.weight_fry ? <span style={{ color: 'var(--mute)', fontSize: 11 }}> из {kg(a.weight_fry)}</span> : null}
-                      </td>
-                    )}
-                    {sauced && <td style={tdR}>{a.weight_sauce ? kg(a.weight_sauce) : '—'}</td>}
                     <td style={{ ...tdR, color: wasteTone(wp) }}>{kg(a.weight_waste)} · {pc(wp)}</td>
                     <td style={tdR}>{tenge(a.slice_price)}</td>
                     <td style={{ ...tdR, width: 88 }}>

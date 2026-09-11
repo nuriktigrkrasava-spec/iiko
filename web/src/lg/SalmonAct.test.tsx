@@ -32,15 +32,15 @@ const CTX = {
 const EEL = {
   ...CTX,
   products: {
-    raw: { id: '11', name: 'Угорь целый' },
+    raw: { id: '11', name: 'Пласт угря' },
     slice: { id: '13', name: 'П/Ф НАРЕЗКА УГОРЬ' },
     trim: { id: '12', name: 'П/Ф ОБРЕЗКИ УГОРЬ' },
     waste: { id: '16', name: 'Отход угря' },
   },
   price_per_kg: 14000, price_from: 'ЦЕХ · 2026-09-01', trim_price: 0,
   trim_const: false, sauce_price: 0, sauce_from: '',
-  kind: 'eel', title: 'Разбор угря', raw_label: 'Угорь в разбор',
-  raw_short: 'угорь', teriyaki: false,
+  kind: 'eel', title: 'Разбор угря', raw_label: 'Пласт угря',
+  raw_short: 'пласт', teriyaki: false,
 }
 
 beforeEach(() => {
@@ -70,66 +70,53 @@ describe('экран разбора', () => {
   })
 })
 
-describe('терияки: ужарка вводится, а не додумывается', () => {
-  it('два веса — что положили жарить и что сняли', async () => {
+describe('в разборе жарки нет', () => {
+  /* Терияки — передел обрезков на сковороде, а не разбор рыбы. Пока они жили в
+     одном экране, «насколько аккуратно разделали» путалось со «сколько дала
+     сковорода». Тест сторожит, чтобы жарка сюда не вернулась. */
+  it('ни жарки, ни терияки, ни соуса — только рыба', async () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
-    expect(screen.getByText(/^В жарку/)).toBeTruthy()
-    expect(screen.getByText(/^Терияки/)).toBeTruthy()
-    expect(screen.getByText('обрезков на сковороду')).toBeTruthy()
-    expect(screen.getByText('сколько сняли')).toBeTruthy()
+    expect(screen.queryByText(/^В жарку/)).toBeNull()
+    expect(screen.queryByText(/^Терияки/)).toBeNull()
+    expect(screen.queryByText('сколько налили')).toBeNull()
+    expect(screen.queryByText(/Соус терияки, ₸\/кг/)).toBeNull()
   })
-})
 
-describe('соус терияки: граммы свои, цена из накладных', () => {
-  it('соус спрашивают граммами, а цену подставляют из iiko', async () => {
+  it('взвешивают три вещи: вход, нарезку и обрезки', async () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
-    // плитка соуса рядом с жаркой, и она в граммах, а не в килограммах
-    expect(screen.getByText('сколько налили')).toBeTruthy()
-    expect(screen.getByText('г')).toBeTruthy()
-    // цену руками не спрашиваем, пока она есть в накладных
-    expect(screen.getByPlaceholderText('4200')).toBeTruthy()
-    expect(screen.getByText(/Азия Фуд/)).toBeTruthy()
+    // плитки с вводом — ровно три, отход считается сам
+    expect(screen.getAllByPlaceholderText(/^(10|8|2)$/)).toHaveLength(3)
+    expect(screen.queryAllByPlaceholderText('0')).toHaveLength(0)
   })
 
-  it('граммы уезжают на сервер вместе с весами', async () => {
+  it('в запрос уезжают только веса разбора', async () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
     fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '10' } })
-    const zeros = screen.getAllByPlaceholderText('0')
-    fireEvent.change(zeros[0], { target: { value: '2' } })     // в жарку
-    fireEvent.change(zeros[1], { target: { value: '1.4' } })   // терияки
-    fireEvent.change(zeros[2], { target: { value: '200' } })   // соус, граммы
     await waitFor(() => {
       const calls = (fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
       const post = calls.find(([, o]) => o?.method === 'POST')
       expect(post).toBeTruthy()
-      expect(JSON.parse(String(post![1]!.body)).weight_sauce).toBe(200)
+      const body = JSON.parse(String(post![1]!.body))
+      expect(body.weight_raw).toBe(10)
+      expect(body.weight_sauce).toBeUndefined()
+      expect(body.weight_fry).toBeUndefined()
+      expect(body.weight_teriyaki).toBeUndefined()
     }, { timeout: 2000 })
-  })
-
-  it('у угря соуса нет: жарки в его разборе не бывает', async () => {
-    render(<SalmonAct token="1.sig" />)
-    await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
-    fireEvent.click(screen.getByText('Угорь'))
-    await waitFor(() => expect(screen.getByText(/Угорь в разбор/)).toBeTruthy())
-    expect(screen.queryByText('сколько налили')).toBeNull()
-    expect(screen.queryByText(/Соус терияки, ₸\/кг/)).toBeNull()
   })
 })
 
 describe('переключение рыбы', () => {
-  it('угорь спрашивает свой вход, цену обрезков и не знает жарки', async () => {
+  it('угорь спрашивает свой пласт и цену обрезков', async () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
 
     fireEvent.click(screen.getByText('Угорь'))
-    await waitFor(() => expect(screen.getByText(/Угорь в разбор/)).toBeTruthy())
-
-    expect(screen.getByText('угорь − нарезка − обрезки')).toBeTruthy()
-    expect(screen.queryByText(/^В жарку/)).toBeNull()
-    expect(screen.queryByText(/^Терияки/)).toBeNull()
+    // «Пласт угря» теперь и подпись плитки, и имя позиции в шапке — ждём формулу
+    await waitFor(() => expect(screen.getByText('пласт − нарезка − обрезки')).toBeTruthy())
+    expect(screen.getAllByText(/Пласт угря/).length).toBeGreaterThan(0)
     // цена обрезков угря ещё не константа — без поля разбор не собрать
     expect(screen.getByPlaceholderText('почём считать')).toBeTruthy()
     // и запросы уходят на свой разбор, а не на лососёвый

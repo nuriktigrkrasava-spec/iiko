@@ -761,9 +761,6 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
         return 0.0, ""
 
     price, price_from = await _price_of("raw")
-    # Соус терияки приходит накладной как обычный товар — цену берём оттуда же,
-    # откуда цену рыбы, а не константой: соус дорожает чаще, чем правят код.
-    sauce_price, sauce_from = await _price_of("sauce")
     # Обрезки: у лосося это константа учёта (по накладным они не приходят), у
     # угря её не назначали — там обрезки в накладных есть, и цена берётся из них.
     trim_price, trim_from = float(spec["trim_price"] or 0), ""
@@ -772,12 +769,16 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
     return {"branch": b, "products": prods, "price_per_kg": price,
             "price_from": price_from, "trim_price": trim_price,
             "trim_from": trim_from, "trim_const": bool(spec["trim_price"]),
-            "sauce_price": sauce_price, "sauce_from": sauce_from,
             "kind": spec["key"], "title": spec["title"],
             "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
-            "teriyaki": spec["teriyaki"],
-            "kinds": [{"key": k["key"], "title": k["title"], "tab": k["tab"]}
-                      for k in A.KINDS.values()]}
+            "kinds": _TABS}
+
+
+# Переключатель наверху экрана: две рыбы и жарка. Жарка стоит рядом, потому что
+# открывают их подряд, но это другой документ — и адреса у неё свои.
+_TABS = ([{"key": k["key"], "title": k["title"], "tab": k["tab"]} for k in A.KINDS.values()]
+         + [{"key": "teriyaki", "title": A.TERIYAKI_SPEC["title"],
+             "tab": A.TERIYAKI_SPEC["tab"]}])
 
 
 def _kind_or_404(kind: str) -> Optional[str]:
@@ -810,13 +811,9 @@ class SalmonPayload(BaseModel):
     org: Optional[str] = None
     weight_raw: float                        # сколько входа (стейк, угорь) пошло в разбор
     weight_slice: float                      # сколько вышло нарезки
-    weight_trim: float = 0.0                 # сколько вышло обрезков ВСЕГО
-    weight_fry: float = 0.0                  # сколько обрезков положили жарить
-    weight_teriyaki: float = 0.0             # сколько терияки сняли со сковороды
-    weight_sauce: float = 0.0                # ГРАММЫ соуса терияки на эту жарку
+    weight_trim: float = 0.0                 # сколько вышло обрезков
     price_per_kg: Optional[float] = None     # переопределение цены, если закуп разовый
     trim_price: Optional[float] = None       # цена обрезков, если её нет в накладных
-    sauce_price: Optional[float] = None      # цена соуса, если закуп разовый
     note: Optional[str] = ""                 # чем разбор отличался, если отличался
 
 
@@ -828,24 +825,19 @@ NO_SAUCE_PRICE = ("Соуса терияки нет в накладных за 6
 
 
 def _prices(ctx: Dict[str, Any], payload: "SalmonPayload") -> Dict[str, Any]:
-    """Цены разбора: вход, обрезки и соус. Все три ищутся в накладных, и все три
-    можно переписать руками — бывает разовый закуп по другой цене.
+    """Цены разбора: вход и обрезки. Обе ищутся в накладных и обе можно
+    переписать руками — бывает разовый закуп по другой цене.
 
     Обрезки лосося по накладным не приходят ни разу, поэтому там стоит константа
     учёта; у угря её не назначали, и цену даёт либо накладная, либо человек.
-    Соус спрашиваем только когда его в самом деле лили: разбор без жарки не
-    должен упираться в цену того, чего в нём нет.
     """
     price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
     trim = float(payload.trim_price or ctx["trim_price"] or 0)
-    sauce = float(payload.sauce_price or ctx.get("sauce_price") or 0)
     if price <= 0:
         return {"error": NO_PRICE}
     if trim <= 0:
         return {"error": NO_TRIM_PRICE}
-    if float(payload.weight_sauce or 0) > 0 and sauce <= 0:
-        return {"error": NO_SAUCE_PRICE}
-    return {"price": price, "trim_price": trim, "sauce_price": sauce}
+    return {"price": price, "trim_price": trim}
 
 
 @router.post("/api/acts/{kind}/{token}")
@@ -866,10 +858,7 @@ async def acts_salmon_calc(kind: str, token: str, payload: SalmonPayload):
     if pr.get("error"):
         return JSONResponse({"ok": False, "error": pr["error"]})
     res = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
-                      payload.weight_trim, trim_price=pr["trim_price"],
-                      w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
-                      kind=kind,
-                      g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
+                      payload.weight_trim, trim_price=pr["trim_price"], kind=kind)
     res["products"] = ctx["products"]
     res["branch"] = ctx["branch"]
     return JSONResponse(res)
@@ -893,10 +882,7 @@ async def acts_salmon_save(kind: str, token: str, payload: SalmonPayload):
     if pr.get("error"):
         return JSONResponse({"ok": False, "error": pr["error"]})
     calc = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
-                       payload.weight_trim, trim_price=pr["trim_price"],
-                       w_teriyaki=payload.weight_teriyaki, w_fry=payload.weight_fry,
-                       kind=kind,
-                       g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
+                       payload.weight_trim, trim_price=pr["trim_price"], kind=kind)
     if not calc.get("ok"):
         return JSONResponse(calc)
     aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, pr["price"],
@@ -942,8 +928,7 @@ async def acts_salmon_period(kind: str, token: str, org: Optional[str] = None,
     spec = A.kind_spec(kind)
     return JSONResponse({"branch": b, "period": p, "only_open": only_open,
                          "acts": rows, "total": A.summarize(rows),
-                         "kind": spec["key"], "teriyaki": spec["teriyaki"],
-                         "trim_price": spec["trim_price"]})
+                         "kind": spec["key"], "trim_price": spec["trim_price"]})
 
 
 class SalmonPostedPayload(BaseModel):
@@ -1004,6 +989,174 @@ async def acts_salmon_network(kind: str, token: str, date_from: Optional[str] = 
     spec = A.kind_spec(kind)
     return JSONResponse({"period": p, "branches": branches, "kind": spec["key"],
                          "total": A.summarize(rows), "trim_price": spec["trim_price"]})
+
+
+# ── Терияки: обрезки на сковороду ───────────────────────────────────────────
+# Не разбор, а передел, и потому свои адреса, своя таблица весов и свой свод.
+# Пока он жил внутри разбора, один экран отвечал на два разных вопроса:
+# «насколько аккуратно разделали рыбу» и «сколько дала сковорода».
+
+
+async def _teriyaki_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str, Any]:
+    """Позиции и цены жарки: обрезки по константе учёта, соус — из накладных."""
+    import api
+    spec = A.TERIYAKI_SPEC
+    uid = sc["uid"]
+    b = _branch_or_403(sc, org)
+    if not b:
+        return {"error": "нет доступа к филиалу"}
+    real_org = b["organization_id"]
+    info = _rest_by_org(real_org)
+    if not info:
+        return {"error": "у филиала нет подключения к iiko"}
+    client = api.get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+    try:
+        catalog = await client.search_nomenclature(real_org, "", limit=100000,
+                                                   types=["GOODS", "PREPARED"])
+    except Exception as e:
+        logger.warning(f"[teriyaki] номенклатура {real_org}: {e!r}")
+        catalog = []
+    prods = A.find_products(catalog, "teriyaki")
+
+    sauce_price, sauce_from = 0.0, ""
+    if prods.get("sauce"):
+        # Соус приходит накладной как обычный товар — цену берём оттуда, а не
+        # константой: соус дорожает чаще, чем правят код.
+        try:
+            st = await api.price_stats(real_org, prods["sauce"]["id"], 60, {"id": uid})
+            best = (st or {}).get("best") or {}
+            sauce_price = float(best.get("price_per_unit") or 0)
+            sauce_from = f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·")
+        except Exception as e:
+            logger.warning(f"[teriyaki] цена соуса {real_org}: {e!r}")
+    return {"branch": b, "products": prods,
+            "trim_price": spec["trim_price"],
+            "sauce_price": sauce_price, "sauce_from": sauce_from,
+            "kind": "teriyaki", "title": spec["title"], "kinds": _TABS}
+
+
+class TeriyakiPayload(BaseModel):
+    org: Optional[str] = None
+    weight_fry: float                        # сколько обрезков положили жарить
+    weight_teriyaki: float                   # сколько терияки сняли со сковороды
+    weight_sauce: float = 0.0                # ГРАММЫ соуса на эту жарку
+    trim_price: Optional[float] = None       # цена обрезков, если закуп разовый
+    sauce_price: Optional[float] = None      # цена соуса, если закуп разовый
+    note: Optional[str] = ""
+
+
+def _teriyaki_prices(ctx: Dict[str, Any], payload: "TeriyakiPayload") -> Dict[str, Any]:
+    """Цену соуса спрашиваем только когда его в самом деле лили: жарка без соуса
+    не должна упираться в цену того, чего в ней нет."""
+    trim = float(payload.trim_price or ctx["trim_price"] or 0)
+    sauce = float(payload.sauce_price or ctx.get("sauce_price") or 0)
+    if trim <= 0:
+        return {"error": NO_TRIM_PRICE}
+    if float(payload.weight_sauce or 0) > 0 and sauce <= 0:
+        return {"error": NO_SAUCE_PRICE}
+    return {"trim_price": trim, "sauce_price": sauce}
+
+
+def _teriyaki_calc(ctx: Dict[str, Any], payload: "TeriyakiPayload") -> Dict[str, Any]:
+    pr = _teriyaki_prices(ctx, payload)
+    if pr.get("error"):
+        return {"ok": False, "error": pr["error"]}
+    return A.fry_teriyaki(payload.weight_fry, payload.weight_teriyaki,
+                          trim_price=pr["trim_price"],
+                          g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
+
+
+@router.get("/api/teriyaki/{token}")
+async def teriyaki_get(token: str, org: Optional[str] = None):
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    ctx = await _teriyaki_context(sc, sc["org"] or org)
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
+    ctx["branches"] = sc["branches"]
+    ctx["role"] = sc["role"]
+    return JSONResponse(ctx)
+
+
+@router.post("/api/teriyaki/{token}")
+async def teriyaki_calc(token: str, payload: TeriyakiPayload):
+    """Считает жарку, ничего не записывая: цифры пересчитываются на каждый ввод."""
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    ctx = await _teriyaki_context(sc, sc["org"] or payload.org)
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
+    res = _teriyaki_calc(ctx, payload)
+    res["products"] = ctx["products"]
+    res["branch"] = ctx["branch"]
+    return JSONResponse(res)
+
+
+@router.post("/api/teriyaki/{token}/save")
+async def teriyaki_save(token: str, payload: TeriyakiPayload):
+    """Фиксирует жарку у нас. В iiko поштучно не уходит — за период
+    администратор заносит один сводный акт руками."""
+    from database import add_teriyaki_act
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    ctx = await _teriyaki_context(sc, sc["org"] or payload.org)
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
+    calc = _teriyaki_calc(ctx, payload)          # считаем заново: браузеру не верим
+    if not calc.get("ok"):
+        return JSONResponse(calc)
+    aid = add_teriyaki_act(ctx["branch"]["organization_id"], sc["uid"], calc,
+                           payload.note or "")
+    return JSONResponse({**calc, "saved": True, "id": aid})
+
+
+@router.get("/api/teriyaki/{token}/period")
+async def teriyaki_period(token: str, org: Optional[str] = None,
+                          date_from: Optional[str] = None, date_to: Optional[str] = None,
+                          only_open: bool = False):
+    from database import get_salmon_acts
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    p = _period_bounds(date_from, date_to)
+    rows = get_salmon_acts([b["organization_id"]], p["from"], p["to"],
+                           only_open=only_open, kind="teriyaki")
+    return JSONResponse({"branch": b, "period": p, "only_open": only_open,
+                         "acts": rows, "total": A.summarize_teriyaki(rows),
+                         "kind": "teriyaki", "trim_price": A.TERIYAKI_SPEC["trim_price"]})
+
+
+@router.post("/api/teriyaki/{token}/posted")
+async def teriyaki_posted(token: str, payload: SalmonPostedPayload):
+    from database import mark_salmon_posted
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or payload.org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    n = mark_salmon_posted(payload.ids, [b["organization_id"]], sc["uid"])
+    return JSONResponse({"ok": True, "closed": n})
+
+
+@router.post("/api/teriyaki/{token}/delete/{act_id}")
+async def teriyaki_delete(token: str, act_id: int, org: Optional[str] = None):
+    from database import delete_salmon_act
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    b = _branch_or_403(sc, sc["org"] or org)
+    if not b:
+        return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
+    ok = delete_salmon_act(act_id, [b["organization_id"]])
+    return JSONResponse({"ok": ok} if ok else
+                        {"ok": False, "error": "жарка уже занесена в iiko или не ваша"})
 
 
 # ── Бумажные журналы: галочки и неделя истории ───────────────────────────────

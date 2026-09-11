@@ -111,38 +111,39 @@ def test_eel_acts_do_not_mix_into_the_salmon_summary():
     print("  [OK] у филиала два разбора, и каждый свод видит только свою рыбу")
 
 
-def test_frying_loss_survives_the_round_trip():
-    """Ужарка — часть разбора: в базу уезжает и сколько положили жарить, и
-    сколько сняли, иначе свод посчитает терияки по весу сковороды."""
-    calc = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.3)
+def test_the_act_keeps_all_the_trim():
+    """Обрезки остаются обрезками: разбор не знает, что с ними сделают дальше,
+    и на сковороду их списывает уже другой документ."""
+    calc = acts.split_salmon(9300, 10, 7, 2)
     assert calc["ok"], calc
     aid = D.add_salmon_act(A, 1, calc, 9300, acts.TRIM_PRICE)
     row = [r for r in D.get_salmon_acts([A]) if r["id"] == aid][0]
+    assert row["weight_trim"] == 2, row
+    assert not row["weight_fry"] and not row["weight_teriyaki"], row
+    print("  [OK] в разборе обрезки целы, жарки в нём нет")
+
+
+def test_frying_is_a_separate_document():
+    """Жарка — свой акт со своим сводом. В свод разбора она не заезжает: там
+    списывают рыбу, здесь обрезки и соус, и смешать их нельзя."""
+    calc = acts.fry_teriyaki(2, 1.3, g_sauce=260, sauce_price=4200)
+    assert calc["ok"], calc
+    aid = D.add_teriyaki_act(A, 1, calc)
+    row = [r for r in D.get_salmon_acts([A], kind="teriyaki") if r["id"] == aid][0]
     assert row["weight_fry"] == 2 and row["weight_teriyaki"] == 1.3, row
-    assert row["weight_trim"] == 0, row           # все обрезки ушли на сковороду
-    s = acts.summarize([row])
-    assert s["shrink"] == 0.7 and s["teriyaki_price"] > acts.TRIM_PRICE, s
-    print(f"  [OK] ужарка 0.7 кг доехала до свода, терияки {s['teriyaki_price']:.0f} ₸/кг")
-
-
-def test_sauce_survives_the_round_trip_with_its_price():
-    """Соус — граммы и цена того дня. Цену храним в строке: свод за прошлый
-    месяц не должен переезжать от новой накладной."""
-    calc = acts.split_salmon(9300, 10, 7, 2, w_fry=2, w_teriyaki=1.3,
-                             g_sauce=260, sauce_price=4200)
-    assert calc["ok"], calc
-    aid = D.add_salmon_act(A, 1, calc, 9300, acts.TRIM_PRICE)
-    row = [r for r in D.get_salmon_acts([A]) if r["id"] == aid][0]
     assert row["weight_sauce"] == 260 and row["sauce_price"] == 4200, row
-    s = acts.summarize([row])
-    assert s["sauce"] == 260.0 and s["sauce_sum"] == 1092.0, s     # 0.26 кг × 4 200
+    assert row["weight_raw"] in (0, None), row          # весов разбора у жарки нет
+
+    s = acts.summarize_teriyaki([row])
+    assert s["fry"] == 2 and s["shrink"] == 0.7, s
+    assert s["sauce"] == 260.0 and s["sauce_sum"] == 1092.0, s      # 0.26 кг × 4 200
     assert s["sauce_g_per_kg"] == 200.0, s
-    # рыбные деньги от соуса не поехали
-    dry = acts.summarize([{**row, "weight_sauce": 0, "sauce_price": 0}])
-    assert s["slice_price"] == dry["slice_price"], (s, dry)
-    assert s["teriyaki_sum"] == dry["teriyaki_sum"] + 1092.0, (s, dry)
-    print(f"  [OK] соус {s['sauce']} г на {s['sauce_sum']} ₸ доехал до свода, "
-          f"нарезка {s['slice_price']:.0f} ₸/кг не сдвинулась")
+    assert s["teriyaki_price"] > acts.TRIM_PRICE, s
+
+    # и в своде разбора этой строки нет — своды не смешиваются
+    assert aid not in [r["id"] for r in D.get_salmon_acts([A])], aid
+    print(f"  [OK] жарка #{aid} в своём своде: ужарка {s['shrink']} кг, "
+          f"терияки {s['teriyaki_price']:.0f} ₸/кг")
 
 
 if __name__ == "__main__":
@@ -153,8 +154,8 @@ if __name__ == "__main__":
               test_foreign_branch_cannot_close_or_delete, test_posted_act_cannot_be_deleted,
               test_network_table_lists_every_branch_that_worked,
               test_eel_acts_do_not_mix_into_the_salmon_summary,
-              test_sauce_survives_the_round_trip_with_its_price,
-              test_frying_loss_survives_the_round_trip):
+              test_frying_is_a_separate_document,
+              test_the_act_keeps_all_the_trim):
         print(f"\n>>> {t.__name__}")
         try:
             t()

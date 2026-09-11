@@ -5,6 +5,9 @@ import slicePhoto from '../assets/salmon/slice.webp'
 import trimPhoto from '../assets/salmon/trim.webp'
 import teriyakiPhoto from '../assets/salmon/teriyaki.webp'
 import wastePhoto from '../assets/salmon/waste.webp'
+import eelRawPhoto from '../assets/eel/raw.webp'
+import eelSlicePhoto from '../assets/eel/slice.webp'
+import eelTrimPhoto from '../assets/eel/trim.webp'
 
 /* Общее для трёх карточек разбора: фото позиций, поля и мелкая типографика.
 
@@ -16,18 +19,22 @@ export const PHOTO = {
   teriyaki: teriyakiPhoto, waste: wastePhoto,
 }
 
-/* Фото сняты для лосося. Угря так же не сфотографировали — до тех пор у него
-   знаки: узнать позицию всё равно надо с одного взгляда, а чужая рыба на
-   картинке хуже, чем честный значок. Соус тоже пока знаком: бутылка на фото
+/* Угорь приходит уже копчёным пластом, и на своих фото он на лосося не похож
+   совсем — потому у него свой набор, а не лососёвый. Отход не сняли ни у той,
+   ни у другой рыбы по-отдельности: кости и кожа выглядят одинаково. */
+export const EEL_PHOTO = { raw: eelRawPhoto, slice: eelSlicePhoto, trim: eelTrimPhoto,
+                           waste: wastePhoto }
+
+/* Где фото нет — знак: узнать позицию надо с одного взгляда, а чужая рыба на
+   картинке хуже, чем честный значок. Соус знаком и останется: бутылка на фото
    от бутылки на полке не отличается ничем, а вот кусок со сковороды — да. */
 export const GLYPH = { raw: '🐟', slice: '🍣', trim: '✂️', teriyaki: '🍢', sauce: '🍯', waste: '🦴' }
 
 export type Slot = 'raw' | 'slice' | 'trim' | 'teriyaki' | 'waste'
 
-/** Картинки вида разбора: у лосося фото, у остальных — undefined, и плитка
-    сама покажет знак. */
+/** Картинки вида разбора: у каждой рыбы свои. */
 export const photosOf = (kind: string): Partial<Record<Slot, string>> =>
-  kind === 'eel' ? {} : PHOTO
+  kind === 'eel' ? EEL_PHOTO : PHOTO
 
 export const kg = (n: number | null | undefined) =>
   (Number(n) || 0).toLocaleString('ru-RU', { maximumFractionDigits: 2 })

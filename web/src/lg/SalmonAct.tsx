@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { Glass } from './ui'
 import { tenge } from '../lib/format'
 import { Button, Eyebrow, GLYPH, Segmented, Tile, field, kg, pc, photosOf, td, tdR, th, wasteTone } from './salmonKit'
 import SalmonPeriod from './SalmonPeriod'
 import SalmonNetwork from './SalmonNetwork'
+import TeriyakiAct from './TeriyakiAct'
 
 /* «Акты и разборы» — рядом с горой, на тех же ссылках.
 
@@ -12,18 +13,16 @@ import SalmonNetwork from './SalmonNetwork'
    в руках: вход, нарезку и обрезки на выходе. Отход (кости и кожа) не
    взвешивают — он остаток веса, и его процент и есть оценка разбора.
 
-   У лосося есть терияки. Это те же обрезки, снятые со сковороды, поэтому
-   вводят ДВА веса: сколько обрезков положили жарить и сколько сняли. Разница —
-   ужарка: вес ушёл, деньги остались, и килограмм терияки ровно на неё дороже
-   килограмма обрезков. Рядом третье поле — ГРАММЫ соуса: соус приходит своей
-   накладной, его цену мы берём из iiko, и он единственный в этом экране, кто
-   деньги добавляет, а не переносит. Сумма акта от него не двигается.
+   Жарки здесь НЕТ. Терияки — это уже не разбор рыбы, а передел обрезков на
+   сковороде, и он живёт своей вкладкой: смешанные в одном экране, они путали
+   вопрос «насколько аккуратно разделали рыбу» с вопросом «сколько дала
+   сковорода».
 
    В iiko поштучно ничего не уходит: каждый разбор фиксируется у нас, а за
    период администратор заносит ОДИН сводный акт руками. Два документа на один
    и тот же вес задвоили бы списание.
 
-   Цены — вход, соус, а у угря и обрезки — тянутся из накладных: вбитая с
+   Цены — вход, а у угря и обрезки — тянутся из накладных: вбитая с
    потолка цифра превращает себестоимость в фантазию. Поля рядом всё равно
    есть: бывает разовый закуп по другой цене, и заставлять человека верить
    истории накладных в таком случае неправильно. */
@@ -34,33 +33,27 @@ type Ctx = {
   role?: 'owner' | 'manager'
   branch?: { organization_id: string; name: string }
   branches?: { organization_id: string; name: string }[]
-  products?: { raw: Prod; trim: Prod; slice: Prod; waste: Prod; teriyaki?: Prod; sauce?: Prod }
+  products?: { raw: Prod; trim: Prod; slice: Prod; waste: Prod }
   price_per_kg?: number
   price_from?: string
   trim_price?: number
   trim_from?: string
   trim_const?: boolean        // обрезки по константе учёта, а не из накладных
-  sauce_price?: number
-  sauce_from?: string
   kind?: string
   title?: string
   raw_label?: string
   raw_short?: string
-  teriyaki?: boolean
   kinds?: { key: string; title: string; tab: string }[]
 }
-type Line = { weight: number; price_per_kg: number; sum: number; from_trim?: number; shrink?: number }
-type Sauce = { grams: number; weight: number; price_per_kg: number; sum: number }
+type Line = { weight: number; price_per_kg: number; sum: number }
 type Calc = {
   ok: boolean; error?: string
-  raw?: Line; slice?: Line; trim?: Line; waste?: Line; teriyaki?: Line; sauce?: Sauce
-  slice_pct?: number; trim_pct?: number; waste_pct?: number
-  teriyaki_pct?: number; fry_pct?: number; teriyaki_yield_pct?: number
-  sauce_g_per_kg?: number; check?: number
+  raw?: Line; slice?: Line; trim?: Line; waste?: Line
+  slice_pct?: number; trim_pct?: number; waste_pct?: number; check?: number
   saved?: boolean; id?: number
 }
 
-const KINDS = [{ k: 'salmon', t: 'Лосось' }, { k: 'eel', t: 'Угорь' }]
+const KINDS = [{ k: 'salmon', t: 'Лосось' }, { k: 'eel', t: 'Угорь' }, { k: 'teriyaki', t: 'Терияки' }]
 const num = (s: string) => Number(s.replace(',', '.')) || 0
 
 export default function SalmonAct({ token }: { token: string }) {
@@ -70,23 +63,28 @@ export default function SalmonAct({ token }: { token: string }) {
   const [raw, setRaw] = useState('')
   const [slice, setSlice] = useState('')
   const [trim, setTrim] = useState('')
-  const [fry, setFry] = useState('')          // обрезков положили на сковороду
-  const [ter, setTer] = useState('')          // терияки сняли со сковороды
-  const [sauce, setSauce] = useState('')      // соуса налили, ГРАММЫ
   const [price, setPrice] = useState('')          // пусто = цена из накладных
   const [trimPrice, setTrimPrice] = useState('')  // пусто = константа или накладная
-  const [saucePrice, setSaucePrice] = useState('')  // пусто = цена соуса из накладных
   const [calc, setCalc] = useState<Calc | null>(null)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState<Calc | null>(null)
   const [reload, setReload] = useState(0)         // счётчик: обновить свод и сеть
   const still = useReducedMotion()
 
+  /* Филиал приходит из первого же ответа, и раньше это гнало второй запрос за
+     тем же филиалом — а на время него экран обнулялся и мигал «Гружу
+     справочник…». Помним, за чем уже сходили; рыбу чистит pickKind. */
+  const loadedKey = useRef('')
   useEffect(() => {
-    setCtx(null)
+    if (kind === 'teriyaki') return          // у передела свой экран и свой запрос
+    if (loadedKey.current === `${kind}|${org}`) return
     fetch(`/api/acts/${kind}/${token}${org ? `?org=${org}` : ''}`)
       .then((r) => r.json())
-      .then((d: Ctx) => { setCtx(d); if (!org && d.branch) setOrg(d.branch.organization_id) })
+      .then((d: Ctx) => {
+        loadedKey.current = `${kind}|${d.branch?.organization_id ?? org}`
+        setCtx(d)
+        if (!org && d.branch) setOrg(d.branch.organization_id)
+      })
       .catch((e) => setCtx({ error: String(e.message || e) }))
   }, [token, org, kind])
 
@@ -94,8 +92,9 @@ export default function SalmonAct({ token }: { token: string }) {
   function pickKind(k: string) {
     if (k === kind) return
     setKind(k)
-    setRaw(''); setSlice(''); setTrim(''); setFry(''); setTer(''); setSauce('')
-    setPrice(''); setTrimPrice(''); setSaucePrice(''); setCalc(null); setSaved(null)
+    if (k !== 'teriyaki') setCtx(null)       // другая рыба — чужие позиции и цены
+    setRaw(''); setSlice(''); setTrim('')
+    setPrice(''); setTrimPrice(''); setCalc(null); setSaved(null)
   }
 
   // считаем на сервере: там же лежат тесты на эту арифметику
@@ -108,15 +107,13 @@ export default function SalmonAct({ token }: { token: string }) {
         body: JSON.stringify({
           org, weight_raw: wr, weight_slice: num(slice),
           weight_trim: num(trim),
-          weight_fry: num(fry), weight_teriyaki: num(ter), weight_sauce: num(sauce),
           price_per_kg: price ? num(price) : null,
           trim_price: trimPrice ? num(trimPrice) : null,
-          sauce_price: saucePrice ? num(saucePrice) : null,
         }),
       }).then((r) => r.json()).then(setCalc).catch(() => setCalc(null))
     }, 250)
     return () => clearTimeout(t)
-  }, [raw, slice, trim, fry, ter, sauce, price, trimPrice, saucePrice, org, token, kind])
+  }, [raw, slice, trim, price, trimPrice, org, token, kind])
 
   async function save() {
     if (!calc?.ok) return
@@ -127,16 +124,14 @@ export default function SalmonAct({ token }: { token: string }) {
         body: JSON.stringify({
           org,
           weight_raw: num(raw), weight_slice: num(slice), weight_trim: num(trim),
-          weight_fry: num(fry), weight_teriyaki: num(ter), weight_sauce: num(sauce),
           price_per_kg: price ? num(price) : null,
           trim_price: trimPrice ? num(trimPrice) : null,
-          sauce_price: saucePrice ? num(saucePrice) : null,
         }),
       })
       const d: Calc = await r.json()
       if (d.saved) {
         setSaved(d)
-        setRaw(''); setSlice(''); setTrim(''); setFry(''); setTer(''); setSauce(''); setCalc(null)
+        setRaw(''); setSlice(''); setTrim(''); setCalc(null)
         setReload((n) => n + 1)
         setTimeout(() => setSaved(null), 6000)
       } else {
@@ -153,6 +148,10 @@ export default function SalmonAct({ token }: { token: string }) {
     </div>
   )
 
+  // Терияки — не разбор: свой экран, свои адреса, свой свод. Переключатель
+  // общий только потому, что открывают их подряд.
+  if (kind === 'teriyaki') return <TeriyakiAct token={token} switcher={switcher} />
+
   if (!ctx || ctx.error) return (
     <Glass span={12}>
       <Eyebrow t="Акты и разборы" />
@@ -163,17 +162,15 @@ export default function SalmonAct({ token }: { token: string }) {
     </Glass>
   )
 
-  const p = ctx.products || { raw: null, trim: null, slice: null, waste: null, teriyaki: null, sauce: null }
+  const p = ctx.products || { raw: null, trim: null, slice: null, waste: null }
   const missing = !p.raw || !p.trim || !p.slice
   const w = calc?.ok ? calc : null
   const ph = photosOf(kind)
   const short = ctx.raw_short || 'стейк'
-  const hasTer = ctx.teriyaki !== false
   // цену спрашиваем только там, где её не нашли: у угря обрезки без константы
   // учёта, а соус в филиал мог не приходить 60 дней
   const askTrimPrice = !ctx.trim_price
   const shownTrim = Number(trimPrice ? num(trimPrice) : ctx.trim_price || 0)
-  const shownSauce = Number(saucePrice ? num(saucePrice) : ctx.sauce_price || 0)
 
   return (
     <>
@@ -199,28 +196,7 @@ export default function SalmonAct({ token }: { token: string }) {
           <Tile photo={ph.trim} glyph={GLYPH.trim} label="Обрезки"
             hint={shownTrim ? `по ${tenge(shownTrim)}` : 'цену ниже'}
             value={trim} onChange={setTrim} placeholder="2"
-            foot={w ? `${pc(w.trim_pct)} веса${num(fry) ? ' · без жарки' : ''}` : undefined} />
-          {hasTer && (
-            /* Терияки — те же обрезки, обжаренные с соусом. Два веса, потому что
-               между ними и живёт ужарка: положили 2 кг, сняли 1.4. Третье поле —
-               соус: он не вес рыбы, а деньги со стороны, и меряется граммами. */
-            <>
-              <Tile photo={ph.trim} glyph={GLYPH.trim} label="В жарку" hint="из обрезков"
-                value={fry} onChange={setFry} placeholder="0"
-                foot={w && (w.fry_pct || 0) > 0 ? `${pc(w.fry_pct)} веса` : 'обрезков на сковороду'} />
-              <Tile photo={ph.teriyaki} glyph={GLYPH.teriyaki} label="Терияки" hint="со сковороды"
-                value={ter} onChange={setTer} placeholder="0"
-                foot={w && w.teriyaki && w.teriyaki.weight > 0
-                  ? `ужарка ${kg(w.teriyaki.shrink)} кг · ${tenge(w.teriyaki.price_per_kg)}/кг`
-                  : 'сколько сняли'} />
-              <Tile glyph={GLYPH.sauce} label="Соус терияки" unit="г"
-                hint={shownSauce ? `по ${tenge(shownSauce)}/кг` : 'цену ниже'}
-                value={sauce} onChange={setSauce} placeholder="0"
-                foot={w && w.sauce && w.sauce.grams > 0
-                  ? `${kg(w.sauce_g_per_kg)} г на кг · ${tenge(w.sauce.sum)}`
-                  : 'сколько налили'} />
-            </>
-          )}
+            foot={w ? `${pc(w.trim_pct)} веса` : undefined} />
           <Tile photo={ph.waste} glyph={GLYPH.waste} label="Отход" hint="кости, кожа" readOnly
             value={w ? kg(w.waste!.weight) : ''}
             tone={w ? wasteTone(w.waste_pct || 0) : undefined}
@@ -250,13 +226,6 @@ export default function SalmonAct({ token }: { token: string }) {
                 onChange={(e) => setTrimPrice(e.target.value)} style={{ ...field, marginTop: 5 }} />
             </label>
           )}
-          {hasTer && (
-            <label style={{ fontSize: 11.5, color: 'var(--mute)' }}>Соус терияки, ₸/кг
-              <input value={saucePrice} inputMode="decimal"
-                placeholder={ctx.sauce_price ? String(ctx.sauce_price) : 'нет в накладных'}
-                onChange={(e) => setSaucePrice(e.target.value)} style={{ ...field, marginTop: 5 }} />
-            </label>
-          )}
         </div>
 
         <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
@@ -266,9 +235,6 @@ export default function SalmonAct({ token }: { token: string }) {
           {askTrimPrice && <> Обрезков этой рыбы в накладных за 60 дней нет, а константы учёта у неё ещё не назначили — цену вводят здесь.</>}
           {!askTrimPrice && !ctx.trim_const && ctx.trim_from
             && <> Обрезки — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price || 0)}/кг</b> из накладных · {ctx.trim_from}.</>}
-          {hasTer && (ctx.sauce_price
-            ? <> Соус — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.sauce_price)}/кг</b> из накладных{ctx.sauce_from ? ` · ${ctx.sauce_from}` : ''}; в акт он добавляет деньги со стороны и сумму разбора не двигает.</>
-            : <> Соуса терияки в накладных за 60 дней нет — если его лили, впиши цену, иначе граммы не во что пересчитать.</>)}
         </div>
 
         {calc && !calc.ok && (
@@ -303,31 +269,6 @@ export default function SalmonAct({ token }: { token: string }) {
                   <td style={tdR}>{tenge(w.trim!.price_per_kg)}</td>
                   <td style={tdR}>{tenge(w.trim!.sum)}</td>
                 </tr>
-                {w.teriyaki && w.teriyaki.weight > 0 && (
-                  <tr>
-                    <td style={{ ...td, color: 'var(--amb)' }}>{p.teriyaki?.name || 'П/Ф Лосось терияки'}{' '}
-                      <span style={{ color: 'var(--mute)', fontSize: 11 }}>
-                        · из {kg(w.teriyaki.from_trim)} кг обрезков, ужарка {kg(w.teriyaki.shrink)}
-                        {w.sauce && w.sauce.grams > 0 ? `, соуса ${kg(w.sauce.grams)} г` : ''}
-                      </span>
-                    </td>
-                    <td style={tdR}>{kg(w.teriyaki.weight)}</td>
-                    <td style={tdR}>{tenge(w.teriyaki.price_per_kg)}</td>
-                    <td style={tdR}>{tenge(w.teriyaki.sum)}</td>
-                  </tr>
-                )}
-                {w.sauce && w.sauce.grams > 0 && (
-                  /* Соус отдельной строкой и с плюсом: в iiko он списывается
-                     своим товаром, и в сходимость акта по рыбе не входит. */
-                  <tr>
-                    <td style={{ ...td, color: 'var(--mute)' }}>{p.sauce?.name || 'Соус терияки'}{' '}
-                      <span style={{ fontSize: 11 }}>· со своего склада, сверх разбора</span>
-                    </td>
-                    <td style={tdR}>{kg(w.sauce.grams)} г</td>
-                    <td style={tdR}>{tenge(w.sauce.price_per_kg)}</td>
-                    <td style={tdR}>+{tenge(w.sauce.sum)}</td>
-                  </tr>
-                )}
                 <tr>
                   <td style={{ ...td, color: 'var(--mute)' }}>{p.waste?.name || 'Отход'} <span style={{ fontSize: 11 }}>· по нулю</span></td>
                   <td style={tdR}>{kg(w.waste!.weight)}</td>
@@ -340,18 +281,8 @@ export default function SalmonAct({ token }: { token: string }) {
             <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
               <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)}</b></span>
               <span>В обрезки <b style={{ color: 'var(--hi)' }}>{pc(w.trim_pct)}</b></span>
-              {(w.teriyaki_pct || 0) > 0 && (
-                <span>
-                  Выход жарки <b style={{ color: (w.teriyaki_yield_pct || 0) >= 70 ? 'var(--grn)' : 'var(--amb)' }}>
-                    {pc(w.teriyaki_yield_pct)}
-                  </b>
-                </span>
-              )}
-              {(w.sauce_g_per_kg || 0) > 0 && (
-                <span>Соуса <b style={{ color: 'var(--hi)' }}>{kg(w.sauce_g_per_kg)} г</b> на кг</span>
-              )}
               <span>
-                Сходимость{w.sauce && w.sauce.grams > 0 ? ' по рыбе' : ''}:&nbsp;
+                Сходимость:&nbsp;
                 <b style={{ color: Math.abs((w.check || 0) - w.raw!.sum) < 0.01 ? 'var(--grn)' : 'var(--red)' }}>
                   {tenge(w.check || 0)} из {tenge(w.raw!.sum)}
                 </b>

@@ -2885,23 +2885,45 @@ def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],
                    price_per_kg: float, trim_price: float, note: str = "",
                    kind: str = "salmon") -> int:
     """Фиксируем разбор. calc — результат acts.split_act."""
+    conn = get_db()
+    _ensure_salmon(conn)
+    cur = conn.execute(
+        "INSERT INTO salmon_acts (organization_id, kind, created_at, created_by, weight_raw, "
+        "weight_slice, weight_trim, weight_waste, price_per_kg, trim_price, slice_price, note) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (org_id, kind or "salmon", datetime.now().isoformat(), int(created_by or 0),
+         float(calc["raw"]["weight"]), float(calc["slice"]["weight"]),
+         float(calc["trim"]["weight"]), float(calc["waste"]["weight"]),
+         float(price_per_kg or 0), float(trim_price or 0),
+         float(calc["slice"]["price_per_kg"] or 0), (note or "")[:300]))
+    conn.commit()
+    aid = cur.lastrowid
+    conn.close()
+    return aid
+
+
+def add_teriyaki_act(org_id: str, created_by: int, calc: Dict[str, Any],
+                     note: str = "") -> int:
+    """Фиксируем жарку. calc — результат acts.fry_teriyaki.
+
+    Живёт в той же таблице под kind='teriyaki': период, проводка и удаление у
+    них общие, а вот колонки разные — у жарки заняты weight_fry/weight_teriyaki/
+    weight_sauce, а весов разбора нет вовсе. Поэтому и свод свой:
+    acts.summarize_teriyaki, а не acts.summarize.
+    """
     ter = calc.get("teriyaki") or {}
     sauce = calc.get("sauce") or {}
     conn = get_db()
     _ensure_salmon(conn)
     cur = conn.execute(
-        "INSERT INTO salmon_acts (organization_id, kind, created_at, created_by, weight_raw, "
-        "weight_slice, weight_trim, weight_fry, weight_teriyaki, weight_sauce, sauce_price, "
-        "weight_waste, price_per_kg, trim_price, slice_price, note) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (org_id, kind or "salmon", datetime.now().isoformat(), int(created_by or 0),
-         float(calc["raw"]["weight"]), float(calc["slice"]["weight"]),
-         float(calc["trim"]["weight"]),
+        "INSERT INTO salmon_acts (organization_id, kind, created_at, created_by, "
+        "weight_fry, weight_teriyaki, weight_sauce, trim_price, sauce_price, slice_price, note) "
+        "VALUES (?,'teriyaki',?,?,?,?,?,?,?,?,?)",
+        (org_id, datetime.now().isoformat(), int(created_by or 0),
          float(ter.get("from_trim") or 0), float(ter.get("weight") or 0),
-         float(sauce.get("grams") or 0), float(sauce.get("price_per_kg") or 0),
-         float(calc["waste"]["weight"]),
-         float(price_per_kg or 0), float(trim_price or 0),
-         float(calc["slice"]["price_per_kg"] or 0), (note or "")[:300]))
+         float(sauce.get("grams") or 0),
+         float(calc.get("trim_price") or 0), float(sauce.get("price_per_kg") or 0),
+         float(ter.get("price_per_kg") or 0), (note or "")[:300]))
     conn.commit()
     aid = cur.lastrowid
     conn.close()

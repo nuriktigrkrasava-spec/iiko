@@ -14,7 +14,6 @@ import { Eyebrow, Segmented, field, iso, kg, pc, periodBounds, td, tdR, th, wast
 type Row = {
   organization_id: string; name: string; mine: boolean
   acts: number; raw: number; slice: number; trim: number; waste: number
-  teriyaki: number; teriyaki_yield_pct: number
   slice_price: number; slice_pct: number; trim_pct: number; waste_pct: number
 }
 type Data = { period?: { from: string; to: string }; branches?: Row[]; total?: Row; error?: string }
@@ -38,9 +37,6 @@ export default function SalmonNetwork({ token, kind, reload }: {
   useEffect(load, [load, reload])
 
   const rows = d?.branches || []
-  // выход жарки — тоже сравнение филиалов: из одних и тех же обрезков у одного
-  // выходит 70 % терияки, у другого 55. Колонка появляется, только если жарили
-  const fried = rows.some((r) => (r.teriyaki || 0) > 0)
   const worst = Math.max(10, ...rows.map((r) => r.waste_pct))
   const cheapest = Math.min(...rows.filter((r) => r.slice_price > 0).map((r) => r.slice_price))
 
@@ -74,7 +70,6 @@ export default function SalmonNetwork({ token, kind, reload }: {
                 <th style={th}>Филиал</th>
                 <th style={{ ...th, textAlign: 'right' }}>Вход, кг</th>
                 <th style={{ ...th, textAlign: 'right' }}>Нарезка ₸/кг</th>
-                {fried && <th style={{ ...th, textAlign: 'right' }}>Выход жарки</th>}
                 <th style={{ ...th, textAlign: 'right', width: '34%' }}>Отход</th>
               </tr></thead>
               <tbody>
@@ -91,11 +86,6 @@ export default function SalmonNetwork({ token, kind, reload }: {
                     <td style={{ ...tdR, color: r.slice_price === cheapest ? 'var(--grn)' : undefined, fontWeight: r.slice_price === cheapest ? 700 : 400 }}>
                       {tenge(r.slice_price)}
                     </td>
-                    {fried && (
-                      <td style={tdR}>
-                        {r.teriyaki ? pc(r.teriyaki_yield_pct) : '—'}
-                      </td>
-                    )}
                     <td style={tdR}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 9, justifyContent: 'flex-end' }}>
                         <span className="sal-bar">
