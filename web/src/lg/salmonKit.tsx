@@ -4,6 +4,7 @@ import steakPhoto from '../assets/salmon/steak.webp'
 import slicePhoto from '../assets/salmon/slice.webp'
 import trimPhoto from '../assets/salmon/trim.webp'
 import teriyakiPhoto from '../assets/salmon/teriyaki.webp'
+import saucePhoto from '../assets/salmon/sauce.webp'
 import wastePhoto from '../assets/salmon/waste.webp'
 import eelRawPhoto from '../assets/eel/raw.webp'
 import eelSlicePhoto from '../assets/eel/slice.webp'
@@ -16,7 +17,7 @@ import eelTrimPhoto from '../assets/eel/trim.webp'
 
 export const PHOTO = {
   raw: steakPhoto, slice: slicePhoto, trim: trimPhoto,
-  teriyaki: teriyakiPhoto, waste: wastePhoto,
+  teriyaki: teriyakiPhoto, sauce: saucePhoto, waste: wastePhoto,
 }
 
 /* Угорь приходит уже копчёным пластом, и на своих фото он на лосося не похож
@@ -26,8 +27,7 @@ export const EEL_PHOTO = { raw: eelRawPhoto, slice: eelSlicePhoto, trim: eelTrim
                            waste: wastePhoto }
 
 /* Где фото нет — знак: узнать позицию надо с одного взгляда, а чужая рыба на
-   картинке хуже, чем честный значок. Соус знаком и останется: бутылка на фото
-   от бутылки на полке не отличается ничем, а вот кусок со сковороды — да. */
+   картинке хуже, чем честный значок. */
 export const GLYPH = { raw: '🐟', slice: '🍣', trim: '✂️', teriyaki: '🍢', sauce: '🍯', waste: '🦴' }
 
 export type Slot = 'raw' | 'slice' | 'trim' | 'teriyaki' | 'waste'

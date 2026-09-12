@@ -115,6 +115,22 @@ def test_eel_splits_like_salmon():
     print(f"  [OK] угорь: нарезка {r['slice']['price_per_kg']} ₸/кг, отход {r['waste_pct']}%")
 
 
+def test_eel_counts_by_the_very_same_formula():
+    """Формула у угря та же, что у лосося: вход → нарезка + обрезки + отход.
+
+    Рыбы отличаются только названиями позиций и тем, откуда берётся цена
+    обрезков. Сама арифметика обязана совпадать до копейки — иначе два свода по
+    сети сравнивать нельзя, а вся публичная таблица филиалов на этом и стоит.
+    """
+    same = dict(trim_price=8800)
+    a = acts.split_act(9300, 10, 7.5, 1.5, kind="salmon", **same)
+    b = acts.split_act(9300, 10, 7.5, 1.5, kind="eel", **same)
+    for field in ("slice", "trim", "waste", "slice_pct", "trim_pct", "waste_pct", "check"):
+        assert a[field] == b[field], (field, a[field], b[field])
+    assert a["kind"] != b["kind"], "вид разбора всё же разный"
+    print(f"  [OK] угорь считается той же формулой: нарезка {b['slice']['price_per_kg']} ₸/кг")
+
+
 def test_eel_error_speaks_about_the_eel():
     """Угорь приходит пластом, и ошибка называет то, что человек держит."""
     bad = acts.split_act(14000, 0, 0, kind="eel")

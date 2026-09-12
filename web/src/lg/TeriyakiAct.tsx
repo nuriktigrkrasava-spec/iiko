@@ -158,7 +158,7 @@ export default function TeriyakiAct({ token, switcher }: {
           <Tile photo={PHOTO.teriyaki} glyph={GLYPH.teriyaki} label="Терияки" hint="со сковороды"
             value={out} onChange={setOut} placeholder="1,4"
             foot={w ? `${tenge(w.teriyaki!.price_per_kg)}/кг` : 'сколько сняли'} />
-          <Tile glyph={GLYPH.sauce} label="Соус терияки" unit="г"
+          <Tile photo={PHOTO.sauce} glyph={GLYPH.sauce} label="Соус терияки" unit="г"
             hint={shownSauce ? `по ${tenge(shownSauce)}/кг` : 'цену ниже'}
             value={sauce} onChange={setSauce} placeholder="200"
             foot={w && w.sauce && w.sauce.grams > 0
