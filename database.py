@@ -1867,6 +1867,11 @@ def upsert_director_task(org_id: str, key: str, metric: str, value: float,
 
     baseline пишется ОДИН раз — при первом появлении. Иначе прогресс всегда был бы
     нулевым: показатель уехал бы вместе с точкой отсчёта.
+
+    В ответе есть `is_new`: True ровно один раз — в тот заход, когда задача
+    появилась. По нему шлётся уведомление управляющему. Без этого признака
+    уведомление уходило бы на КАЖДЫЙ пересчёт, а пересчёт идёт при каждом
+    открытии экрана — человек получал бы одну и ту же задачу десять раз за день.
     """
     conn = get_db()
     _ensure_director_tasks(conn)
@@ -1874,7 +1879,8 @@ def upsert_director_task(org_id: str, key: str, metric: str, value: float,
     row = conn.execute(
         "SELECT * FROM director_tasks WHERE organization_id = ? AND task_key = ?",
         (org_id, key)).fetchone()
-    if row is None:
+    is_new = row is None
+    if is_new:
         conn.execute(
             """INSERT INTO director_tasks (organization_id, task_key, metric, baseline,
                    target, money, created_at, status, last_value, updated_at)
@@ -1891,7 +1897,7 @@ def upsert_director_task(org_id: str, key: str, metric: str, value: float,
         "SELECT * FROM director_tasks WHERE organization_id = ? AND task_key = ?",
         (org_id, key)).fetchone()
     conn.close()
-    return dict(out) if out else {}
+    return {**dict(out), "is_new": is_new} if out else {}
 
 
 def close_director_task(org_id: str, key: str, value: float):

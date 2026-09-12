@@ -615,6 +615,7 @@ async def mountain_assign(token: str, payload: AssignPayload):
         return JSONResponse({"error": "задачи ставит только владелец"}, status_code=403)
     allowed = {b["organization_id"]: b["name"] for b in sc["branches"]}
     created = 0
+    fresh: List[tuple] = []            # что поставили — чтобы догнать в телеграм
     for t in payload.tasks:
         org = str(t.get("organization_id") or "")
         title = str(t.get("title") or "").strip()
@@ -625,7 +626,42 @@ async def mountain_assign(token: str, payload: AssignPayload):
                         money=float(t.get("money") or 0), effort=effort,
                         task_key=str(t.get("task_key") or ""), created_by=uid)
         created += 1
-    return JSONResponse({"ok": True, "created": created})
+        fresh.append((org, allowed[org], title, str(t.get("detail") or "")))
+    notified = await _tasks_to_telegram(fresh, author=uid)
+    return JSONResponse({"ok": True, "created": created, "telegram": notified})
+
+
+async def _tasks_to_telegram(fresh: List[tuple], author: int) -> int:
+    """Догоняет поставленные задачи в телеграме. Возвращает число писем.
+
+    Без кнопок «Сделал / Не успел»: эта задача живёт на «Горе» и закрывается
+    там же, а кнопка завела бы ВТОРУЮ задачу в другой таблице — человек закрыл
+    бы её в чате, а на доске она осталась бы висеть.
+
+    Телеграм тут дубль: задача уже записана, и молчащий бот не должен
+    выглядеть как «задача не поставлена».
+    """
+    import api                                   # ленивый импорт: избегаем цикла
+    from database import get_branch_managers
+    if not fresh:
+        return 0
+    by_org: Dict[str, List[int]] = {}
+    for m in get_branch_managers():
+        tg = int(m.get("telegram_id") or 0)
+        if tg and tg != author:                  # себе своё же не шлём
+            by_org.setdefault(m["organization_id"], []).append(tg)
+    sent = 0
+    for org, branch, title, detail in fresh:
+        body = (f"📌 <b>{title}</b>\n<i>{branch}</i>"
+                + (f"\n\n{detail}" if detail else "")
+                + "\n\nОтметить сделанной — на «Горе».")
+        for tg in by_org.get(org, []):
+            try:
+                await api._tg_send(tg, body)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"[assign] телеграм {tg}: {e!r}")
+    return sent
 
 
 class ClosePayload(BaseModel):
@@ -1231,8 +1267,10 @@ async def journals_mark(token: str, payload: JournalPayload):
 
 
 # ── Консоль владельца: сообщение управляющим ─────────────────────────────────
-# Уведомление живёт на сайте, а не в чате: управляющий и так открывает «Гору»
-# каждый день ради задач и чек-листов. Владелец видит, кто прочитал.
+# Уведомление живёт на сайте И дублируется в телеграм. Сайт остаётся источником
+# правды: там отметка «прочитал», по которой владелец судит, дошло ли. Но ждать,
+# пока человек сам откроет «Гору», нельзя — срочное сообщение так лежит до
+# вечера. Телеграм догоняет его там, где он и так весь день.
 from database import (add_branch_notice, get_branch_notices, mark_notice_read,
                       notice_is_for, notice_read_stats)
 
@@ -1259,7 +1297,38 @@ async def notice_send(token: str, payload: NoticePayload):
     if org and org not in {b["organization_id"] for b in sc["branches"]}:
         return JSONResponse({"error": "чужой филиал"}, status_code=403)
     nid = add_branch_notice(text, uid, org)
-    return JSONResponse({"ok": True, "id": nid})
+    sent = await _notice_to_telegram(sc, org, text, author=uid)
+    return JSONResponse({"ok": True, "id": nid, "telegram": sent})
+
+
+async def _notice_to_telegram(sc: Dict[str, Any], org: str, text: str,
+                              author: int) -> int:
+    """Догоняет сообщение в телеграме. Возвращает, скольким людям ушло.
+
+    Телеграм здесь — дубль, а не доставка: уведомление уже записано, и если бот
+    молчит, владелец всё равно увидит его на сайте. Поэтому ни одна ошибка
+    отсюда не роняет ручку — иначе упавший телеграм означал бы «сообщение не
+    отправлено», хотя оно отправлено.
+    """
+    import api                                   # ленивый импорт: избегаем цикла
+    from database import get_branch_managers
+    orgs = [org] if org else [b["organization_id"] for b in sc["branches"]]
+    body = "📣 <b>Сообщение от руководства</b>\n\n" + text
+    sent, seen = 0, {author}                     # себе своё же сообщение не шлём
+    for m in get_branch_managers():
+        if m["organization_id"] not in orgs:
+            continue
+        tg = int(m["telegram_id"] or 0)
+        # один человек на двух филиалах получает ОДНО сообщение, а не две копии
+        if not tg or tg in seen:
+            continue
+        seen.add(tg)
+        try:
+            await api._tg_send(tg, body)
+            sent += 1
+        except Exception as e:
+            logger.warning(f"[notice] телеграм {tg}: {e!r}")
+    return sent
 
 
 @router.get("/api/mountain/notices/{token}")

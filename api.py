@@ -8377,8 +8377,11 @@ async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
                               float(worst["rating"]), target, 0, False))
 
     out = []
+    fresh = []                      # задачи, появившиеся именно в этот заход
     for key, metric, value, target, money, lower_better in found:
         row = upsert_director_task(real_org, key, metric, value, target, money)
+        if row.get("is_new"):
+            fresh.append((metric, value, target, money))
         base = float(row.get("baseline") if row.get("baseline") is not None else value)
         span = (base - target) if lower_better else (target - base)
         moved = (base - value) if lower_better else (value - base)
@@ -8409,6 +8412,12 @@ async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
             "target": row.get("target"), "money": row.get("money") or 0,
             "progress": 100, "status": "done", "created_at": row.get("created_at"),
         })
+
+    # Новые задачи догоняем в телеграм. Уведомление без обратной связи — шум,
+    # поэтому шлём тем же отправщиком, что даёт кнопки «Сделал / Не успел»:
+    # владелец потом видит, взялись за задачу или она висит вторую неделю.
+    if fresh:
+        await _notify_new_tasks(real_org, fresh)
 
     done = [t for t in out if t["status"] == "done"]
     out.sort(key=lambda t: (t["status"] == "done", -(t["money"] or 0)))
@@ -10216,55 +10225,80 @@ RU_DOW_PREV = ["прошлому понедельнику", "прошлому в
                "прошлому воскресенью"]
 
 
+async def _branch_night(r: Dict[str, Any], yesterday: str, week_ago: str) -> Optional[Dict[str, Any]]:
+    """Ночные цифры одного филиала: смены за вчера и выручка неделю назад."""
+    name = r.get("organization_name") or "Филиал"
+    try:
+        client = get_client(r["api_login"], r.get("iiko_server"), r.get("api_password"))
+        if not hasattr(client, "get_cashshifts"):
+            return None
+        sessions = await _branch_sessions(client, name, yesterday, yesterday)
+    except Exception as e:
+        logger.warning(f"[daily_shifts] {name}: {e}")
+        return None
+    prev, got_prev = 0.0, False
+    try:
+        prev_sessions = await _branch_sessions(client, name, week_ago, week_ago)
+        prev = sum(float(s.get("payOrders") or 0) for s in prev_sessions)
+        got_prev = bool(prev_sessions)
+    except Exception as e:
+        logger.warning(f"[daily_shifts] прошлая неделя {name}: {e}")
+    return {"org": r.get("organization_id"), "name": name[:28],
+            "sessions": sessions, "prev": prev, "got_prev": got_prev,
+            "rev": sum(float(s.get("payOrders") or 0) for s in sessions)}
+
+
 async def _send_daily_shifts_report() -> bool:
-    """Сводка по сменам всех филиалов за вчера — владельцам в Telegram.
-    Плюс выручка за вчера против того же дня недели назад (сб к сб, а не к пт —
-    иначе после выходных всегда ложное «падение»)."""
+    """Сводка по сменам за вчера — в конце дня, когда цифра уже окончательная.
+
+    Каждый telegram_id получает только свои филиалы (см. _report_recipients):
+    владельцу — сеть, управляющему — его точка. Раньше группировка шла по
+    restaurants.telegram_id, то есть выручку в конце дня видел только владелец,
+    а управляющий — нет, хотя именно он на неё и влияет.
+
+    Филиалы считаем ОДИН раз на всех: точка, у которой есть и владелец, и
+    управляющий, иначе дёргала бы кассовые смены дважды.
+
+    Выручка сравнивается с тем же днём недели назад (сб к сб, а не к пт —
+    иначе после выходных всегда ложное «падение»).
+    """
     from database import get_all_restaurants
     rests = get_all_restaurants()
     if not rests:
         return False
     yd = (local_now() - timedelta(days=1)).date()
-    yesterday = yd.isoformat()
-    week_ago = (yd - timedelta(days=7)).isoformat()
-    by_owner: Dict[int, list] = {}
-    for r in rests:
-        by_owner.setdefault(r["telegram_id"], []).append(r)
-    for tg_id, owner_rests in by_owner.items():
+    yesterday, week_ago = yd.isoformat(), (yd - timedelta(days=7)).isoformat()
+
+    sem = asyncio.Semaphore(4)
+
+    async def one(rr):
+        async with sem:
+            return await _branch_night(rr, yesterday, week_ago)
+
+    computed = await asyncio.gather(*(one(r) for r in rests), return_exceptions=True)
+    by_org: Dict[str, Dict[str, Any]] = {x["org"]: x for x in computed
+                                         if isinstance(x, dict) and x.get("org")}
+
+    for tg_id, own_rests in _report_recipients(rests).items():
+        rows = [by_org[o] for o in
+                (r.get("organization_id") for r in own_rests) if o in by_org]
         lines = [f"🌙 <b>Кассовые смены за {yesterday}</b>"]
         problems = 0
         rev_cur = rev_prev = 0.0
         got_prev = False
-        for r in owner_rests:
-            try:
-                info = {"api_login": r["api_login"], "iiko_server": r.get("iiko_server"),
-                        "api_password": r.get("api_password"), "org_name": r.get("organization_name", "")}
-                # get_all_restaurants уже возвращает расшифрованные пароли
-                client = get_client(info["api_login"], info.get("iiko_server"),
-                                    info.get("api_password"))
-                if not hasattr(client, "get_cashshifts"):
-                    continue
-                dept = r.get("organization_name", "")
-                sessions = await _branch_sessions(client, dept, yesterday, yesterday)
-                for s in sessions:
-                    diff = float(s.get("cashDiff") or 0)
-                    total = float(s.get("payOrders") or 0)
-                    rev_cur += total
-                    name = (r.get("organization_name") or "")[:28]
-                    if abs(diff) > 0.01:
-                        problems += 1
-                        lines.append(f"❌ {name}: смена №{s.get('sessionNumber')} — "
-                                     f"итого {format_money(total)}, расхождение {format_money(diff)}")
-                    else:
-                        lines.append(f"✅ {name}: №{s.get('sessionNumber')} — {format_money(total)}")
-                try:
-                    prev_sessions = await _branch_sessions(client, dept, week_ago, week_ago)
-                    rev_prev += sum(float(s.get("payOrders") or 0) for s in prev_sessions)
-                    got_prev = got_prev or bool(prev_sessions)
-                except Exception as e:
-                    logger.warning(f"[daily_shifts] прошлая неделя {r.get('organization_name')}: {e}")
-            except Exception as e:
-                logger.warning(f"[daily_shifts] {r.get('organization_name')}: {e}")
+        for x in rows:
+            rev_cur += x["rev"]
+            rev_prev += x["prev"]
+            got_prev = got_prev or x["got_prev"]
+            for s in x["sessions"]:
+                diff = float(s.get("cashDiff") or 0)
+                total = float(s.get("payOrders") or 0)
+                if abs(diff) > 0.01:
+                    problems += 1
+                    lines.append(f"❌ {x['name']}: смена №{s.get('sessionNumber')} — "
+                                 f"итого {format_money(total)}, расхождение {format_money(diff)}")
+                else:
+                    lines.append(f"✅ {x['name']}: №{s.get('sessionNumber')} — {format_money(total)}")
         if len(lines) > 1:
             lines.insert(1, f"Проблемных смен: {problems}" if problems else "Все смены без расхождений 👌")
             rev_line = f"\n💰 Выручка вчера: <b>{format_money(rev_cur)}</b>"
@@ -10675,6 +10709,33 @@ def _orgs_from_invite(payload: str) -> List[str]:
         return []
     expect = _invite_sign(orgs[0]) if n == 1 else _invite_sign_many(orgs)
     return orgs if hmac.compare_digest(expect, sig) else []
+
+
+async def _notify_new_tasks(org_id: str, fresh: List[tuple]) -> int:
+    """Шлёт управляющим филиала задачи, появившиеся только что. Best-effort.
+
+    Только управляющим: владелец эти задачи и так видит на экране, с которого
+    они и посчитались, — дубль в чат ему не нужен. Падение телеграма не роняет
+    ручку: план уже посчитан, и отдать его важнее, чем доставить уведомление.
+    """
+    from database import get_branch_managers, branch_name
+    if not BOT_TOKEN:
+        return 0
+    branch = branch_name(org_id) or "Филиал"
+    sent = 0
+    for m in get_branch_managers(org_id):
+        tg = int(m.get("telegram_id") or 0)
+        if not tg:
+            continue
+        for metric, value, target, money in fresh:
+            try:
+                await _send_task(tg, org_id, branch, f"Новая задача · {metric}",
+                                 f"Сейчас {value:g} при цели {target:g}. "
+                                 f"Отметь кнопкой, когда разберёшься.", money)
+                sent += 1
+            except Exception as e:
+                logger.warning(f"[director] задача {metric} → {tg}: {e!r}")
+    return sent
 
 
 async def _send_task(tg_id: int, org_id: str, branch: str, title: str,
