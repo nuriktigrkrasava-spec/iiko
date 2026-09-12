@@ -2635,199 +2635,6 @@ async def chaspik_export(
     return r.json()
 
 
-# Склад: строгий баланс по позиции — было + приход − остаток = фактически ушло;
-# сверяем с «ушло по продажам» → расхождение (недостача/фрод/списание) в тенге.
-_DEMO_STOCK_RAW = [
-    # (позиция, ед, было, приход, продано, остаток, цена ₸/ед)
-    ("Говядина рибай", "кг", 16, 42, 44, 6, 5200),
-    ("Сыр моцарелла", "кг", 24, 16, 30, 8, 3100),
-    ("Лосось филе", "кг", 12, 20, 20, 6, 6800),
-    ("Томаты", "кг", 30, 8, 33, 2, 900),
-    ("Сливки 33%", "л", 8, 28, 7, 27, 1400),
-    ("Оливковое масло", "л", 14, 6, 5, 15, 2600),
-    ("Мука", "кг", 50, 0, 12, 38, 320),
-]
-
-
-def _demo_stock() -> Dict[str, Any]:
-    rows = []
-    for name, unit, opening, incoming, sold, closing, price in _DEMO_STOCK_RAW:
-        actual = opening + incoming - closing          # фактически ушло
-        disc = actual - sold                            # расхождение (>0 — недостача)
-        disc_money = max(0, round(disc * price))
-        issue = None
-        if closing <= 2 and sold >= 25:
-            issue = "stockout"                          # стокаут ходовой — потеря выручки
-        elif closing >= 25 and sold <= 8:
-            issue = "overstock"                         # перезатарка скоропорта — будущее списание
-        rows.append({
-            "position": name, "unit": unit, "opening": opening, "incoming": incoming,
-            "sold": sold, "closing": closing, "actual_used": actual, "discrepancy": disc,
-            "discrepancy_money": disc_money, "price": price, "issue": issue,
-        })
-    rows.sort(key=lambda r: (r["discrepancy_money"], 1 if r["issue"] else 0), reverse=True)
-    return {"rows": rows, "total_discrepancy": sum(r["discrepancy_money"] for r in rows),
-            "branch": "Демо Ресторан · Алматы"}
-
-
-async def _stock_balance(client, dept: str, org_name: str, org_id_for_nom: str,
-                         date_from: str, date_to: str) -> Dict[str, Any]:
-    """Строгий баланс склада филиала: было(начало)+приход−остаток(конец)=ушло по факту;
-    сверяем с теоретическим расходом по техкартам → расхождение (утечка) в ₸."""
-    # 1. склады филиала (изоляция) — parentId == org
-    try:
-        stores = await client.get_stores(org_name)
-    except Exception:
-        stores = []
-    store_ids = {s.get("id") for s in stores if s.get("id")}
-
-    start_ts = date_from[:10] + "T00:00:00.000"
-    end_ts = date_to[:10] + "T23:59:59.000"
-    open_rows, close_rows, inc_items, fc = await asyncio.gather(
-        client.get_balance_rows(start_ts),
-        client.get_balance_rows(end_ts),
-        client.get_invoice_items_olap([dept], date_from, date_to),
-        _foodcost_month(client, dept, date_from, date_to),
-        return_exceptions=True,
-    )
-    if isinstance(open_rows, Exception) or isinstance(close_rows, Exception):
-        raise open_rows if isinstance(open_rows, Exception) else close_rows
-
-    def _agg(rows):
-        amt, summ = {}, {}
-        for r in (rows or []):
-            if store_ids and r.get("store") not in store_ids:
-                continue
-            pid = r.get("product")
-            if not pid:
-                continue
-            amt[pid] = amt.get(pid, 0.0) + float(r.get("amount", 0) or 0)
-            summ[pid] = summ.get(pid, 0.0) + float(r.get("sum", 0) or 0)
-        return amt, summ
-
-    opening, _ = _agg(open_rows)
-    closing, close_sum = _agg(close_rows)
-
-    incoming: Dict[str, float] = {}
-    if not isinstance(inc_items, Exception):
-        for it in inc_items:
-            pid = it.get("product_id")
-            if pid:
-                incoming[pid] = incoming.get(pid, 0.0) + float(it.get("amount", 0) or 0)
-
-    # 2. теоретический расход по техкартам (Σ продано×норма ингредиента)
-    consumed: Dict[str, float] = {}
-    dishes = fc[0] if (not isinstance(fc, Exception) and fc) else []
-    try:
-        name_map, prices = await asyncio.gather(client.get_dish_name_map(), client.get_stock_prices())
-        sold = [{"pid": name_map.get(str(d.get("name", "")).strip().lower()), "cnt": float(d.get("count", 0) or 0)}
-                for d in dishes]
-        pids = [s["pid"] for s in sold if s["pid"]]
-        recipes: Dict[str, list] = {}
-        for i in range(0, len(pids), 6):
-            batch = pids[i:i + 6]
-            got = await asyncio.gather(*[_get_recipe_cached(client, p, date_to[:10]) for p in batch],
-                                       return_exceptions=True)
-            for p, items in zip(batch, got):
-                recipes[p] = [] if isinstance(items, Exception) else items
-        stock_pids = set(opening) | set(closing) | set(incoming)
-        for s in sold:
-            rec = recipes.get(s["pid"], [])
-            if rec:
-                for ing in rec:
-                    ip = ing.get("productId")
-                    if ip:
-                        consumed[ip] = consumed.get(ip, 0.0) + s["cnt"] * float(ing.get("amount", 0) or 0)
-            elif s["pid"] in stock_pids:
-                # товар без техкарты, продан напрямую (напитки и т.п.) → расход = продажи
-                consumed[s["pid"]] = consumed.get(s["pid"], 0.0) + s["cnt"]
-    except Exception as e:
-        logger.warning(f"[stock] расход по техкартам {org_name}: {e!r}")
-        prices = {}
-
-    # 3. имена/ед. измерения (unit у части товаров приходит как id единицы → резолвим в «кг/шт/л»)
-    try:
-        munits = await client.get_measure_units_map()
-    except Exception:
-        munits = {}
-
-    def _unit_name(u: str) -> str:
-        if not u:
-            return ""
-        if u in munits:
-            return munits[u]
-        return "" if (len(u) >= 32 and u.count("-") >= 3) else u  # похоже на uuid — не показываем
-
-    names: Dict[str, str] = {}
-    units: Dict[str, str] = {}
-    try:
-        for p in await client.search_nomenclature(org_id_for_nom, "", limit=10000):
-            if p.get("id"):
-                names[p["id"]] = p.get("name") or ""
-                units[p["id"]] = _unit_name(p.get("unit") or "")
-    except Exception:
-        pass
-
-    pids_all = set(opening) | set(incoming) | set(closing) | set(consumed)
-    rows = []
-    for pid in pids_all:
-        op = round(opening.get(pid, 0.0), 2)
-        inc = round(incoming.get(pid, 0.0), 2)
-        cl = round(closing.get(pid, 0.0), 2)
-        sold_q = round(consumed.get(pid, 0.0), 2)
-        actual = round(op + inc - cl, 2)
-        # цена = учётная себестоимость (остаток) или из stock_prices
-        price = (close_sum.get(pid, 0.0) / closing[pid]) if closing.get(pid) else float(prices.get(pid, 0) or 0)
-        disc = round(actual - sold_q, 2)
-        disc_money = round(max(0.0, disc) * price)
-        # Отрицательный остаток в iiko = учёт по товару не ведётся (мусор) → выкидываем целиком:
-        # ни утечку по нему не посчитать, ни «−110 на складе» показывать нельзя.
-        if op < 0 or cl < 0:
-            continue
-        # интересны только позиции с движением/расхождением
-        if abs(actual) < 0.01 and sold_q < 0.01 and inc < 0.01:
-            continue
-        issue = None
-        if cl <= 0 and sold_q > 0:
-            issue = "stockout"
-        rows.append({
-            "position": names.get(pid) or pid[:8], "unit": units.get(pid, ""),
-            "opening": op, "incoming": inc, "sold": sold_q, "closing": cl,
-            "actual_used": actual, "discrepancy": disc,
-            "discrepancy_money": disc_money, "price": round(price, 2), "issue": issue,
-        })
-    rows.sort(key=lambda r: r["discrepancy_money"], reverse=True)
-    total = sum(r["discrepancy_money"] for r in rows)
-    return {"available": True, "rows": rows[:60], "total_discrepancy": total, "branch": org_name}
-
-
-@app.get("/api/stock/{org_id}")
-async def stock(org_id: str, user: Dict = Depends(get_current_user)):
-    """Склад: строгий баланс (было+приход−остаток=ушло по факту) vs расход по техкартам
-    → расхождение (утечка) в ₸. Изоляция по складу филиала."""
-    if _use_demo_data(user, org_id):
-        return _demo_stock()
-    real_org = _get_org_id(org_id, user)
-    key = _cache_key(user.get("id", 0), "stock", real_org, "month")
-    cached = _get_cached(key)
-    if cached is not None:
-        return cached
-    info = _get_restaurant_info(real_org, user)
-    login = info["api_login"]
-    date_from, date_to = get_period_dates("month")
-    client = get_client(login, info.get("iiko_server"), info.get("api_password"))
-    try:
-        res = await _stock_balance(client, _olap_dept(real_org, info),
-                                   info.get("org_name", ""), real_org, date_from, date_to)
-        _set_cached(key, res)
-        return res
-    except Exception as e:
-        logger.warning(f"[stock] {real_org}: {e!r}")
-        return {"available": False, "rows": [], "total_discrepancy": 0,
-                "branch": info.get("org_name", ""),
-                "reason": "Не удалось собрать баланс склада — обнови через минуту."}
-
-
 @app.get("/api/foodcost/{org_id}")
 async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: Dict = Depends(get_current_user)):
     if _use_demo_data(user, org_id):
@@ -8337,11 +8144,10 @@ async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
             logger.warning(f"[director-plan] {label} {real_org}: {e!r}")
             return None
 
-    fc, wo, cn, stk, rv = await asyncio.gather(
+    fc, wo, cn, rv = await asyncio.gather(
         safe(foodcost(org_id, "month", 1, user), "foodcost"),
         safe(writeoffs(org_id, "month", user), "writeoffs"),
         safe(cancels(org_id, "month", user), "cancels"),
-        safe(stock(org_id, user), "stock"),
         safe(branch_reviews(org_id, user), "reviews"),
     )
 
@@ -8362,10 +8168,6 @@ async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
     if cn and (cn.get("total_amount") or 0) > 0:
         amt = float(cn["total_amount"])
         found.append(("cn", "Отмены и возвраты", amt, 0.0, round(amt), True))
-
-    if stk and (stk.get("total_discrepancy") or 0) > 0:
-        d = float(stk["total_discrepancy"])
-        found.append(("stock", "Недостача по складу", d, 0.0, round(d), True))
 
     if rv and rv.get("platforms"):
         worst = min(rv["platforms"], key=lambda p: (p.get("rating") or 0) / (p.get("scale") or 5))

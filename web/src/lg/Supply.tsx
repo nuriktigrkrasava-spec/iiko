@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Delta, Orb, Insight, PlanFallback } from './ui'
+import { Glass, Chart, Delta, Orb, Insight } from './ui'
 import { hbar, bar } from './charts'
 import { tenge, num } from '../lib/format'
 import InvoicePunch from './InvoicePunch'
@@ -182,83 +182,6 @@ function TruckHero({ wo, total, outN, lowN, invoices }: { wo: Writeoffs; total: 
   )
 }
 
-/* ── Склад · строгий баланс (перенесён из Фудкоста, редизайн: leak-бары) ── */
-type StockRow = {
-  position: string; unit: string; opening: number; incoming: number; sold: number
-  closing: number; actual_used: number; discrepancy: number; discrepancy_money: number
-  price: number; issue: 'stockout' | 'overstock' | null
-}
-type StockData = { rows: StockRow[]; total_discrepancy: number; branch: string; available?: boolean; reason?: string }
-const ISSUE_LABEL: Record<string, string> = {
-  stockout: 'стокаут ходовой — теряешь выручку',
-  overstock: 'перезатарка скоропорта — под списание',
-}
-function Warehouse() {
-  const { data, error, loading } = useApi<StockData>('stock')
-  if (loading) return <Note>Свожу баланс склада…</Note>
-  if (error || !data) return <Note>Склад: {error}</Note>
-  // Строгий баланс склада для самохостед iiko ещё не подключён → честный план, а не ошибка/0.
-  if (data.available === false) return (
-    <Glass span={12} spot>
-      <PlanFallback
-        title="Строгий баланс склада ещё подключается"
-        reason={data.reason || 'Остатки и расход по складу выбранного филиала пока не сводятся из iiko.'}
-        action="Скоро подключим: сверку было+приход−остаток с продажами по каждому складу." />
-    </Glass>
-  )
-  const leaks = data.rows.filter((r) => r.discrepancy_money > 0 || r.issue)
-  const okRows = data.rows.filter((r) => !(r.discrepancy_money > 0 || r.issue))
-  const maxUsed = Math.max(1, ...data.rows.map((r) => r.actual_used))
-  return (
-    <Glass span={12}>
-      <Eyebrow t="Склад · строгий баланс" hint={data.branch} />
-      <div style={{ marginTop: 16, display: 'flex', alignItems: 'baseline', gap: 16, flexWrap: 'wrap' }}>
-        <span className="tnum" style={{ fontSize: 52, fontWeight: 680, letterSpacing: '-.04em', lineHeight: 0.95, color: 'var(--red)' }}>−{tenge(data.total_discrepancy)}</span>
-        <span style={{ fontSize: 13, color: 'var(--lo)', maxWidth: '36ch', lineHeight: 1.5 }}>утекло сверх продаж за месяц — со склада ушло больше, чем пробито в чеках. Недостача или списание.</span>
-      </div>
-      <div style={{ marginTop: 14, fontSize: 11.5, color: 'var(--mute)' }}>было + приход − остаток = <b style={{ color: 'var(--lo)' }}>ушло по факту</b>, сверяем с продажами — <b style={{ color: 'var(--red)' }}>красное = утечка</b></div>
-
-      <div style={{ marginTop: 8 }}>
-        {leaks.map((r) => {
-          const soldW = Math.min(100, (r.sold / maxUsed) * 100)
-          const leakW = Math.min(100 - soldW, (Math.max(0, r.discrepancy) / maxUsed) * 100)
-          return (
-            <div key={r.position} style={{ padding: '15px 0', borderTop: '1px solid var(--hair-2)' }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-                <span style={{ fontSize: 14, fontWeight: 620, color: 'var(--hi)' }}>{r.position}</span>
-                <span className="tnum" style={{ fontSize: 15, fontWeight: 680, color: r.discrepancy_money > 0 ? 'var(--red)' : 'var(--mute)' }}>{r.discrepancy_money > 0 ? `−${tenge(r.discrepancy_money)}` : '—'}</span>
-              </div>
-              <div style={{ display: 'flex', height: 14, borderRadius: 7, overflow: 'hidden', marginTop: 10, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
-                <div style={{ width: `${soldW}%`, background: 'linear-gradient(180deg, color-mix(in srgb, var(--hi) 32%, #fff), color-mix(in srgb, var(--hi) 22%, transparent))', boxShadow: 'inset 0 1px 0 rgba(255,255,255,.45)' }} />
-                <div style={{ width: `${leakW}%`, background: 'linear-gradient(180deg, color-mix(in srgb, var(--red) 78%, #fff), var(--red))', boxShadow: '0 0 12px color-mix(in srgb, var(--red) 45%, transparent), inset 0 1px 0 rgba(255,255,255,.5), inset 0 -2px 5px rgba(0,0,0,.18)' }} />
-              </div>
-              <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
-                было {r.opening} + приход {r.incoming} − остаток {r.closing} = ушло <b style={{ color: 'var(--lo)' }}>{r.actual_used} {r.unit}</b> · продано {r.sold}
-                {r.issue && <span style={{ color: 'var(--red)' }}> · {ISSUE_LABEL[r.issue]}</span>}
-              </div>
-            </div>
-          )
-        })}
-      </div>
-
-      {okRows.length > 0 && (
-        <div style={{ marginTop: 18, paddingTop: 14, borderTop: '1px solid var(--hair)' }}>
-          <div style={{ fontSize: 10, letterSpacing: '.12em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600, marginBottom: 6 }}>в балансе · сходится · на складе сейчас</div>
-          {okRows.map((r) => (
-            <div key={r.position} style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, padding: '11px 0', borderTop: '1px solid var(--hair-2)' }}>
-              <span style={{ fontSize: 13.5, color: 'var(--lo)' }}>{r.position}</span>
-              <span style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                <span className="tnum" style={{ fontSize: 18, fontWeight: 660, letterSpacing: '-.01em', color: 'var(--hi)' }}>≈ {r.closing} {r.unit}</span>
-                <span style={{ fontSize: 11, color: 'var(--mute)' }}>на складе</span>
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </Glass>
-  )
-}
-
 export default function Supply() {
   const stock = useApi<Stoplist>('stoplist', { period: 'month' })
   const wo = useApi<Writeoffs>('writeoffs', { period: 'month' })
@@ -421,7 +344,6 @@ export default function Supply() {
           <Chart html={hbar(supRows, ' ₸')} />
         </Glass>
       )}
-      <Warehouse />
     </>
   )
 }
