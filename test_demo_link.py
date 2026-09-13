@@ -39,7 +39,12 @@ def test_a_forged_signature_opens_nothing():
     """Подпись — единственная защита ссылки: кода мало."""
     assert M.scope_of_token("dабвгд.подделка")["valid"] is False
     code, token = _link()
-    assert M.scope_of_token(token[:-1] + "x")["valid"] is False
+    # Менять последний символ на фиксированный нельзя: если подпись на него и
+    # кончалась, токен оставался прежним и тест проходил случайно.
+    last = token[-1]
+    assert M.scope_of_token(token[:-1] + ("y" if last != "y" else "z"))["valid"] is False
+    assert M.scope_of_token(token.split(".")[0])["valid"] is False      # без подписи
+    assert M.scope_of_token("d" + code + ".")["valid"] is False         # пустая подпись
 
 
 def test_demo_never_reaches_a_real_branch():
@@ -111,8 +116,15 @@ def test_seeding_twice_does_not_double_the_data(tmp_path, monkeypatch):
 
 
 def test_every_screen_has_a_hint():
-    """Подсказка объясняет ЗАЧЕМ экран, а не что на нём нарисовано."""
-    assert set(demo.HINTS) >= {"mountain", "plan", "acts", "checklists"}
+    """Подсказка объясняет ЗАЧЕМ экран, а не что на нём нарисовано.
+
+    Ключи — id разделов сайта: подсказка приходит вместе с открытием вкладки.
+    Разборы и чек-листы живут внутри «Горы», поэтому про них рассказывает её
+    подсказка, а не отдельная.
+    """
+    assert set(demo.HINTS) >= {"mountain", "plan", "supply", "dash", "staff"}
+    assert "разбор" in demo.HINTS["mountain"]["body"].lower()
+    assert "чек-лист" in demo.HINTS["mountain"]["body"].lower()
     for key, h in demo.HINTS.items():
         assert h["title"] and h["body"], key
         assert len(h["body"]) > 60, f"{key}: слишком коротко, чтобы что-то объяснить"
@@ -125,3 +137,46 @@ def test_counter_starts_even_for_a_link_issued_outside_the_cabinet():
     assert M.scope_of_token(token)["valid"] is True
     row = [r for r in D.get_demo_links(0) if r["code"] == "вне-кабинета"]
     assert row and row[0]["opens"] == 1, row
+
+
+def test_plan_knows_the_demo_network():
+    """Вкладка «План» падала белым экраном: uid_from_token не разбирал демо-токен,
+    филиалов выходило ноль, сервер отдавал короткий ответ без сводки сети, а
+    фронт читал у неё .fact. Лечим с обеих сторон — здесь серверную."""
+    code, token = _link()
+    got = api._plan_branches("demo-org-1", network=True, user={"id": 0}, token=token)
+    assert len(got) == len(demo.BRANCHES), got
+    assert {b["name"] for b in got} == {b["name"] for b in demo.BRANCHES}
+
+
+def test_hints_are_keyed_by_tab_and_honest():
+    """Подсказка приходит к своей вкладке, а не списком на входе. И она обязана
+    говорить правду о том, чем является: «обсудить» значит, что этого НЕТ."""
+    assert set(demo.HINTS) >= {"mountain", "plan", "supply", "dash", "staff"}
+    kinds = {h["kind"] for h in demo.HINTS.values()}
+    assert kinds <= {"есть", "сервис", "обсудить"}, kinds
+    # в продукте есть то, чего у нас нет, и то, что живёт отдельно — оба случая
+    assert any(h["kind"] == "обсудить" for h in demo.HINTS.values())
+    assert any(h["kind"] == "сервис" for h in demo.HINTS.values())
+    for key, h in demo.HINTS.items():
+        assert h["title"] and len(h["body"]) > 60, key
+
+
+def test_the_invoice_hint_says_where_it_was_cheaper():
+    """Главное, ради чего смотрят накладные: видно, где то же самое брали
+    дешевле. Если подсказка про склад об этом молчит — она бесполезна."""
+    h = demo.HINTS["supply"]
+    text = (h["title"] + " " + h["body"]).lower()
+    assert "дешевле" in text, h
+    assert "переплат" in text or "сверя" in text, h
+
+
+def test_hints_are_only_for_the_demo_link():
+    """Своему клиенту рассказывать про его же продукт незачем."""
+    import asyncio
+    code, token = _link()
+    got = asyncio.run(M.demo_hints(token))
+    import json
+    assert json.loads(got.body)["demo"] is True
+    real = asyncio.run(M.demo_hints("12345.подделка"))
+    assert json.loads(real.body)["hints"] == {}

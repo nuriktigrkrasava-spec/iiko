@@ -8500,6 +8500,11 @@ def _plan_branches(org_id: str, network: bool, user: Dict[str, Any],
     подставил бы network=1 и увидел чужие филиалы. Токен здесь главнее флага.
     """
     import mountain_routes as _mr
+    if token and _mr.demo_from_token(token):
+        # Демо-ссылка: выдуманная сеть. Без этого uid_from_token не разбирал
+        # демо-токен, филиалов выходило ноль, и вкладка «План» падала на пустоте.
+        import demo as _demo
+        return [dict(b) for b in _demo.BRANCHES]
     if token:
         sc = _mr._scope(_mr.uid_from_token(token) or 0)
         if sc["role"] == "manager":

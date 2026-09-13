@@ -52,7 +52,10 @@ type MetricsData = {
 }
 type PlanData = {
   week: string; from: string; to: string; types: string[]
-  branches: Branch[]; network: Branch; base_weeks: number; demo: boolean
+  /* network приходит НЕ ВСЕГДА: когда филиалов ноль, сервер отдаёт короткий
+     ответ без сводки сети. Обязательный тип это скрывал, и вкладка падала на
+     `network.fact` — белым экраном на всё приложение, а не пустой карточкой. */
+  branches: Branch[]; network?: Branch; base_weeks: number; demo: boolean
   /* Сколько дней недели уже ЗАКРЫТО. Считает сервер: сравнение с прошлой
      неделей идёт день в день, и разойдись фронт с бэком хоть на день —
      динамика во вторник соврёт. Сегодняшний день не закрыт. */
@@ -596,6 +599,16 @@ export default function Plan() {
 
   if (err) return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--red)' }}>Не удалось загрузить план: {err}</div></Glass>
   if (!data) return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Загружаю план…</div></Glass>
+  /* Ни одного филиала — показываем это словами. Раньше здесь падал рендер:
+     дальше по коду читается data.network, которого в коротком ответе нет. */
+  if (!data.branches?.length || !data.network) return (
+    <Glass span={12}>
+      <div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>
+        Филиалов для плана не нашлось. Если это ваша сеть — проверьте, что филиалы
+        подключены к iiko и не помечены как служебные.
+      </div>
+    </Glass>
+  )
 
   const weekNo = +data.week.split('-W')[1]
   const gv = (g: Grid | undefined, d: number, t: string) => g?.[d]?.[t] ?? 0
@@ -669,8 +682,8 @@ export default function Plan() {
           {TYPES.map((t) => {
             const p = netPlanTotal(t)
             const pDone = netPlanTotal(t, doneDays)
-            const f = factOf(data.network, t)
-            const was = prevOf(data.network, t)
+            const f = factOf(data.network!, t)
+            const was = prevOf(data.network!, t)
             return (
               <div key={t} style={{ padding: 14, borderRadius: 14, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
                 <div style={{ fontSize: 12, color: 'var(--mute)' }}>{TYPE_LABEL[t]}</div>
@@ -772,7 +785,9 @@ export default function Plan() {
       <AnimatePresence>
         {showProgress && metrics && (
           <Suspense fallback={null}>
-            <Progress key="progress" data={metrics} scores={scores} plan={data}
+            {/* network здесь уже точно есть: выше стоит ранний выход, если его нет */}
+            <Progress key="progress" data={metrics} scores={scores}
+              plan={data as typeof data & { network: NonNullable<typeof data.network> }}
               onClose={() => setShowProgress(false)} />
           </Suspense>
         )}
@@ -827,7 +842,7 @@ export default function Plan() {
                     return sumTypes((t) => factOf(bb, t)) / was
                   }
                   return dyn(y) - dyn(x)
-                }), ...(data.branches.length > 1 ? [data.network] : [])].map((b, i) => {
+                }), ...(data.branches.length > 1 ? [data.network!] : [])].map((b, i) => {
                   const isNet = i === data.branches.length
                   const bp = (t: string) => (isNet ? netPlanTotal(t, doneDays) : planTotal(b.organization_id, t, doneDays))
                   const tp = sumTypes(bp)

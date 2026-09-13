@@ -50,6 +50,60 @@ const GROUPS: [string, Sec[]][] = SECTIONS.reduce((acc, s) => {
 }, [] as [string, Sec[]][])
 const PERIODS = [['today', 'Сегодня'], ['yesterday', 'Вчера'], ['week', 'Неделя'], ['month', 'Месяц']] as const
 
+/* Подсказка появляется ПРИ ОТКРЫТИИ вкладки и объясняет то, что человек прямо
+   сейчас видит. Списком на входе шесть карточек читались бы рекламным блоком.
+
+   Только в демо: своему клиенту рассказывать про его же продукт незачем —
+   сервер и отдаёт подсказки лишь по демо-ссылке.
+
+   kind не косметика. «Обсудить» значит, что этого в продукте НЕТ, и говорить
+   об этом прямо дешевле, чем на внедрении. */
+type Hint = { kind: string; title: string; body: string }
+
+const HINT_TONE: Record<string, { label: string; color: string }> = {
+  'есть': { label: 'работает', color: 'var(--grn)' },
+  'сервис': { label: 'отдельный сервис', color: 'var(--acc)' },
+  'обсудить': { label: 'обсуждаемо', color: 'var(--amb)' },
+}
+
+function DemoHint({ tab }: { tab: string }) {
+  const [hints, setHints] = useState<Record<string, Hint> | null>(null)
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('m')
+    if (!t) return
+    fetch(`/api/demo/hints/${t}`, { headers: { Accept: 'application/json' } })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { demo?: boolean; hints?: Record<string, Hint> } | null) => {
+        if (d?.demo) setHints(d.hints || {})
+      })
+      .catch(() => {})
+  }, [])
+  const h = hints?.[tab]
+  if (!h) return null
+  const tone = HINT_TONE[h.kind] || HINT_TONE['есть']
+  return (
+    <div style={{
+      gridColumn: 'span 12', padding: '14px 16px', borderRadius: 16,
+      border: '1px solid var(--hair)', background: 'var(--glass-2)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--hi)' }}>{h.title}</span>
+        <span style={{
+          fontSize: 10.5, letterSpacing: '.08em', textTransform: 'uppercase',
+          fontWeight: 700, color: tone.color,
+        }}>{tone.label}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mute)' }}>
+          демо · данные вымышленные
+        </span>
+      </div>
+      <div style={{ marginTop: 7, fontSize: 13, lineHeight: 1.55, color: 'var(--mute)' }}>
+        {h.body}
+      </div>
+    </div>
+  )
+}
+
+
 export default function LiquidApp() {
   // раздел, период и тема переживают F5 — обновление страницы не должно
   // выкидывать из «Расписания» обратно на «Ресторан» (см. loadPref в lib/api).
@@ -184,6 +238,7 @@ export default function LiquidApp() {
           <AnimatePresence mode="wait">
             <motion.div key={active} variants={container} initial="hidden" animate="show" exit={{ opacity: 0, y: -8, transition: { duration: 0.18 } }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', gap: 16, alignItems: 'stretch' }} className="lg-bento">
+              <DemoHint tab={active} />
               <Suspense fallback={<div style={{ gridColumn: 'span 12', padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Открываю раздел…</div>}>
                 <Body />
               </Suspense>

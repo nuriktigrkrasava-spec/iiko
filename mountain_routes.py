@@ -630,10 +630,7 @@ async def mountain_data(token: str, refresh: int = 0):
         except Exception as e:
             logger.warning(f"[demo] засев: {e!r}")
         board = _board_for(0, signals=_demo.signals(), scope=sc)
-        # Подсказки едут вместе с доской: демо смотрят без провожатого, и
-        # половина силы продукта глазом не видна.
         board["demo"] = True
-        board["hints"] = [{"key": k, **v} for k, v in _demo.HINTS.items()]
         return JSONResponse(board)
 
     orgs = [b["organization_id"] for b in sc["branches"]]
@@ -1250,6 +1247,24 @@ async def teriyaki_delete(token: str, act_id: int, org: Optional[str] = None):
 # ── Демо-ссылки: показ продукта новым клиентам ──────────────────────────────
 # Ссылку выдаёт владелец под конкретного клиента и потом видит, смотрели её или
 # нет. Одна ссылка на всех такого не покажет, а продавцу важно именно это.
+
+
+@router.get("/api/demo/hints/{token}")
+async def demo_hints(token: str):
+    """Подсказки по разделам — только для демо-ссылки.
+
+    Отдаём словарём по id раздела, а показывает оболочка при открытии вкладки:
+    вываленные списком на входе шесть карточек читаются как рекламный блок, а
+    одна по делу — как объяснение того, что человек прямо сейчас видит.
+
+    Для обычной ссылки — пусто: своему клиенту рассказывать про его же продукт
+    незачем.
+    """
+    import demo as _demo
+    sc = scope_of_token(token)
+    if not sc["valid"] or not sc.get("demo"):
+        return JSONResponse({"demo": False, "hints": {}})
+    return JSONResponse({"demo": True, "hints": _demo.HINTS})
 
 
 class DemoLinkPayload(BaseModel):
