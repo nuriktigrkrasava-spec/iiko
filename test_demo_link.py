@@ -149,6 +149,35 @@ def test_plan_knows_the_demo_network():
     assert {b["name"] for b in got} == {b["name"] for b in demo.BRANCHES}
 
 
+def test_the_qr_hint_says_we_work_with_iiko():
+    """Открытие смены на кассе требует плагина и лицензии iiko — обещать это
+    как готовое нельзя, но и молчать незачем: работа идёт."""
+    h = demo.HINTS["staff"]
+    text = (h["title"] + " " + h["body"]).lower()
+    assert "iiko" in text and "лицензи" in text, h
+
+
+def test_checklists_count_in_demo():
+    """Без даты старта прогресс пустой, критерий «Чек-листы» не считается, и
+    продукт выглядит недоделанным именно там, где он силён."""
+    from datetime import date
+    start = demo.checklist_start()
+    assert start < date.today().isoformat(), start
+
+
+def test_acts_have_a_catalog_in_demo():
+    """Разбор ходит в номенклатуру iiko и в накладные. В демо ни того, ни
+    другого нет — отдаём готовый справочник, иначе экран отвечал 403."""
+    for kind in ("salmon", "eel"):
+        ctx = demo.acts_context(kind)
+        assert ctx["price_per_kg"] > 0, kind
+        for role in ("raw", "slice", "trim", "waste"):
+            assert ctx["products"][role]["name"], (kind, role)
+    ter = demo.teriyaki_context()
+    assert ter["sauce_price"] > 0 and ter["trim_price"] > 0
+    assert set(ter["products"]) == {"trim", "teriyaki", "sauce"}
+
+
 def test_hints_are_keyed_by_tab_and_honest():
     """Подсказка приходит к своей вкладке, а не списком на входе. И она обязана
     говорить правду о том, чем является: «обсудить» значит, что этого НЕТ."""

@@ -1,9 +1,8 @@
 import { useApi } from '../lib/useApi'
-import { useInstagram } from '../lib/social'
 import { Glass, Chart, Delta, Orb, Insight, GBar, PlanFallback } from './ui'
 import { donut, hbar, legend } from './charts'
 import { num } from '../lib/format'
-import { Brand, BrandChip, BRAND_COLOR, brandKey } from './brands'
+import {BrandChip, BRAND_COLOR, brandKey} from './brands'
 
 /* ── Формы данных (живой /api/reviews) ── */
 type Platform = {
@@ -46,64 +45,6 @@ const THEMES: { l: string; keys: string[] }[] = [
 ]
 
 /* ── Соцсети: переход в «Подключить» + карточки платформ ── */
-const goConnect = () => window.dispatchEvent(new CustomEvent('lg:go', { detail: 'connect' }))
-const iconBox: React.CSSProperties = { width: 38, height: 38, borderRadius: '32%', flex: 'none', display: 'grid', placeItems: 'center', color: 'var(--mute)', background: 'var(--glass-2)', border: '1px solid var(--hair)' }
-const btnStyle: React.CSSProperties = { marginLeft: 'auto', fontSize: 12, fontWeight: 600, color: 'var(--acc)', background: 'color-mix(in srgb,var(--acc) 12%,transparent)', border: '1px solid color-mix(in srgb,var(--acc) 26%,transparent)', borderRadius: 10, padding: '7px 12px', cursor: 'pointer' }
-
-/* Threads/TikTok пока не подключаются кодом — статичная карточка с переходом */
-function SocialStatic({ k, l }: { k: string; l: string }) {
-  return (
-    <Glass span={4}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-        <span style={iconBox}><Brand name={k} size={20} /></span>
-        <div>
-          <div style={{ fontSize: 13.5, fontWeight: 650, color: 'var(--lo)' }}>{l}</div>
-          <div style={{ fontSize: 11, color: 'var(--mute)' }}>не подключён</div>
-        </div>
-        <button onClick={goConnect} style={btnStyle}>Подключить</button>
-      </div>
-    </Glass>
-  )
-}
-
-/* Живой Instagram: OAuth через Meta. Показывает подписчиков и рост, когда подключён. */
-function InstagramCard() {
-  const { data: d, msg, connect } = useInstagram()
-  const c = BRAND_COLOR[brandKey('instagram')]
-  const on = !!d?.connected
-  return (
-    <Glass span={4}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-        <span style={{ ...iconBox, color: on ? c : 'var(--mute)' }}><Brand name="instagram" size={20} /></span>
-        <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 650, color: 'var(--lo)' }}>Instagram</div>
-          <div style={{ fontSize: 11, color: 'var(--mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {on ? (d?.username ? '@' + d.username : 'подключён') : 'не подключён'}
-          </div>
-        </div>
-        {!on && <button onClick={connect} style={btnStyle}>Подключить</button>}
-      </div>
-      {on && (
-        <>
-          <div className="tnum" style={{ fontSize: 34, fontWeight: 700, letterSpacing: '-.03em', lineHeight: 1, marginTop: 14, color: c, display: 'flex', alignItems: 'baseline', gap: 8 }}>
-            {d?.followers != null ? num(d.followers) : '—'}
-            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--mute)' }}>подписчиков</span>
-          </div>
-          <div style={{ marginTop: 8, display: 'flex', gap: 16, fontSize: 12, color: 'var(--mute)' }}>
-            {d?.delta_30d != null && (
-              <span style={{ color: d.delta_30d > 0 ? 'var(--grn)' : d.delta_30d < 0 ? 'var(--red)' : 'var(--mute)', fontWeight: 650 }}>
-                {d.delta_30d > 0 ? '▲' : d.delta_30d < 0 ? '▼' : '•'} {num(Math.abs(d.delta_30d))} / 30 дней
-              </span>
-            )}
-            {d?.media_count != null && <span>{num(d.media_count)} постов</span>}
-          </div>
-          {d?.stale && <div style={{ marginTop: 8, fontSize: 11, color: 'var(--amb)' }}>Данные не обновились — проверь доступ.</div>}
-        </>
-      )}
-      {msg && <div style={{ marginTop: 10, fontSize: 11.5, lineHeight: 1.45, color: 'var(--amb)' }}>{msg}</div>}
-    </Glass>
-  )
-}
 
 export default function Reputation() {
   const { data, error, loading } = useApi<Reviews>('reviews', { period: 'month' })
@@ -122,9 +63,6 @@ export default function Reputation() {
           reason="Мы не нашли точки бренда на площадках отзывов (2ГИС, Wolt) — рейтинг и отзывы брать неоткуда."
           action="Укажи точное название бренда в разделе «Подключить» — найдём точки на 2ГИС и Wolt автоматически." />
       </Glass>
-      <InstagramCard />
-      <SocialStatic k="threads" l="Threads" />
-      <SocialStatic k="tiktok" l="TikTok" />
     </>
   )
 
@@ -283,9 +221,6 @@ export default function Reputation() {
       </Glass>
 
       {/* Row 4 · Соцсети: Instagram (живой OAuth) + Threads/TikTok (4+4+4 = 12) */}
-      <InstagramCard />
-      <SocialStatic k="threads" l="Threads" />
-      <SocialStatic k="tiktok" l="TikTok" />
     </>
   )
 }

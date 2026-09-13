@@ -161,7 +161,9 @@ HINTS: Dict[str, Dict[str, str]] = {
         "body": "Сотрудник сканирует QR в подсобке, отмечается телефоном, "
                 "геопозиция проверяется. Опоздания считаются сами, попадают в "
                 "оценку филиала, а зарплата — начислено, выдано, остаток — "
-                "считается по фактическим сменам.",
+                "считается по фактическим сменам. Открытие личной смены прямо "
+                "на кассе делаем совместно с iiko: работаем с их командой, "
+                "лицензии в процессе получения.",
     },
     "sched": {
         "kind": "есть",
@@ -192,6 +194,47 @@ HINTS: Dict[str, Dict[str, str]] = {
                 "это обсуждаемо, делается под вашу номенклатуру.",
     },
 }
+
+
+# ── Позиции разбора и цены для демо ─────────────────────────────────────────
+# Разбор ходит в номенклатуру iiko за позициями и в накладные за ценой. В демо
+# ни того, ни другого нет, поэтому отдаём готовый справочник — экран о разнице
+# не знает и работает обычным путём.
+
+def checklist_start() -> str:
+    """С какого дня чек-листы в зачёте. В демо — неделя назад: ровно столько
+    сдач мы и засеваем, а более ранний старт дал бы филиалам долг за дни,
+    которых в демо не было."""
+    from datetime import date
+    return (date.today() - timedelta(days=7)).isoformat()
+
+
+def acts_context(kind: str) -> Dict[str, Any]:
+    import acts as A
+    spec = A.kind_spec(kind)
+    names = {r: (spec["names"].get(r) or ["—"])[0] for r in A.roles_of(spec)}
+    return {
+        "products": {r: {"id": f"demo-{r}", "name": n, "unit": "кг"}
+                     for r, n in names.items()},
+        "price_per_kg": 9300 if spec["key"] == "salmon" else 14000,
+        "price_from": "ЦЕХ · демо",
+        "trim_price": spec["trim_price"] or 12000,
+        "trim_from": "", "trim_const": bool(spec["trim_price"]),
+        "kind": spec["key"], "title": spec["title"],
+        "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
+    }
+
+
+def teriyaki_context() -> Dict[str, Any]:
+    import acts as A
+    spec = A.TERIYAKI_SPEC
+    return {
+        "products": {r: {"id": f"demo-{r}", "name": (spec["names"][r])[0], "unit": "кг"}
+                     for r in spec["roles"]},
+        "trim_price": spec["trim_price"],
+        "sauce_price": 4200, "sauce_from": "Азия Фуд · демо",
+        "kind": "teriyaki", "title": spec["title"],
+    }
 
 
 # ── Засев базы ───────────────────────────────────────────────────────────────

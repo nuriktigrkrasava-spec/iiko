@@ -458,7 +458,8 @@ def _ranking_with_scores(ranking: List[Dict[str, Any]],
 
 def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
                signals: Optional[Dict[str, Any]] = None,
-               scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               scope: Optional[Dict[str, Any]] = None,
+               checklist_start: Optional[str] = None) -> Dict[str, Any]:
     """Доска по УЖЕ разобранному доступу.
 
     `scope` обязателен везде, где доступ пришёл ссылкой. Раньше сюда передавали
@@ -480,7 +481,8 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
     now_hm = local_now().strftime("%H:%M")
     passed = sum(1 for sl in SLOTS if sl <= now_hm)      # какие слоты уже прошли сегодня
     progress = checklist_progress(orgs, _month_start()[:10],
-                                  local_now().date().isoformat(), slots_passed_today=passed)
+                                  local_now().date().isoformat(), slots_passed_today=passed,
+                                  start=checklist_start)
 
     rows = []
     for b in sc["branches"]:
@@ -512,7 +514,7 @@ def _board_for(uid: int, journals: Optional[Dict[str, Any]] = None,
             "score_pending": not signals,
             # Пусто — чек-листы не в зачёте: экран так и пишет, чтобы нули на
             # горе не читались как «все провалили».
-            "checklist_from": _db_checklist_from(),
+            "checklist_from": checklist_start or _db_checklist_from(),
             "scale": {"tasks": TASK_POINTS, "checklist_done": CHECKLIST_POINT,
                       "checklist_missed": CHECKLIST_PENALTY,
                       "step_points": STEP_POINTS, "steps": STEPS},
@@ -629,7 +631,10 @@ async def mountain_data(token: str, refresh: int = 0):
             _demo.seed()
         except Exception as e:
             logger.warning(f"[demo] засев: {e!r}")
-        board = _board_for(0, signals=_demo.signals(), scope=sc)
+        # Чек-листы в демо ДОЛЖНЫ быть в зачёте: без даты старта прогресс
+        # пустой, критерий не считается, и продукт выглядит недоделанным.
+        board = _board_for(0, signals=_demo.signals(), scope=sc,
+                           checklist_start=_demo.checklist_start())
         board["demo"] = True
         return JSONResponse(board)
 
@@ -882,9 +887,15 @@ async def acts_salmon_get(kind: str, token: str, org: Optional[str] = None):
         return JSONResponse({"error": "bad token"}, status_code=404)
     # по ссылке филиала акт делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or org, kind)
-    if ctx.get("error"):
-        return JSONResponse(ctx, status_code=403)
+    if sc.get("demo"):
+        # Демо: справочник и цены готовые, в iiko не ходим — там нечего искать.
+        import demo as _demo
+        ctx = {**_demo.acts_context(kind), "branch": sc["branches"][0],
+               "kinds": _TABS}
+    else:
+        ctx = await _salmon_context(sc, sc["org"] or org, kind)
+        if ctx.get("error"):
+            return JSONResponse(ctx, status_code=403)
     # филиалы для выбора — из УЖЕ разобранного доступа. Тут стоял _scope(uid), и
     # по ссылке филиала выпадал список всей сети: uid у неё — владелец.
     ctx["branches"] = sc["branches"]
@@ -1156,9 +1167,13 @@ async def teriyaki_get(token: str, org: Optional[str] = None):
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _teriyaki_context(sc, sc["org"] or org)
-    if ctx.get("error"):
-        return JSONResponse(ctx, status_code=403)
+    if sc.get("demo"):
+        import demo as _demo
+        ctx = {**_demo.teriyaki_context(), "branch": sc["branches"][0], "kinds": _TABS}
+    else:
+        ctx = await _teriyaki_context(sc, sc["org"] or org)
+        if ctx.get("error"):
+            return JSONResponse(ctx, status_code=403)
     ctx["branches"] = sc["branches"]
     ctx["role"] = sc["role"]
     return JSONResponse(ctx)

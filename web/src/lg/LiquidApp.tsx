@@ -16,7 +16,6 @@ const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key
 const Dash = lazyFrom(() => import('./screens'), 'Dash')
 const Staff = lazyFrom(() => import('./screens'), 'Staff')
 const Plan = lazy(() => import('./Plan'))
-const Onboarding = lazy(() => import('./Onboarding'))
 const Reputation = lazy(() => import('./Reputation'))
 const Menu = lazy(() => import('./Menu'))
 const Supply = lazy(() => import('./Supply'))
@@ -39,7 +38,6 @@ const SECTIONS: Sec[] = [
   { id: 'plan', group: 'Операции', label: 'План', icon: 'feed', periodic: false, render: Plan },
   { id: 'mountain', group: 'Сводка', label: 'Гора · задачи', icon: 'anom', periodic: false, render: Mountain },
   { id: 'rep', group: 'Гости', label: 'Соцсети', icon: 'rep', periodic: false, render: Reputation },
-  { id: 'connect', group: 'Настройки', label: 'Подключить', icon: 'link', periodic: false, render: Onboarding },
 ]
 const TABS = ['mountain', 'dash', 'supply']
 // разделы, сгруппированные как в доке — для листа «Ещё» на узких экранах
@@ -60,8 +58,10 @@ const PERIODS = [['today', 'Сегодня'], ['yesterday', 'Вчера'], ['wee
    об этом прямо дешевле, чем на внедрении. */
 type Hint = { kind: string; title: string; body: string }
 
+/* Бейдж только там, где вещь НЕ обычная часть продукта. «Работает» не пишем:
+   если экран открыт и на нём данные, слово ничего не добавляет — а рядом с
+   «обсуждаемо» оно и вовсе обесценивает честную пометку. */
 const HINT_TONE: Record<string, { label: string; color: string }> = {
-  'есть': { label: 'работает', color: 'var(--grn)' },
   'сервис': { label: 'отдельный сервис', color: 'var(--acc)' },
   'обсудить': { label: 'обсуждаемо', color: 'var(--amb)' },
 }
@@ -80,7 +80,7 @@ function DemoHint({ tab }: { tab: string }) {
   }, [])
   const h = hints?.[tab]
   if (!h) return null
-  const tone = HINT_TONE[h.kind] || HINT_TONE['есть']
+  const tone = HINT_TONE[h.kind]
   return (
     <div style={{
       gridColumn: 'span 12', padding: '14px 16px', borderRadius: 16,
@@ -88,10 +88,10 @@ function DemoHint({ tab }: { tab: string }) {
     }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--hi)' }}>{h.title}</span>
-        <span style={{
+        {tone && <span style={{
           fontSize: 10.5, letterSpacing: '.08em', textTransform: 'uppercase',
           fontWeight: 700, color: tone.color,
-        }}>{tone.label}</span>
+        }}>{tone.label}</span>}
         <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--mute)' }}>
           демо · данные вымышленные
         </span>
