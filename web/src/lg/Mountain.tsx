@@ -42,6 +42,9 @@ type Board = {
   scale?: { tasks: Record<string, number>; step_points: number; steps: number }
   checklist_from?: string   // пусто — чек-листы ещё не в зачёте
   branches?: Row[]; score_pending?: boolean
+  /* Демо для показа клиенту: выдуманная сеть плюс подсказки о возможностях. */
+  demo?: boolean
+  hints?: { key: string; title: string; body: string }[]
 }
 type Note = { branch: string; note: string }
 
@@ -594,9 +597,34 @@ export default function Mountain() {
         </div>
       </Glass>
 
+      {/* Демо смотрят без провожатого, и половина силы продукта глазом не
+          видна: «отход 4.1 %» ничего не говорит тому, кто не знает, что раньше
+          эту цифру не считали вовсе. Карточки объясняют не ЧТО на экране, а
+          ЗАЧЕМ оно и сколько стоит. Показываем только в демо — своему клиенту
+          рассказывать про его же продукт незачем. */}
+      {board.demo && !!board.hints?.length && (
+        <Glass span={12}>
+          <Eyebrow t="Что умеет система" hint="демо-режим · данные вымышленные" />
+          <div style={{ marginTop: 14, display: 'grid', gap: 12,
+            gridTemplateColumns: 'repeat(auto-fit,minmax(250px,1fr))' }}>
+            {board.hints.map((h) => (
+              <div key={h.key} style={{
+                padding: '13px 15px', borderRadius: 14,
+                border: '1px solid var(--hair)', background: 'var(--glass-2)',
+              }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--hi)' }}>{h.title}</div>
+                <div style={{ marginTop: 6, fontSize: 12.5, lineHeight: 1.5, color: 'var(--mute)' }}>
+                  {h.body}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Glass>
+      )}
+
       {/* Консоль рассылки — только у владельца. Управляющему список не нужен:
           сообщение приходит всплывающей плашкой, а второй раз читать нечего. */}
-      {owner && (
+      {owner && !board.demo && (
         <Glass span={12}>
           <Eyebrow t="Сообщение управляющим" hint="придёт уведомлением на сайте, во все филиалы" />
           <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>

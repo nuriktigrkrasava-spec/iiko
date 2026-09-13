@@ -3264,3 +3264,61 @@ def checklist_progress(org_ids: List[str], day_from: str, day_to: str,
         out[org] = {"done": done, "expect": expect,
                     "missed": -max(0, expect - done)}
     return out
+
+
+# ── Демо-ссылки: показ продукта новым клиентам ──
+# Ссылка живёт вечно, но со счётчиком: продавцу важно знать не «сколько всего
+# открытий», а «смотрел ли ЭТОТ клиент и когда». Поэтому ссылка генерится под
+# клиента с меткой, а не одна на всех.
+def _ensure_demo_links(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS demo_links (
+        code TEXT PRIMARY KEY,
+        label TEXT,                  -- под кого выдана: «Сеть Ромашка»
+        created_at TEXT,
+        created_by INTEGER,
+        opens INTEGER DEFAULT 0,
+        first_open_at TEXT,          -- когда посмотрели впервые
+        last_open_at TEXT
+    )""")
+
+
+def add_demo_link(code: str, label: str, created_by: int = 0) -> None:
+    conn = get_db()
+    _ensure_demo_links(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO demo_links (code, label, created_at, created_by, opens) "
+        "VALUES (?,?,?,?,0)",
+        (code, (label or "")[:120], datetime.now().isoformat(), int(created_by or 0)))
+    conn.commit()
+    conn.close()
+
+
+def touch_demo_link(code: str) -> None:
+    """Отметить открытие. Первое открытие запоминаем отдельно: «посмотрел через
+    час» и «посмотрел через неделю» — разные разговоры с клиентом.
+
+    Строку заводим, если её нет: ссылка действительна по ПОДПИСИ, а не по
+    записи в базе, и выпущенная в обход кабинета иначе открывалась бы молча —
+    счётчик показывал бы ноль там, где смотрели.
+    """
+    conn = get_db()
+    _ensure_demo_links(conn)
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO demo_links (code, label, created_at, created_by, opens) "
+        "VALUES (?,?,?,0,0)", (code, "", now))
+    conn.execute(
+        "UPDATE demo_links SET opens = opens + 1, last_open_at = ?, "
+        "first_open_at = COALESCE(first_open_at, ?) WHERE code = ?", (now, now, code))
+    conn.commit()
+    conn.close()
+
+
+def get_demo_links(created_by: int = 0) -> List[Dict[str, Any]]:
+    conn = get_db()
+    _ensure_demo_links(conn)
+    rows = conn.execute(
+        "SELECT * FROM demo_links WHERE created_by = ? ORDER BY created_at DESC LIMIT 200",
+        (int(created_by or 0),)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

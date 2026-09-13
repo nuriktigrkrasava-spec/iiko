@@ -122,6 +122,28 @@ def org_from_token(token: str) -> Optional[str]:
                                       _sign_org(org).encode()) else None
 
 
+def _sign_demo(code: str) -> str:
+    mac = hmac.new(_secret(), f"mountain-demo:{code}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:20]
+
+
+def token_for_demo(code: str) -> str:
+    """Демо-ссылка: подписанный код показа. Ведёт на выдуманную сеть и никуда
+    больше — реальных филиалов этот скоуп не знает вовсе."""
+    return f"d{code}.{_sign_demo(code)}"
+
+
+def demo_from_token(token: str) -> Optional[str]:
+    """Код показа из демо-ссылки. None — это не демо-ссылка."""
+    if not token or not token.startswith("d") or "." not in token:
+        return None
+    code, sig = token[1:].rsplit(".", 1)
+    if not code:
+        return None
+    return code if hmac.compare_digest(sig.encode("utf-8", "ignore"),
+                                       _sign_demo(code).encode()) else None
+
+
 def uid_from_token(token: str) -> Optional[int]:
     if not token or "." not in token:
         return None
@@ -161,6 +183,21 @@ def scope_of_token(token: str) -> Dict[str, Any]:
     ходить в iiko (у ссылки филиала это владелец филиала: своих кредов у
     управляющего нет, см. грабли из 234.md).
     """
+    code = demo_from_token(token)
+    if code:
+        # Демо. uid = 0 намеренно: от его имени в iiko не сходить — у нуля нет
+        # ни филиалов, ни кредов, — а филиалы отдаём выдуманные. Попытка
+        # подставить чужой org упрётся в _get_org_id: он пускает только свои.
+        import demo as _demo
+        from database import touch_demo_link
+        try:
+            touch_demo_link(code)
+        except Exception as e:
+            logger.warning(f"[demo] счётчик {code}: {e!r}")
+        return {"role": "owner", "org": None, "uid": 0, "valid": True,
+                "demo": True, "demo_code": code,
+                "branches": [dict(b) for b in _demo.BRANCHES]}
+
     org = org_from_token(token)
     if org:
         from database import get_db
@@ -584,6 +621,21 @@ async def mountain_data(token: str, refresh: int = 0):
         return JSONResponse({"error": "bad token"}, status_code=404)
     if not sc["role"]:
         return JSONResponse({"error": "нет доступа"}, status_code=403)
+    if sc.get("demo"):
+        # Демо: показатели берём из выдуманной сети. В iiko не ходим вовсе —
+        # у uid=0 нет ни филиалов, ни кредов, и фоновый сбор тут завис бы.
+        import demo as _demo
+        try:
+            _demo.seed()
+        except Exception as e:
+            logger.warning(f"[demo] засев: {e!r}")
+        board = _board_for(0, signals=_demo.signals(), scope=sc)
+        # Подсказки едут вместе с доской: демо смотрят без провожатого, и
+        # половина силы продукта глазом не видна.
+        board["demo"] = True
+        board["hints"] = [{"key": k, **v} for k, v in _demo.HINTS.items()]
+        return JSONResponse(board)
+
     orgs = [b["organization_id"] for b in sc["branches"]]
     # Показатели ключуем на ВЛАДЕЛЬЦА сети, а не на того, кто открыл ссылку.
     # Управляющему нужны оценки чужих филиалов (сравнить себя одним взглядом),
@@ -1193,6 +1245,50 @@ async def teriyaki_delete(token: str, act_id: int, org: Optional[str] = None):
     ok = delete_salmon_act(act_id, [b["organization_id"]])
     return JSONResponse({"ok": ok} if ok else
                         {"ok": False, "error": "жарка уже занесена в iiko или не ваша"})
+
+
+# ── Демо-ссылки: показ продукта новым клиентам ──────────────────────────────
+# Ссылку выдаёт владелец под конкретного клиента и потом видит, смотрели её или
+# нет. Одна ссылка на всех такого не покажет, а продавцу важно именно это.
+
+
+class DemoLinkPayload(BaseModel):
+    label: str = ""            # под кого: «Сеть Ромашка»
+
+
+@router.post("/api/demo-link/{token}")
+async def demo_link_create(token: str, payload: DemoLinkPayload):
+    """Завести демо-ссылку. Только владельцу: это инструмент продажи."""
+    import secrets
+    from database import add_demo_link
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    if sc["role"] != "owner" or sc.get("demo"):
+        return JSONResponse({"error": "демо-ссылки выдаёт владелец"}, status_code=403)
+    code = secrets.token_urlsafe(9)
+    add_demo_link(code, payload.label or "", created_by=sc["uid"])
+    return JSONResponse({"ok": True, "code": code,
+                         "url": f"/m/{token_for_demo(code)}"})
+
+
+@router.get("/api/demo-links/{token}")
+async def demo_links_list(token: str):
+    """Выданные ссылки со счётчиком: сколько раз открывали и когда в последний."""
+    from database import get_demo_links
+    sc = scope_of_token(token)
+    if not sc["valid"]:
+        return JSONResponse({"error": "bad token"}, status_code=404)
+    if sc["role"] != "owner" or sc.get("demo"):
+        return JSONResponse({"error": "нет доступа"}, status_code=403)
+    rows = get_demo_links(sc["uid"])
+    return JSONResponse({"links": [{
+        "code": r["code"], "label": r["label"] or "",
+        "url": f"/m/{token_for_demo(r['code'])}",
+        "opens": int(r["opens"] or 0),
+        "created_at": r["created_at"],
+        "first_open_at": r["first_open_at"], "last_open_at": r["last_open_at"],
+    } for r in rows]})
 
 
 # ── Бумажные журналы: галочки и неделя истории ───────────────────────────────

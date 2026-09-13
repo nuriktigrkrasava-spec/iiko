@@ -1337,11 +1337,14 @@ def _trial_active(telegram_id: int) -> bool:
 
 def _use_demo_data(user: Dict, org_id: str) -> bool:
     """Отдавать ли демо-сэмпл вместо реальных данных.
-    - demo-org-1 → всегда демо;
+    - любой филиал с префиксом `demo-` → всегда демо. Сюда попадают и старый
+      demo-org-1, и выдуманная сеть демо-ссылки (demo.BRANCHES). Реальные
+      организации iiko — UUID, начаться с `demo-` не могут, так что префикс
+      безопасен и не пускает демо-режим на живой филиал;
     - демо-юзер без активного триала → демо;
     - демо-юзер с активным триалом → НЕ демо (его реальные данные).
     На основном боте `_is_demo_user` = False → возвращает False без обращения к БД."""
-    if org_id == "demo-org-1":
+    if str(org_id or "").startswith("demo-"):
         return True
     return _is_demo_user(user) and not _trial_active(int(user.get("id", 0) or 0))
 
