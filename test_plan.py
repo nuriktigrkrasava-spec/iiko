@@ -415,3 +415,46 @@ if __name__ == "__main__":
             print(f"  [ERROR] {type(e).__name__}: {e}")
     print(f"\n{'='*50}\n{'ВСЕ ТЕСТЫ ОК' if not failed else f'ПРОВАЛЕНО: {failed}'}")
     raise SystemExit(1 if failed else 0)
+
+
+# ── Автоплан: план ставится сам, если его не ставили ────────────────────────
+# Без плана у филиала нет ни процентов выполнения, ни критерия «выполнение
+# плана» в оценке. Нажать кнопку легко забыть — тогда вкладка просто мертва.
+
+def _avg(hall=10):
+    return {str(i): {"hall": hall, "pickup": 2, "delivery": 3, "agg": 1} for i in range(1, 8)}
+
+
+def test_autoplan_writes_the_average_week():
+    import database as D
+    api._autoplan("org-auto", "2026-W40", _avg(12))
+    got = D.get_day_plans(["org-auto"], "2026-W40")["org-auto"]
+    assert len(got) == 7, got
+    assert got[1] == {"hall": 12, "pickup": 2, "delivery": 3, "agg": 1}, got[1]
+    print("  [OK] средняя неделя записана планом на все семь дней")
+
+
+def test_autoplan_does_not_touch_a_hand_made_zero():
+    """Ноль, поставленный руками, — решение, а не пустота: строки в базе у него
+    ЕСТЬ. Затирать его автопланом нельзя — филиал сказал «на этой неделе не
+    работаем», а мы поставили бы ему цель."""
+    hand_zero = {i: {t: 0 for t in api.PLAN_TYPES} for i in range(1, 8)}
+    assert api._should_autoplan(hand_zero, _avg(), fill_auto=True) is False
+    assert api._should_autoplan({}, _avg(), fill_auto=True) is True
+    print("  [OK] «ноль руками» и «не задан» — разные вещи")
+
+
+def test_autoplan_is_only_for_this_week_and_later():
+    """Прошлую неделю задним числом заполнять нельзя: это придумало бы филиалу
+    цель, которой у него не было, и переписало бы его оценку за ту неделю."""
+    assert api._should_autoplan({}, _avg(), fill_auto=False) is False
+    assert api._should_autoplan({}, _avg(), fill_auto=True) is True
+    print("  [OK] прошлую неделю автоплан не трогает")
+
+
+def test_autoplan_skips_a_branch_without_history():
+    """Филиал без истории: средняя пустая, и писать нули незачем — это тот же
+    «план не задан», только с лишними строками в базе."""
+    empty = {str(i): {t: 0 for t in api.PLAN_TYPES} for i in range(1, 8)}
+    assert api._should_autoplan({}, empty, fill_auto=True) is False
+    print("  [OK] без истории план не выдумывается")

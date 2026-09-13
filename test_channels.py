@@ -23,6 +23,7 @@ REAL = {
     "Сайт самовывоз": "pickup",
     "Доставка": "delivery",
     "Сайт доставка": "delivery",
+    "Агрегаторы": "agg",
     "Wolt": "agg",
     "Glovo": "agg",
     "Chocofood": "agg",
@@ -35,6 +36,18 @@ def test_every_real_channel_lands_in_its_group():
              if api._classify_channel(n) != want}
     assert not wrong, wrong
     print(f"  [OK] все {len(REAL)} названий сети разложены верно")
+
+
+def test_the_type_named_aggregators_is_not_hall():
+    """Сеть пробивает большинство агрегаторских заказов ОДНИМ типом «Агрегаторы»,
+    а не именем площадки. Этого названия в правиле не было, и оно молча падало
+    в зал: на живых серверах за четыре недели так потерялось 2181 заказ из 2423
+    агрегаторских — зал оказался завышен на 9 %, агрегаторы занижены вдесятеро.
+    """
+    assert api._classify_channel("Агрегаторы") == "agg"
+    assert api._classify_channel("агрегатор") == "agg"
+    assert api._classify_channel("Агрегатор Wolt") == "agg"
+    print("  [OK] «Агрегаторы» — это агрегаторы, а не зал")
 
 
 def test_chocofood_is_an_aggregator_not_hall():

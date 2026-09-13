@@ -30,6 +30,7 @@ type Branch = {
   plan: Grid; fact: Grid; base: Grid; prev: Grid
   total_plan: Record<string, number>; total_fact: Record<string, number>
   total_base: Record<string, number>; total_prev: Record<string, number>
+  plan_auto?: boolean          // план поставлен сам по средней, руками не ставили
 }
 type Cell = { org: string; dow: number; ch_type: string; planned: number }
 type Win = { key: string; label: string; unit: string; from: number; to: number; better: number; pct: number | null }
@@ -884,12 +885,24 @@ export default function Plan() {
             </div>
           </div>
 
-          {TYPES.every((t) => planTotal(b.organization_id, t) === 0) && (
+          {b.plan_auto && (
+            /* План теперь ставится сам: без него у филиала нет ни процентов
+               выполнения, ни критерия «выполнение плана» в оценке, а нажать
+               кнопку легко забыть. Говорим об этом прямо — иначе непонятно,
+               откуда взялись цифры, и «плановые» числа выглядят спущенными
+               сверху, хотя это собственная средняя филиала. */
+            <div style={{ marginTop: 10, padding: '9px 12px', borderRadius: 11, fontSize: 12.5,
+              color: 'var(--mute)', background: 'var(--glass-2)' }}>
+              План поставлен автоматически — по средней неделе за {data.base_weeks} недель.
+              Правь руками или подними кнопкой «+5% / +10%» справа сверху.
+            </div>
+          )}
+          {!b.plan_auto && TYPES.every((t) => planTotal(b.organization_id, t) === 0) && (
             <div style={{ marginTop: 10, padding: '9px 12px', borderRadius: 11, fontSize: 12.5,
               color: 'var(--amb)', background: 'color-mix(in srgb, var(--amb) 10%, transparent)' }}>
-              План на эту неделю не задан — поэтому у филиала нет ни процентов выполнения,
-              ни критерия «выполнение плана» в оценке. Нажми «как есть» справа сверху:
-              подставит среднюю неделю за {data.base_weeks} недель.
+              План на эту неделю стоит нулём — ни процентов выполнения, ни критерия
+              «выполнение плана» в оценке у филиала не будет. Нажми «как есть» справа
+              сверху: подставит среднюю неделю за {data.base_weeks} недель.
             </div>
           )}
           {/* table-layout: fixed — ширины колонок заданы заранее и НЕ зависят от

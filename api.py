@@ -8272,23 +8272,31 @@ PLAN_TYPES = ["hall", "pickup", "delivery", "agg"]
 # Версия классификатора каналов. Снимок факта (plan_day_facts) считается ПО НЕЙ,
 # поэтому при её смене старые строки надо выбросить: до v2 вынос лежал внутри
 # зала, и сравнение «эта неделя против прошлой» смешивало бы два разных правила.
-PLAN_FACTS_VER = "3"
+PLAN_FACTS_VER = "4"
 
 
 def _classify_channel(name: str) -> str:
     """Тип заказа iiko → канал плана.
 
-    Реальные значения OrderType.Name у сети: «Обычный заказ», «Самовывоз»,
-    «Сайт самовывоз», «Доставка», «Сайт доставка», Wolt, Glovo, Chocofood,
-    «Яндекс Еда». Самовывоз проверяем ДО доставки: «Сайт самовывоз» — это
-    вынос, а не доставка. Chocofood в правило не был записан вовсе и молча
-    падал в зал — выручка агрегатора считалась залом.
+    Реальные значения OrderType.Name у сети: «Обычный заказ», «Агрегаторы»,
+    «Самовывоз», «Сайт самовывоз», «Доставка», «Сайт доставка», Wolt, Glovo,
+    Chocofood, «Яндекс Еда». Самовывоз проверяем ДО доставки: «Сайт самовывоз» —
+    это вынос, а не доставка.
+
+    Дважды одно и то же: сперва Chocofood, потом «Агрегаторы» не совпадали ни с
+    одним правилом и молча падали в зал. Второй раз дорого: этим типом сеть
+    пробивает БОЛЬШИНСТВО агрегаторских заказов, а не именем площадки — за
+    четыре недели так потерялось 2181 заказ из 2423, зал был завышен на 9 %,
+    агрегаторы занижены вдесятеро.
+
+    Отсюда правило: неизвестное имя падает в зал молча, поэтому список сверяют
+    с живыми серверами, а не дописывают по памяти (test_channels.REAL).
 
     Это единственное правило группировки каналов в продукте: по нему живут и
     «План», и карточка «Каналы продаж».
     """
     s = (name or "").lower()
-    if any(k in s for k in ("wolt", "волт", "glovo", "глово",
+    if any(k in s for k in ("агрегат", "wolt", "волт", "glovo", "глово",
                             "яндекс", "yandex", "choco", "чоко")):
         return "agg"
     if "самовывоз" in s or "вынос" in s:
@@ -8552,6 +8560,10 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
     base_to = d_from - timedelta(days=1)
     prev_from, prev_to = d_from - timedelta(days=7), d_from - timedelta(days=1)
     solo, today_d = len(branches) == 1, local_now().date()
+    # Сам план ставим только на текущую и будущие недели. Прошлую заполнять
+    # задним числом нельзя: это придумало бы филиалу цель, которой у него не
+    # было, и задним же числом переписало бы его оценку за ту неделю.
+    fill_auto = d_to >= today_d
 
     async def one(b: Dict[str, str]):
         org = b["organization_id"]
@@ -8587,14 +8599,57 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
         prev = _dow_from_days({ds: cells for ds, cells in base_days.items()
                                if prev_from.isoformat() <= ds <= prev_to.isoformat()})
         saved = plans.get(org, {})
+        auto = False
+        if _should_autoplan(saved, avg, fill_auto):
+            # Плана нет — ставим по средней сами. Без него у филиала нет ни
+            # процентов выполнения, ни критерия «выполнение плана» в оценке, а
+            # нажать кнопку легко забыть: вкладка тогда просто мертва.
+            _autoplan(org, wk, avg)
+            saved = {i: dict(avg[str(i)]) for i in range(1, 8)}
+            auto = True
         plan = {str(i): {t: int(saved.get(i, {}).get(t, 0)) for t in PLAN_TYPES}
                 for i in range(1, 8)}
         return {**b, "plan": plan, "fact": _dow_from_days(cur_days),
-                "base": avg, "prev": prev}
+                "base": avg, "prev": prev, "plan_auto": auto}
 
     rows = await asyncio.gather(*(one(b) for b in branches))
     return _plan_response(wk, d_from, d_to, list(rows), demo=False,
                           live_today=solo and d_from <= today_d <= d_to)
+
+
+def _should_autoplan(saved: Dict[int, Dict[str, int]],
+                     avg: Dict[str, Dict[str, int]], fill_auto: bool) -> bool:
+    """Ставить ли план самим. Три условия, и каждое — про отдельную беду.
+
+    saved непустой — план уже ставили, в том числе НУЛЁМ: ноль руками это
+    решение «на этой неделе не работаем», у него строки в базе есть, и затирать
+    его нельзя. «Ноль» и «не задан» тут разные вещи.
+
+    fill_auto — неделя не в прошлом. Задним числом план придумал бы филиалу
+    цель, которой у него не было, и переписал бы его оценку за ту неделю.
+
+    avg пустая — у филиала нет истории. Записать нули значит получить тот же
+    «план не задан», только с лишними строками.
+    """
+    if saved or not fill_auto:
+        return False
+    return any(avg[str(i)][t] for i in range(1, 8) for t in PLAN_TYPES)
+
+
+def _autoplan(org: str, wk: str, avg: Dict[str, Dict[str, int]]) -> None:
+    """Записывает среднюю неделю как план. Молча: экран важнее записи.
+
+    Перезаписи не будет — зовут только когда сохранённых строк нет вовсе.
+    План, выставленный руками в ноль, строки в базе ИМЕЕТ, поэтому «ноль» и
+    «не задан» здесь разные вещи, и осознанный ноль мы не затрём.
+    """
+    from database import set_day_plans
+    try:
+        set_day_plans([{"org": org, "week": wk, "dow": i,
+                        "ch_type": t, "planned": avg[str(i)][t]}
+                       for i in range(1, 8) for t in PLAN_TYPES])
+    except Exception as e:
+        logger.warning(f"[plan] автоплан {org} {wk}: {e!r}")
 
 
 def _plan_response(wk: str, d_from: date, d_to: date,
