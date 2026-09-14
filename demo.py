@@ -216,10 +216,10 @@ def acts_context(kind: str) -> Dict[str, Any]:
     return {
         "products": {r: {"id": f"demo-{r}", "name": n, "unit": "кг"}
                      for r, n in names.items()},
-        "price_per_kg": 9300 if spec["key"] == "salmon" else 14000,
-        "price_from": "ЦЕХ · демо",
+        "price_per_kg": spec.get("raw_price") or 9300,
+        "price_from": "константа учёта" if spec.get("price_const") else "себестоимость iiko · демо",
         "trim_price": spec["trim_price"] or 12000,
-        "trim_from": "", "trim_const": bool(spec["trim_price"]),
+        "trim_from": "константа учёта", "trim_const": bool(spec["trim_price"]),
         "kind": spec["key"], "title": spec["title"],
         "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
     }

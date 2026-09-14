@@ -78,19 +78,30 @@ export default function SalmonAct({ token }: { token: string }) {
 
   /* Филиал приходит из первого же ответа, и раньше это гнало второй запрос за
      тем же филиалом — а на время него экран обнулялся и мигал «Гружу
-     справочник…». Помним, за чем уже сходили; рыбу чистит pickKind. */
+     справочник…». Помним, за чем уже сходили; рыбу чистит pickKind.
+
+     Ответ проверяем на актуальность. Справочник лосося идёт в iiko и едет
+     секундами; если за это время переключили рыбу, поздний лососёвый ответ
+     затирал уже пришедший угриный. Экран получался из двух рыб сразу: шапка
+     от лосося — «обрезки 8 800 из накладной ЦЕХа», — а счёт уже от угря, и
+     он говорил, что цена обрезков не задана. Числа спорили сами с собой. */
   const loadedKey = useRef('')
+  const ctxReq = useRef(0)
   useEffect(() => {
     if (kind === 'teriyaki') return          // у передела свой экран и свой запрос
     if (loadedKey.current === `${kind}|${org}`) return
+    const my = ++ctxReq.current
     fetch(`/api/acts/${kind}/${token}${org ? `?org=${org}` : ''}`)
       .then((r) => r.json())
       .then((d: Ctx) => {
+        if (my !== ctxReq.current) return    // пока ходили, выбрали другую рыбу
         loadedKey.current = `${kind}|${d.branch?.organization_id ?? org}`
         setCtx(d)
         if (!org && d.branch) setOrg(d.branch.organization_id)
       })
-      .catch((e) => setCtx({ error: String(e.message || e) }))
+      .catch((e) => {
+        if (my === ctxReq.current) setCtx({ error: String(e.message || e) })
+      })
   }, [token, org, kind])
 
   /** Рыбу сменили — веса чужие: у угря другой вход и другая цена обрезков. */
@@ -103,10 +114,12 @@ export default function SalmonAct({ token }: { token: string }) {
   }
 
   // считаем на сервере: там же лежат тесты на эту арифметику
+  const calcReq = useRef(0)
   useEffect(() => {
     const wr = num(raw)
     if (!wr) { setCalc(null); return }
     const t = setTimeout(() => {
+      const my = ++calcReq.current
       fetch(`/api/acts/${kind}/${token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -115,7 +128,11 @@ export default function SalmonAct({ token }: { token: string }) {
           price_per_kg: price ? num(price) : null,
           trim_price: trimPrice ? num(trimPrice) : null,
         }),
-      }).then((r) => r.json()).then(setCalc).catch(() => setCalc(null))
+      }).then((r) => r.json())
+        // тот же сторож, что и у справочника: счёт от прошлой рыбы или от
+        // прошлого веса не должен ложиться поверх нового
+        .then((d) => { if (my === calcReq.current) setCalc(d) })
+        .catch(() => { if (my === calcReq.current) setCalc(null) })
     }, 250)
     return () => clearTimeout(t)
   }, [raw, slice, trim, price, trimPrice, org, token, kind])

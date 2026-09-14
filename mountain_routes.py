@@ -814,7 +814,8 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
         return (float(best.get("price_per_unit") or 0),
                 f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·"))
 
-    costs = await _stock_costs(client, info.get("org_name") or b.get("name") or "", real_org)
+    costs = ({} if spec.get("price_const")
+             else await _stock_costs(client, info.get("org_name") or b.get("name") or "", real_org))
 
     async def _cost_of(role: str):
         """Себестоимость позиции: учётная из iiko, потом накладная СВОЕГО филиала.
@@ -846,14 +847,21 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
             return price, f"накладная · {src}" if src else "накладная"
         return 0.0, ""
 
-    price, price_from = await _cost_of("raw")
-    # Обрезки: сперва их учётная себестоимость — она и есть то, во что они
-    # обошлись филиалу. Константа учёта осталась запасной (у лосося она
-    # назначена, у угря нет), а дальше цену спрашиваем полем в акте.
-    trim_price, trim_from = await _cost_of("trim")
-    trim_const = False
-    if trim_price <= 0 and spec["trim_price"]:
-        trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
+    if spec.get("price_const"):
+        # Угорь считается по константам учёта целиком: акты разбора живут у нас,
+        # интеграции по угрю с iiko нет, и цена у него одна на всю сеть. Ходить
+        # за ней в номенклатуру и остатки незачем — и экран открывается сразу.
+        price, price_from = float(spec.get("raw_price") or 0), "константа учёта"
+        trim_price, trim_from, trim_const = float(spec["trim_price"] or 0), "константа учёта", True
+    else:
+        price, price_from = await _cost_of("raw")
+        # Обрезки: сперва их учётная себестоимость — она и есть то, во что они
+        # обошлись филиалу. Константа учёта осталась запасной, а дальше цену
+        # спрашиваем полем в акте.
+        trim_price, trim_from = await _cost_of("trim")
+        trim_const = False
+        if trim_price <= 0 and spec["trim_price"]:
+            trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
     return {"branch": b, "products": prods, "price_per_kg": price,
             "price_from": price_from, "trim_price": trim_price,
             "trim_from": trim_from, "trim_const": trim_const,

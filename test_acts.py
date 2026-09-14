@@ -138,6 +138,32 @@ def test_eel_error_speaks_about_the_eel():
     print(f"  [OK] «{bad['error']}»")
 
 
+def test_eel_goes_by_a_constant_price_for_both_lines():
+    """У угря и вход, и обрезки по 9 300 ₸/кг — константой, а не из iiko.
+
+    Акты разбора живут у нас, интеграции по угрю с iiko нет, и цена у него одна
+    на всю сеть. Пока её искали в накладных, каждый филиал получал своё число,
+    а половина — цену «П/Ф угорь», то есть уже готового выхода.
+    """
+    assert acts.EEL_PRICE == 9300.0 and acts.EEL_TRIM_PRICE == 9300.0
+    spec = acts.KINDS["eel"]
+    assert spec["price_const"] is True, spec
+    assert spec["raw_price"] == 9300.0 and spec["trim_price"] == 9300.0, spec
+    r = acts.split_act(acts.EEL_PRICE, 10, 7, 2, kind="eel")
+    assert r["ok"] and r["money"] is True, r
+    assert r["raw"]["price_per_kg"] == 9300.0, r
+    assert r["trim"]["price_per_kg"] == 9300.0 and r["trim"]["sum"] == 18600.0, r
+    assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
+    print(f"  [OK] угорь по {r['raw']['price_per_kg']}, обрезки по {r['trim']['price_per_kg']}")
+
+
+def test_salmon_prices_are_still_looked_up():
+    """У лосося константой идут только обрезки: цена входа у него из iiko."""
+    assert not acts.KINDS["salmon"].get("price_const"), acts.KINDS["salmon"]
+    assert not acts.KINDS["salmon"].get("raw_price"), acts.KINDS["salmon"]
+    print("  [OK] лосось цену входа по-прежнему берёт из себестоимости")
+
+
 def test_eel_price_comes_from_the_fish_not_from_the_prepared():
     """Цена входа берётся с «угорь», а не с «П/Ф угорь».
 

@@ -197,6 +197,38 @@ describe('переключение рыбы', () => {
   })
 })
 
+/* Со скрина: шапка говорила «обрезки 8 800 из накладной ЦЕХа», а счёт рядом —
+   «цена обрезков не задана». Так бывает, когда справочник одной рыбы приезжает
+   поверх другой: запрос лосося идёт в iiko секундами, и если за это время
+   переключили рыбу, поздний ответ затирал уже пришедший. */
+describe('ответ опоздавшего запроса', () => {
+  it('справочник прошлой рыбы не ложится поверх выбранной', async () => {
+    let releaseSalmon: (v: unknown) => void = () => {}
+    const salmonPending = new Promise((r) => { releaseSalmon = r })
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const u = String(url)
+      if (u.includes('/network')) return { ok: true, json: async () => ({ branches: [] }) }
+      if (u.includes('/period')) return { ok: true, json: async () => ({ acts: [], total: { acts: 0 } }) }
+      if (u.includes('/api/acts/eel/')) return { ok: true, json: async () => EEL }
+      // лосось «едет в iiko»: ответ придёт, только когда его отпустят
+      return { ok: true, json: async () => { await salmonPending; return CTX } }
+    }) as unknown as typeof fetch)
+
+    render(<SalmonAct token="1.sig" />)
+    // пока лосось в пути — переключаем рыбу
+    await waitFor(() => expect(screen.getByText('Угорь')).toBeTruthy())
+    fireEvent.click(screen.getByText('Угорь'))
+    await waitFor(() => expect(screen.getByText(/Разбор угря/)).toBeTruthy(), { timeout: 2000 })
+
+    releaseSalmon(null)                       // лосось доехал с опозданием
+    await new Promise((r) => setTimeout(r, 50))
+
+    // на экране по-прежнему угорь, а не лососёвые позиции
+    expect(screen.getByText(/Разбор угря/)).toBeTruthy()
+    expect(screen.queryByText(/П\/Ф ЛОСОСЬ СТЕЙК/)).toBeNull()
+  })
+})
+
 describe('период и цвет отхода', () => {
   it('«к занесению» не режется календарём — границу ставит проводка', () => {
     const b = periodBounds('open', '', '')
