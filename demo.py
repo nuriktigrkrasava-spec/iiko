@@ -273,6 +273,7 @@ def seed(force: bool = False) -> Dict[str, int]:
             made["tasks"] += 1
 
     made["staff"] = _seed_staff_access(force)
+    made["shifts"] = _seed_schedule(force)
     made["done"] = _close_some_tasks()
     made["checklists"] = _seed_checklists(force)
     made["acts"] = _seed_acts(force)
@@ -327,6 +328,42 @@ def _seed_staff_access(force: bool) -> int:
             if not (org == "demo-b4" and i == len(TEAM) - 1):
                 bind_staff_access(code, 900000 + bi * 10 + i)
             n += 1
+    return n
+
+
+# Оплата за смену. Разная по ролям — одинаковая выглядела бы как заглушка.
+_PAY = {"d1": 14_000, "d2": 12_000, "d3": 11_000}
+
+
+def _seed_schedule(force: bool) -> int:
+    """График на текущую и прошлую неделю.
+
+    Без него сетка пустая и пишет «в этом филиале ещё никого не ставили», хотя
+    сотрудники в филиале есть: в сетку человек попадает сменой, а не привязкой.
+    Ставим будни — в выходные состав другой, и показывать это в демо незачем.
+    """
+    from datetime import date
+    from database import set_staff_shift, get_staff_schedule
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    start, end = monday - timedelta(days=7), monday + timedelta(days=6)
+    # get_staff_schedule берёт ОДИН филиал, не список
+    if get_staff_schedule(BRANCHES[0]["organization_id"],
+                          start.isoformat(), end.isoformat()) and not force:
+        return 0
+    n = 0
+    for b in BRANCHES:
+        org = b["organization_id"]
+        for back in range(0, 14):
+            d = start + timedelta(days=back)
+            if d.weekday() >= 5:                 # суббота и воскресенье пропускаем
+                continue
+            for eid, _name in TEAM:
+                hours = {"d1": ("10:00", "18:00"), "d2": ("12:00", "20:00"),
+                         "d3": ("09:00", "17:00")}[eid]
+                set_staff_shift(org, eid, d.isoformat(), hours[0], hours[1],
+                                pay=_PAY[eid])
+                n += 1
     return n
 
 

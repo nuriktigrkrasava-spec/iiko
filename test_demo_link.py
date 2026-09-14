@@ -264,3 +264,23 @@ def test_the_branch_switcher_shows_the_demo_network(tmp_path, monkeypatch):
     got = asyncio.run(api.list_restaurants(user={"id": 0}, x_site_token=token))
     assert len(got) == len(demo.BRANCHES), got
     assert {r["organization_name"] for r in got} == {b["name"] for b in demo.BRANCHES}
+
+
+def test_the_schedule_grid_has_shifts(tmp_path, monkeypatch):
+    """В сетку графика человек попадает СМЕНОЙ, а не привязкой: без смен экран
+    писал «в этом филиале ещё никого не ставили», хотя сотрудники есть."""
+    from datetime import date, timedelta
+    monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "sched.db"))
+    D.init_db()
+    demo.seed()
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    rows = D.get_staff_schedule("demo-b1", monday.isoformat(),
+                                (monday + timedelta(days=6)).isoformat())
+    assert len(rows) == len(demo.TEAM) * 5, rows      # пять будних дней на человека
+    assert all(r["pay"] and r["start_time"] and r["end_time"] for r in rows)
+    # оплата разная по ролям: одинаковая читалась бы как заглушка
+    assert len({r["pay"] for r in rows}) == len(demo.TEAM)
+    demo.seed()
+    assert len(D.get_staff_schedule("demo-b1", monday.isoformat(),
+                                    (monday + timedelta(days=6)).isoformat())) == len(rows)
