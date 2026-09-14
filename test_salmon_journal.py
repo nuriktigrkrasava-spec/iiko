@@ -97,16 +97,16 @@ def test_eel_acts_do_not_mix_into_the_salmon_summary():
     """Свод лосося и свод угря заносят в iiko разными актами. Если сложить их
     вместе, средний отход перестаёт значить что-либо: рыбы разные."""
     C = "org-shymkent"
-    calc = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, kind="eel")
+    calc = acts.split_act(14000, 10, 7.5, kind="eel")   # у угря обрезков нет
     assert calc["ok"], calc
-    eel_id = D.add_salmon_act(C, 1, calc, 14000, 12000, kind="eel")
+    eel_id = D.add_salmon_act(C, 1, calc, 14000, 0, kind="eel")
     sal_id = _act(C, 10, 8, 1.8)
 
     salmon = D.get_salmon_acts([C])
     assert [r["id"] for r in salmon] == [sal_id], salmon
     eel = D.get_salmon_acts([C], kind="eel")
     assert [r["id"] for r in eel] == [eel_id], eel
-    assert eel[0]["weight_slice"] == 7.5 and eel[0]["trim_price"] == 12000, eel[0]
+    assert eel[0]["weight_slice"] == 7.5 and eel[0]["weight_trim"] == 0, eel[0]
     assert C in D.all_salmon_orgs("eel") and C in D.all_salmon_orgs(), C
     print("  [OK] у филиала два разбора, и каждый свод видит только свою рыбу")
 

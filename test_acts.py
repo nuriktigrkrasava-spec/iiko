@@ -101,58 +101,72 @@ def test_products_found_by_name():
     print("  [OK] четыре позиции разбора нашлись, туша ЦЕХа не подхватилась")
 
 
-# ── Угорь: тот же разбор, другая рыба ────────────────────────────────────────
+# ── Угорь: другая рыба и другая форма разбора ───────────────────────────────
+# В номенклатуре сети по угрю ровно две строки: «угорь» и «П/Ф угорь». Лососёвой
+# тройки выходов у него нет ни на одном филиале, и разбор здесь двухпозиционный:
+# что положили и что получилось, остальное — отход.
 
-def test_eel_splits_like_salmon():
-    """Целый угорь → нарезка + обрезки + отход. Цена обрезков у угря своя, и
-    пока она не назначена — приходит полем в акт."""
-    r = acts.split_act(14000, 10, 7.5, 1.5, trim_price=12000, kind="eel")
+def test_eel_splits_into_one_output_and_waste():
+    """Целый угорь → П/Ф угорь + отход. Обрезков в этой рыбе нет."""
+    r = acts.split_act(14000, 10, 7.5, kind="eel")
     assert r["ok"] and r["kind"] == "eel", r
-    assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
-    assert r["trim"]["sum"] == 18000.0, r                   # 1.5 × 12 000
-    assert r["slice"]["price_per_kg"] == round((140000 - 18000) / 7.5, 2), r
+    assert r["waste"]["weight"] == 2.5 and r["waste_pct"] == 25.0, r
+    assert r["trim"]["weight"] == 0.0 and r["trim"]["sum"] == 0.0, r
+    assert r["slice"]["price_per_kg"] == round(140000 / 7.5, 2), r
     assert abs(r["check"] - r["raw"]["sum"]) < 0.01, r
-    print(f"  [OK] угорь: нарезка {r['slice']['price_per_kg']} ₸/кг, отход {r['waste_pct']}%")
+    print(f"  [OK] угорь: выход {r['slice']['price_per_kg']} ₸/кг, отход {r['waste_pct']}%")
 
 
-def test_eel_counts_by_the_very_same_formula():
-    """Формула у угря та же, что у лосося: вход → нарезка + обрезки + отход.
+def test_eel_refuses_a_trim_weight_it_cannot_have():
+    """Вес обрезков у угря взяться неоткуда — молча свалить его в отход нельзя.
 
-    Рыбы отличаются только названиями позиций и тем, откуда берётся цена
-    обрезков. Сама арифметика обязана совпадать до копейки — иначе два свода по
-    сети сравнивать нельзя, а вся публичная таблица филиалов на этом и стоит.
+    Отход у разбора — оценка разделки; подмешать в неё чужие килограммы значит
+    соврать ровно той цифрой, ради которой экран и сделан.
     """
-    same = dict(trim_price=8800)
-    a = acts.split_act(9300, 10, 7.5, 1.5, kind="salmon", **same)
-    b = acts.split_act(9300, 10, 7.5, 1.5, kind="eel", **same)
-    for field in ("slice", "trim", "waste", "slice_pct", "trim_pct", "waste_pct", "check"):
-        assert a[field] == b[field], (field, a[field], b[field])
-    assert a["kind"] != b["kind"], "вид разбора всё же разный"
-    print(f"  [OK] угорь считается той же формулой: нарезка {b['slice']['price_per_kg']} ₸/кг")
+    bad = acts.split_act(14000, 10, 7.5, 1.5, kind="eel")
+    assert not bad["ok"] and "обрезков нет" in bad["error"], bad
+    print(f"  [OK] «{bad['error']}»")
+
+
+def test_both_fish_count_waste_the_same_way():
+    """Форма разная, а отход считается одинаково: вход минус то, что вышло.
+
+    Проценты обеих рыб попадают в одну публичную таблицу по сети, и считаться
+    они обязаны по одному правилу — иначе филиалы сравнивать нельзя.
+    """
+    sal = acts.split_act(9300, 10, 7.5, 1.5, trim_price=8800, kind="salmon")
+    eel = acts.split_act(9300, 10, 9.0, kind="eel")
+    assert sal["waste"]["weight"] == 1.0 and sal["waste_pct"] == 10.0, sal
+    assert eel["waste"]["weight"] == 1.0 and eel["waste_pct"] == 10.0, eel
+    for r in (sal, eel):
+        assert abs(r["check"] - r["raw"]["sum"]) < 0.01, r
+        assert r["waste"]["sum"] == 0.0, r
+    assert sal["kind"] != eel["kind"], "вид разбора всё же разный"
+    print("  [OK] у обеих рыб отход 1.0 кг и 10.0 % — правило одно")
 
 
 def test_eel_error_speaks_about_the_eel():
-    """Угорь приходит пластом, и ошибка называет то, что человек держит."""
+    """Ошибка называет то, что человек держит в руках, — угря, а не стейк."""
     bad = acts.split_act(14000, 0, 0, kind="eel")
-    assert not bad["ok"] and "пласта" in bad["error"], bad
+    assert not bad["ok"] and "угря" in bad["error"], bad
     print(f"  [OK] «{bad['error']}»")
 
 
 def test_eel_products_found_by_name_or_by_words():
-    """Имя из справочника Алиева, а если филиал назвал по-своему — по словам."""
+    """Имя из справочника, а если филиал назвал по-своему — по словам."""
     p = acts.find_products([
-        {"id": "1", "name": "Пласт угря", "unit": "кг"},
-        {"id": "2", "name": "П/Ф ОБРЕЗКИ УГОРЬ", "unit": "кг"},
-        {"id": "3", "name": "П/Ф НАРЕЗКА УГОРЬ", "unit": "кг"},
+        {"id": "1", "name": "угорь", "unit": "кг"},
+        {"id": "3", "name": "П/Ф угорь", "unit": "кг"},
         {"id": "4", "name": "Отход угря", "unit": "кг"},
         {"id": "5", "name": "П/Ф ЛОСОСЬ СТЕЙК", "unit": "кг"},     # чужая рыба
     ], kind="eel")
-    assert p["raw"]["id"] == "1" and p["trim"]["id"] == "2", p
-    assert p["slice"]["id"] == "3" and p["waste"]["id"] == "4", p
-    assert "teriyaki" not in p, p
+    assert p["raw"]["id"] == "1" and p["slice"]["id"] == "3", p
+    assert p["waste"]["id"] == "4", p
+    assert "trim" not in p and "teriyaki" not in p, p
+    # филиал со старыми названиями: пласт — это тоже выход, а не вход
     other = acts.find_products([
-        {"id": "9", "name": "Угорь унаги 1 кг", "unit": "кг"},      # вход без «целый»
-        {"id": "8", "name": "Угорь нарезка", "unit": "кг"},
+        {"id": "9", "name": "Угорь унаги 1 кг", "unit": "кг"},
+        {"id": "8", "name": "Пласт угря", "unit": "кг"},
     ], kind="eel")
     assert other["raw"]["id"] == "9" and other["slice"]["id"] == "8", other
     print("  [OK] позиции угря нашлись и по имени, и по словам")
@@ -174,10 +188,10 @@ def test_weights_are_counted_even_when_no_price_is_known():
     """Отход — это вес, а не деньги, и цена на него не влияет.
 
     Пока расчёт упирался в ненайденную цену, экран не показывал НИЧЕГО: ни
-    отхода, ни процентов. Для угря, у которого константы обрезков нет, это
-    означало «отход не считается совсем» — при том что взвесили всё, что надо.
+    отхода, ни процентов, — при том что взвесили всё, что надо. Ноль ценой
+    передаёт маршрут, когда себестоимости обрезков нет и константы учёта тоже.
     """
-    r = acts.split_act(0, 10, 7, 2, trim_price=0, kind="eel")
+    r = acts.split_act(0, 10, 7, 2, trim_price=0, kind="salmon")
     assert r["ok"], r
     assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
     assert r["slice_pct"] == 70.0 and r["trim_pct"] == 20.0, r
@@ -191,13 +205,13 @@ def test_money_is_not_invented_when_a_price_is_missing():
     Если посчитать обрезки по нулю, их деньги молча уедут в нарезку и она
     подорожает на ровном месте. Поэтому денег просто нет, пока нет цены.
     """
-    r = acts.split_act(9300, 10, 7, 2, trim_price=0, kind="eel")
+    r = acts.split_act(9300, 10, 7, 2, trim_price=0, kind="salmon")
     assert r["ok"] and r["money"] is False, r
     assert r["slice"]["price_per_kg"] is None and r["slice"]["sum"] is None, r
     assert r["trim"]["sum"] is None and r["check"] is None, r
     assert r["need"] == "trim_price", r
     # а с ценой обрезков — те же веса и уже деньги
-    full = acts.split_act(9300, 10, 7, 2, trim_price=9000, kind="eel")
+    full = acts.split_act(9300, 10, 7, 2, trim_price=9000, kind="salmon")
     assert full["money"] is True and full["waste"]["weight"] == r["waste"]["weight"], full
     print("  [OK] нет цены обрезков — нет денег, но веса те же")
 
@@ -208,6 +222,51 @@ def test_input_price_alone_does_not_block_the_weights():
     assert r["ok"] and r["money"] is False and r["need"] == "price", r
     assert r["waste"]["weight"] == 0.5 and r["waste_pct"] == 5.0, r
     print("  [OK] нет цены входа — отход 0.5 кг, 5.0 % на месте")
+
+
+def test_eel_has_no_trim_at_all():
+    """У угря разбор в две позиции: целый угорь → П/Ф угорь + отход.
+
+    Обрезков угря нет ни в одном филиале сети — в номенклатуре только «угорь»
+    и «П/Ф угорь». Пока у угря была лососёвая форма из трёх выходов, экран
+    просил вес того, чего не существует, и упирался в цену несуществующих
+    обрезков.
+    """
+    assert acts.roles_of(acts.KINDS["eel"]) == ["raw", "slice", "waste"], acts.KINDS["eel"]
+    r = acts.split_act(9000, 10, 8, kind="eel")
+    assert r["ok"] and r["money"] is True, r
+    assert r["waste"]["weight"] == 2.0 and r["waste_pct"] == 20.0, r
+    assert r["trim"]["weight"] == 0.0 and r["trim"]["sum"] == 0.0, r
+    # вся стоимость входа легла на выход: обрезкам её отдавать некому
+    assert r["slice"]["sum"] == 90000.0 and r["slice"]["price_per_kg"] == 11250.0, r
+    print(f"  [OK] угорь: {r['slice']['price_per_kg']} ₸/кг, отход {r['waste_pct']}%")
+
+
+def test_eel_does_not_ask_for_a_price_it_cannot_have():
+    """Цена обрезков у угря не спрашивается: обрезков у него нет."""
+    r = acts.split_act(9000, 10, 8, kind="eel")
+    assert r["need"] == "" and r["money"] is True, r
+    print("  [OK] угорь считается без цены обрезков")
+
+
+def test_eel_input_is_the_whole_fish_not_the_prepared():
+    """«угорь» — вход, «П/Ф угорь» — выход. Спутать их значит списать выход.
+
+    В справочнике обе строки начинаются одинаково, и вход раньше выбирался по
+    тому, какая попалась первой: на половине филиалов входом вставал П/Ф.
+    """
+    catalog = [
+        {"id": "p", "name": "П/Ф угорь", "unit": "кг"},
+        {"id": "g", "name": "угорь", "unit": "кг"},
+    ]
+    got = acts.find_products(catalog, "eel")
+    assert got["raw"]["id"] == "g", got
+    assert got["slice"]["id"] == "p", got
+    # и в обратном порядке справочника — тот же ответ
+    got2 = acts.find_products(list(reversed(catalog)), "eel")
+    assert got2["raw"]["id"] == "g" and got2["slice"]["id"] == "p", got2
+    assert "trim" not in got, got
+    print("  [OK] вход «угорь», выход «П/Ф угорь» — в любом порядке справочника")
 
 
 def test_frying_loss_is_paid_by_the_teriyaki():

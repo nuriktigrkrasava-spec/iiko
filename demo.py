@@ -212,16 +212,21 @@ def checklist_start() -> str:
 def acts_context(kind: str) -> Dict[str, Any]:
     import acts as A
     spec = A.kind_spec(kind)
-    names = {r: (spec["names"].get(r) or ["—"])[0] for r in A.roles_of(spec)}
+    roles = A.roles_of(spec)
+    names = {r: (spec["names"].get(r) or ["—"])[0] for r in roles}
     return {
         "products": {r: {"id": f"demo-{r}", "name": n, "unit": "кг"}
                      for r, n in names.items()},
         "price_per_kg": 9300 if spec["key"] == "salmon" else 14000,
-        "price_from": "ЦЕХ · демо",
-        "trim_price": spec["trim_price"] or 12000,
-        "trim_from": "", "trim_const": bool(spec["trim_price"]),
-        "kind": spec["key"], "title": spec["title"],
+        "price_from": "себестоимость iiko · демо",
+        # У угря обрезков нет — и цены у них тоже нет, иначе демо показывает
+        # поле, которого на живом филиале не бывает.
+        "trim_price": (spec["trim_price"] or 12000) if "trim" in roles else 0,
+        "trim_from": "константа учёта" if "trim" in roles else "",
+        "trim_const": "trim" in roles,
+        "kind": spec["key"], "title": spec["title"], "roles": roles,
         "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
+        "slice_label": spec.get("slice_label") or "Нарезка",
     }
 
 

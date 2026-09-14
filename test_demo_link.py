@@ -168,10 +168,15 @@ def test_checklists_count_in_demo():
 def test_acts_have_a_catalog_in_demo():
     """Разбор ходит в номенклатуру iiko и в накладные. В демо ни того, ни
     другого нет — отдаём готовый справочник, иначе экран отвечал 403."""
-    for kind in ("salmon", "eel"):
+    # Форма разбора у рыб разная: у лосося три выхода, у угря один — обрезков
+    # в его номенклатуре нет ни на одном филиале сети.
+    for kind, roles in (("salmon", ("raw", "slice", "trim", "waste")),
+                        ("eel", ("raw", "slice", "waste"))):
         ctx = demo.acts_context(kind)
         assert ctx["price_per_kg"] > 0, kind
-        for role in ("raw", "slice", "trim", "waste"):
+        assert tuple(ctx["roles"]) == roles, (kind, ctx["roles"])
+        assert set(ctx["products"]) == set(roles), (kind, ctx["products"])
+        for role in roles:
             assert ctx["products"][role]["name"], (kind, role)
     ter = demo.teriyaki_context()
     assert ter["sauce_price"] > 0 and ter["trim_price"] > 0
