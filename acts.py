@@ -295,9 +295,16 @@ split_salmon = split_act
 
 # ── Передел: обрезки + соус → терияки ────────────────────────────────────────
 # Отдельный документ, а не строка разбора. На сковороду кладут обрезки, льют
-# соус и снимают терияки. При жарке вес уходит, деньги — нет: килограмм терияки
-# дороже килограмма обрезков ровно на ужарку. Соус приходит своей накладной, и
-# он единственный здесь ДОБАВЛЯЕТ деньги, а не переносит их.
+# соус и снимают терияки. Вход жарки — оба веса сразу: соус тоже лёг на
+# сковороду, и выход считается от суммы, а не от одних обрезков.
+#
+# Формулы заданы владельцем и записаны буквально:
+#   выход, %      = вес терияки / (вес обрезков + вес соуса) × 100
+#   себестоимость = (сумма обрезков + сумма соуса) × (1 + отход),
+#                   где отход — доля ужарки во входе, то есть 1 − выход.
+# Вторая формула не переносит деньги, а наращивает их на ужарку: сумма
+# оприходования получается БОЛЬШЕ суммы списания, и свод на эту разницу с iiko
+# не сойдётся. Так решено намеренно — см. `check`, где лежат вложенные деньги.
 
 def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
                  g_sauce: float = 0.0, sauce_price: float = 0.0) -> Dict[str, Any]:
@@ -324,11 +331,17 @@ def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
         return {"ok": False, "error": "Впиши, сколько терияки сняли со сковороды"}
     if g_sauce < 0:
         return {"ok": False, "error": "Вес не может быть отрицательным"}
-    if w_out > w_fry + 1e-9:
-        return {"ok": False,
-                "error": "Терияки тяжелее обрезков, что пошли в жарку — при жарке вес уходит"}
 
-    w_shrink = round(w_fry - w_out, 3)
+    # Вход жарки — всё, что легло на сковороду. Соус меряют граммами, вход —
+    # килограммами, поэтому граммы делятся на тысячу ровно здесь и больше нигде.
+    w_sauce = g_sauce / 1000
+    w_in = w_fry + w_sauce
+    if w_out > w_in + 1e-9:
+        return {"ok": False,
+                "error": "Терияки тяжелее того, что пошло в жарку — при жарке вес уходит"}
+
+    w_shrink = round(w_in - w_out, 3)
+    shrink = (w_in - w_out) / w_in          # доля отхода: ею и дорожает терияки
     need = ("trim_price" if trim_price <= 0 else
             "sauce_price" if (g_sauce > 0 and sauce_price <= 0) else "")
     money = not need
@@ -338,9 +351,10 @@ def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
         "kind": "teriyaki",
         "trim_price": trim_price or None,
         "sauce_price": sauce_price or None,
+        "input_weight": round(w_in, 4),      # обрезки + соус, вход жарки
         # выход жарки: сколько процентов сковорода вернула. Ниже — больше ужарка
-        "yield_pct": round(w_out / w_fry * 100, 1),
-        "shrink_pct": round(w_shrink / w_fry * 100, 1),
+        "yield_pct": round(w_out / w_in * 100, 1),
+        "shrink_pct": round(shrink * 100, 1),
         # соуса на килограмм терияки: по этой цифре и ловится перелив
         "sauce_g_per_kg": round(g_sauce / w_out, 1),
         "money": money,
@@ -350,24 +364,30 @@ def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
         return {
             **weights,
             "trim": {"weight": w_fry, "price_per_kg": trim_price or None, "sum": None},
-            "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
+            "sauce": {"grams": round(g_sauce, 1), "weight": round(w_sauce, 4),
                       "price_per_kg": sauce_price or None, "sum": None},
             "teriyaki": {"weight": w_out, "price_per_kg": None, "sum": None,
-                         "from_trim": w_fry, "shrink": w_shrink},
+                         "from_trim": w_fry, "from_input": round(w_in, 4),
+                         "shrink": w_shrink},
             "check": None,
         }
 
     trim_sum = round(trim_price * w_fry, 2)
     sauce_sum = round(sauce_price * g_sauce / 1000, 2)
-    out_sum = round(trim_sum + sauce_sum, 2)
+    spent = round(trim_sum + sauce_sum, 2)           # столько списываем со склада
+    # (сумма обрезков + сумма соуса) × (1 + отход) — формула владельца
+    out_sum = round(spent * (1 + shrink), 2)
     return {
         **weights,
         "trim": {"weight": w_fry, "price_per_kg": trim_price, "sum": trim_sum},
-        "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
+        "sauce": {"grams": round(g_sauce, 1), "weight": round(w_sauce, 4),
                   "price_per_kg": sauce_price, "sum": sauce_sum},
         "teriyaki": {"weight": w_out, "price_per_kg": round(out_sum / w_out, 2),
-                     "sum": out_sum, "from_trim": w_fry, "shrink": w_shrink},
-        "check": out_sum,                    # = обрезки + соус, всё что вложили
+                     "sum": out_sum, "from_trim": w_fry, "from_input": round(w_in, 4),
+                     "shrink": w_shrink},
+        "spent": spent,                      # обрезки + соус, вложенные деньги
+        "markup": round(out_sum - spent, 2), # на столько приход больше списания
+        "check": spent,                      # = обрезки + соус, всё что вложили
     }
 
 
@@ -423,6 +443,10 @@ def summarize_teriyaki(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
     Цены берём те, что записаны в самой жарке: пересчёт задним числом по
     сегодняшней накладной сдвинул бы уже проведённый документ.
+
+    Формулы те же, что в fry_teriyaki: вход — обрезки вместе с соусом, а сумма
+    прихода наращена на отход. Считать свод иначе, чем жарки, нельзя — он их
+    складывает, и расхождение вылезло бы прямо в акте для iiko.
     """
     n = 0
     fry = out = sauce_g = 0.0
@@ -437,19 +461,24 @@ def summarize_teriyaki(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         sauce_g += g_s
         trim_sum += float(r.get("trim_price") or TRIM_PRICE) * w_fry
         sauce_sum += float(r.get("sauce_price") or 0) * g_s / 1000
-    total = trim_sum + sauce_sum
+    w_in = fry + sauce_g / 1000                  # вход жарок за период
+    shrink = (w_in - out) / w_in if w_in > 0 else 0.0
+    spent = trim_sum + sauce_sum                 # столько списываем со склада
+    total = spent * (1 + shrink)                 # столько приходуем — формула владельца
     return {
         "acts": n,
         "fry": round(fry, 3), "teriyaki": round(out, 3),
-        "shrink": round(fry - out, 3),
+        "input": round(w_in, 3),
+        "shrink": round(w_in - out, 3),
         "sauce": round(sauce_g, 1), "sauce_sum": round(sauce_sum, 2),
         "trim_sum": round(trim_sum, 2), "teriyaki_sum": round(total, 2),
+        "spent": round(spent, 2), "markup": round(total - spent, 2),
         "teriyaki_price": round(total / out, 2) if out > 0 else 0.0,
         "trim_price": round(trim_sum / fry, 2) if fry > 0 else 0.0,
         "sauce_price": round(sauce_sum / sauce_g * 1000, 2) if sauce_g > 0 else 0.0,
         "sauce_g_per_kg": round(sauce_g / out, 1) if out > 0 else 0.0,
-        "yield_pct": round(out / fry * 100, 1) if fry > 0 else 0.0,
-        "shrink_pct": round((fry - out) / fry * 100, 1) if fry > 0 else 0.0,
+        "yield_pct": round(out / w_in * 100, 1) if w_in > 0 else 0.0,
+        "shrink_pct": round(shrink * 100, 1) if w_in > 0 else 0.0,
     }
 
 

@@ -256,25 +256,42 @@ def test_input_price_alone_does_not_block_the_weights():
 
 
 def test_frying_loss_is_paid_by_the_teriyaki():
-    """2 кг обрезков положили, сняли 1.4 — деньги обрезков никуда не делись,
-    значит килограмм терияки дороже килограмма обрезков ровно на ужарку."""
+    """2 кг обрезков положили, сняли 1.4. Формула владельца наращивает
+    себестоимость на отход: (сумма обрезков + сумма соуса) × (1 + отход)."""
     r = acts.fry_teriyaki(2, 1.4)
     assert r["ok"], r
     assert r["teriyaki"]["shrink"] == 0.6 and r["yield_pct"] == 70.0, r
-    assert r["teriyaki"]["sum"] == 17600.0, r              # 2 × 8800
-    assert r["teriyaki"]["price_per_kg"] == 12571.43, r    # 17 600 / 1.4
+    assert r["shrink_pct"] == 30.0, r
+    assert r["spent"] == 17600.0, r                        # 2 × 8800, столько списали
+    assert r["teriyaki"]["sum"] == 22880.0, r              # 17 600 × 1.30
+    assert r["teriyaki"]["price_per_kg"] == 16342.86, r    # 22 880 / 1.4
     print(f"  [OK] ужарка {r['teriyaki']['shrink']} кг, терияки {r['teriyaki']['price_per_kg']} ₸/кг")
 
 
-def test_sauce_makes_the_teriyaki_more_expensive():
-    """200 г соуса по 4 000 ₸/кг — 800 ₸ сверху, и они ложатся на терияки."""
+def test_the_markup_on_the_shrink_is_money_out_of_thin_air():
+    """Прямое следствие формулы: приходуем на 5 280 ₸ больше, чем списываем.
+    Цифра не прячется — она лежит в `markup`, а `check` держит вложенное."""
+    r = acts.fry_teriyaki(2, 1.4)
+    assert r["check"] == r["trim"]["sum"] + (r["sauce"]["sum"] or 0), r
+    assert r["markup"] == round(r["teriyaki"]["sum"] - r["spent"], 2) == 5280.0, r
+    print(f"  [OK] списано {r['spent']} ₸, оприходовано {r['teriyaki']['sum']} ₸, "
+          f"разница {r['markup']} ₸")
+
+
+def test_sauce_is_part_of_the_input_not_just_of_the_money():
+    """Соус льют на ту же сковороду, значит он во входе: выход считается от
+    обрезков ВМЕСТЕ с ним. 1.4 / (2 + 0.2) — 63.6 %, а не 70 %."""
     dry = acts.fry_teriyaki(2, 1.4)
     r = acts.fry_teriyaki(2, 1.4, g_sauce=200, sauce_price=4000)
+    assert dry["yield_pct"] == 70.0 and r["yield_pct"] == 63.6, (dry, r)
+    assert r["input_weight"] == 2.2 and r["teriyaki"]["shrink"] == 0.8, r
+    assert r["shrink_pct"] == 36.4, r
     assert r["sauce"]["grams"] == 200.0 and r["sauce"]["sum"] == 800.0, r
-    assert r["teriyaki"]["sum"] == dry["teriyaki"]["sum"] + 800.0, r
+    assert r["spent"] == 18400.0, r                        # 17 600 обрезков + 800 соуса
+    assert r["teriyaki"]["sum"] == 25090.91, r             # 18 400 × (1 + 0.8/2.2)
     assert r["check"] == r["trim"]["sum"] + r["sauce"]["sum"], r
-    print(f"  [OK] соус 800 ₸ → терияки {r['teriyaki']['price_per_kg']} ₸/кг "
-          f"вместо {dry['teriyaki']['price_per_kg']}")
+    print(f"  [OK] соус во входе: выход {r['yield_pct']}% вместо {dry['yield_pct']}%, "
+          f"терияки {r['teriyaki']['price_per_kg']} ₸/кг")
 
 
 def test_shrink_is_counted_without_any_price():
@@ -292,6 +309,15 @@ def test_sauce_per_kilo_is_the_number_that_catches_the_overpour():
     r = acts.fry_teriyaki(2, 1.5, g_sauce=300, sauce_price=4000)
     assert r["sauce_g_per_kg"] == 200.0, r
     print(f"  [OK] {r['sauce_g_per_kg']} г соуса на килограмм терияки")
+
+
+def test_sauce_lets_the_pan_return_a_bit_more():
+    """Раз соус во входе, привесом считается только то, что тяжелее входа
+    целиком: 1.6 кг терияки из 1.5 кг обрезков и 200 г соуса — законно."""
+    r = acts.fry_teriyaki(1.5, 1.6, g_sauce=200, sauce_price=4000)
+    assert r["ok"] and r["input_weight"] == 1.7, r
+    assert r["teriyaki"]["shrink"] == 0.1 and r["yield_pct"] == 94.1, r
+    print(f"  [OK] вход {r['input_weight']} кг, ужарка {r['teriyaki']['shrink']} кг")
 
 
 def test_impossible_frying_is_refused():
@@ -325,10 +351,13 @@ def test_period_of_frying_is_its_own_summary():
     rows = [{"weight_fry": 1.8, "weight_teriyaki": 1.2, "weight_sauce": 240,
              "trim_price": 8800, "sauce_price": 4000}]
     s = acts.summarize_teriyaki(rows)
-    assert s["fry"] == 1.8 and s["teriyaki"] == 1.2 and s["shrink"] == 0.6, s
+    # вход 1.8 + 0.24 = 2.04 кг, из него сняли 1.2 — те же формулы, что в жарке
+    assert s["fry"] == 1.8 and s["teriyaki"] == 1.2, s
+    assert s["input"] == 2.04 and s["shrink"] == 0.84, s
     assert s["sauce"] == 240.0 and s["sauce_sum"] == 960.0, s
-    assert s["teriyaki_sum"] == 15840.0 + 960.0, s          # 1.8 × 8800 + соус
-    assert s["teriyaki_price"] == 14000.0 and s["yield_pct"] == 66.7, s
+    assert s["spent"] == 15840.0 + 960.0, s                 # 1.8 × 8800 + соус
+    assert s["teriyaki_sum"] == 23717.65, s                 # 16 800 × (1 + 0.84/2.04)
+    assert s["teriyaki_price"] == 19764.71 and s["yield_pct"] == 58.8, s
     assert s["sauce_g_per_kg"] == 200.0, s
     assert acts.summarize_teriyaki([])["acts"] == 0, "пустой период не делит на ноль"
     print(f"  [OK] за период ужарилось {s['shrink']} кг, выход {s['yield_pct']}%, "

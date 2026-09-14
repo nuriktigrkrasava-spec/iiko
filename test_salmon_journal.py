@@ -135,7 +135,8 @@ def test_frying_is_a_separate_document():
     assert row["weight_raw"] in (0, None), row          # весов разбора у жарки нет
 
     s = acts.summarize_teriyaki([row])
-    assert s["fry"] == 2 and s["shrink"] == 0.7, s
+    # вход жарки — обрезки вместе с соусом: 2 + 0.26 кг, из них сняли 1.3
+    assert s["fry"] == 2 and s["input"] == 2.26 and s["shrink"] == 0.96, s
     assert s["sauce"] == 260.0 and s["sauce_sum"] == 1092.0, s      # 0.26 кг × 4 200
     assert s["sauce_g_per_kg"] == 200.0, s
     assert s["teriyaki_price"] > acts.TRIM_PRICE, s

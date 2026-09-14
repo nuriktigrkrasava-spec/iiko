@@ -10,7 +10,10 @@ import { Button, Eyebrow, GLYPH, PHOTO, Segmented, field, iso, kg, pc, periodBou
 
    Главная цифра периода не вес, а выход жарки: из одних и тех же обрезков у
    аккуратного повара выходит 70 % терияки, у спешащего — 55. Рядом соус на
-   килограмм: перелив виден только так. */
+   килограмм: перелив виден только так.
+
+   Выход и ужарка считаются от входа целиком — обрезки ВМЕСТЕ с соусом, как и
+   в самой жарке. Складывать свод по другой формуле, чем акты, нельзя. */
 
 type Act = {
   id: number; created_at: string; organization_id: string
@@ -19,9 +22,10 @@ type Act = {
   posted_at?: string | null
 }
 type Total = {
-  acts: number; fry: number; teriyaki: number; shrink: number
+  acts: number; fry: number; teriyaki: number; shrink: number; input: number
   sauce: number; sauce_sum: number; sauce_g_per_kg: number; sauce_price: number
   trim_sum: number; teriyaki_sum: number; teriyaki_price: number; trim_price: number
+  spent: number; markup: number
   yield_pct: number; shrink_pct: number
 }
 type Data = {
@@ -148,7 +152,10 @@ export default function TeriyakiPeriod({ token, org, reload }: {
             Списать <b style={{ color: 'var(--hi)' }}>{kg(t.fry)} кг</b> обрезков
             {sauced && <> и <b style={{ color: 'var(--hi)' }}>{kg(t.sauce)} г</b> соуса</>},
             оприходовать <b style={{ color: 'var(--grn)' }}>{kg(t.teriyaki)} кг</b> терияки
-            по <b style={{ color: 'var(--hi)' }}>{tenge(t.teriyaki_price)}/кг</b>.
+            по <b style={{ color: 'var(--hi)' }}>{tenge(t.teriyaki_price)}/кг</b>
+            {' '}на <b style={{ color: 'var(--grn)' }}>{tenge(t.teriyaki_sum)}</b>
+            {!!t.markup && <> — это на <b style={{ color: 'var(--amb)' }}>{tenge(t.markup)}</b> больше
+              списанного: себестоимость наращена на отход {pc(t.shrink_pct)}</>}.
             Выход жарки — <b style={{ color: yieldTone(t.yield_pct) }}>{pc(t.yield_pct)}</b>,
             средневзвешенный: жарка на 10 кг весит больше, чем на один.
           </div>
@@ -176,7 +183,9 @@ export default function TeriyakiPeriod({ token, org, reload }: {
             </tr></thead>
             <tbody>
               {acts.map((a) => {
-                const y = a.weight_fry ? Math.round(a.weight_teriyaki / a.weight_fry * 1000) / 10 : 0
+                // вход жарки — обрезки вместе с соусом; соус записан в граммах
+                const wIn = a.weight_fry + (a.weight_sauce || 0) / 1000
+                const y = wIn ? Math.round(a.weight_teriyaki / wIn * 1000) / 10 : 0
                 return (
                   <tr key={a.id}>
                     <td style={td}>

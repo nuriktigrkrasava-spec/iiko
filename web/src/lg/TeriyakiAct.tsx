@@ -20,7 +20,13 @@ import TeriyakiPeriod from './TeriyakiPeriod'
 
    Граммы, а не килограммы: соус льют половником, и в килограммах повар
    ошибается на порядок. Рядом «сколько соуса на килограмм» — на этой цифре
-   перелив и ловится, сами по себе граммы не значат ничего. */
+   перелив и ловится, сами по себе граммы не значат ничего.
+
+   Формулы владельца, считает их сервер (acts.fry_teriyaki):
+     выход, %      = вес терияки / (вес обрезков + вес соуса) × 100
+     себестоимость = (сумма обрезков + сумма соуса) × (1 + отход)
+   Вторая наращивает деньги на ужарку, поэтому приход больше списания — эту
+   разницу показываем отдельной строкой, чтобы таблица сходилась глазами. */
 
 type Prod = { id: string; name: string; unit?: string } | null
 type Ctx = {
@@ -36,12 +42,16 @@ type Ctx = {
   sauce_from?: string
   title?: string
 }
-type Line = { weight: number; price_per_kg: number | null; sum: number | null; from_trim?: number; shrink?: number }
+type Line = { weight: number; price_per_kg: number | null; sum: number | null; from_trim?: number; from_input?: number; shrink?: number }
 type Sauce = { grams: number; price_per_kg: number | null; sum: number | null }
 type Calc = {
   ok: boolean; error?: string
   trim?: Line; teriyaki?: Line; sauce?: Sauce
   yield_pct?: number; shrink_pct?: number; sauce_g_per_kg?: number; check?: number | null
+  /** вход жарки — обрезки вместе с соусом; от него считаются выход и ужарка */
+  input_weight?: number
+  /** вложено (списание) и наценка на ужарку: приход = spent + markup */
+  spent?: number; markup?: number
   /** деньги посчитаны; если нет — `need_text` говорит, какой цены не хватило */
   money?: boolean; need?: string; need_text?: string
   saved?: boolean; id?: number
@@ -179,10 +189,10 @@ export default function TeriyakiAct({ token, switcher }: {
               ? <>
                   <b style={{ color: yieldTone(w.yield_pct || 0) }}>выход {pc(w.yield_pct)}</b>
                   <div style={{ marginTop: 2, fontSize: 11, color: 'var(--mute)' }}>
-                    {kg(w.trim!.weight)} − {kg(w.teriyaki!.weight)} · {pc(w.shrink_pct)}
+                    {kg(w.input_weight)} − {kg(w.teriyaki!.weight)} · {pc(w.shrink_pct)}
                   </div>
                 </>
-              : 'обрезки − терияки'} />
+              : 'обрезки + соус − терияки'} />
         </div>
 
         <div style={{ marginTop: 12, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))' }}>
@@ -260,6 +270,15 @@ export default function TeriyakiAct({ token, switcher }: {
                     <td style={tdR}>{kg(w.sauce.grams)} г</td>
                     <td style={tdR}>{tenge(w.sauce.price_per_kg)}</td>
                     <td style={tdR}>{tenge(w.sauce.sum)}</td>
+                  </tr>
+                )}
+                {!!w.markup && (
+                  <tr>
+                    <td style={td}>Ужарка <span style={{ color: 'var(--mute)', fontSize: 11 }}>
+                      · наценка на отход {pc(w.shrink_pct)}</span></td>
+                    <td style={tdR}>—</td>
+                    <td style={tdR}>—</td>
+                    <td style={{ ...tdR, color: 'var(--amb)' }}>+{tenge(w.markup)}</td>
                   </tr>
                 )}
                 <tr>

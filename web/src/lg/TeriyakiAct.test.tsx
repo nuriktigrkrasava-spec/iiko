@@ -36,13 +36,18 @@ const SALMON = {
   kind: 'salmon', title: 'Разбор лосося', raw_label: 'Стейк в разбор', raw_short: 'стейк',
 }
 
-/* 2 кг обрезков → 1.4 кг терияки, 200 г соуса: ужарка 0.6, выход 70 %. */
+/* 2 кг обрезков и 200 г соуса → 1.4 кг терияки. Вход 2.2 кг: соус лили на ту же
+   сковороду, и выход считается от него — 1.4 / 2.2 = 63.6 %, ужарка 0.8 кг.
+   Себестоимость наращена на отход: 18 440 × (1 + 0.8/2.2) = 25 145.45 ₸, то есть
+   на 6 705.45 ₸ больше списанного. Цифры — ровно то, что отдаёт fry_teriyaki. */
 const CALC = {
   ok: true, money: true, need: '',
+  input_weight: 2.2,
   trim: { weight: 2, price_per_kg: 8800, sum: 17600 },
   sauce: { grams: 200, price_per_kg: 4200, sum: 840 },
-  teriyaki: { weight: 1.4, price_per_kg: 13171.43, sum: 18440, from_trim: 2, shrink: 0.6 },
-  yield_pct: 70, shrink_pct: 30, sauce_g_per_kg: 142.9, check: 18440,
+  teriyaki: { weight: 1.4, price_per_kg: 17961.04, sum: 25145.45, from_trim: 2, from_input: 2.2, shrink: 0.8 },
+  yield_pct: 63.6, shrink_pct: 36.4, sauce_g_per_kg: 142.9,
+  spent: 18440, markup: 6705.45, check: 18440,
 }
 
 beforeEach(() => {
@@ -63,7 +68,7 @@ describe('вкладка терияки', () => {
     expect(screen.getByText('сколько сняли')).toBeTruthy()
     expect(screen.getByText('сколько налили')).toBeTruthy()
     // ужарка не вводится — она разница двух весов
-    expect(screen.getByText('обрезки − терияки')).toBeTruthy()
+    expect(screen.getByText('обрезки + соус − терияки')).toBeTruthy()
     expect(screen.getByText('г')).toBeTruthy()            // соус в граммах
   })
 
@@ -82,8 +87,32 @@ describe('вкладка терияки', () => {
     fireEvent.change(screen.getByPlaceholderText('1,4'), { target: { value: '1.4' } })
     fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } })
     await waitFor(() => expect(screen.getByText(/Выход жарки/)).toBeTruthy(), { timeout: 2000 })
-    expect(screen.getAllByText('70%').length).toBeGreaterThan(0)
+    // 1,4 / (2 + 0,2) — соус в знаменателе, иначе горело бы 70 %
+    expect(screen.getAllByText('63,6%').length).toBeGreaterThan(0)
     expect(screen.getByText('142,9 г')).toBeTruthy()
+  })
+
+  it('ужарка считается от входа целиком, а не от одних обрезков', async () => {
+    const { container } = render(<TeriyakiAct token="1.sig" switcher={null} />)
+    await waitFor(() => expect(screen.getByText(/Обрезки в жарку/)).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('2'), { target: { value: '2' } })
+    fireEvent.change(screen.getByPlaceholderText('1,4'), { target: { value: '1.4' } })
+    fireEvent.change(screen.getByPlaceholderText('200'), { target: { value: '200' } })
+    await waitFor(() => expect(screen.getByText(/Выход жарки/)).toBeTruthy(), { timeout: 2000 })
+    const shrink = Array.from(container.querySelectorAll('.sal-tile'))
+      .map((el) => el.textContent || '').find((t) => t.includes('Ужарка')) || ''
+    expect(shrink).toMatch(/0,8/)          // 2,2 − 1,4, а не 2 − 1,4
+    expect(shrink).toMatch(/2,2 − 1,4/)    // вход подписан суммой, а не обрезками
+  })
+
+  it('наценку на ужарку показывает отдельной строкой', async () => {
+    /* Формула владельца приходует больше, чем списывает. Спрятать разницу —
+       значит отдать в iiko таблицу, которая не сходится в столбик. */
+    render(<TeriyakiAct token="1.sig" switcher={null} />)
+    await waitFor(() => expect(screen.getByText(/Обрезки в жарку/)).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('2'), { target: { value: '2' } })
+    await waitFor(() => expect(screen.getByText(/наценка на отход/)).toBeTruthy(), { timeout: 2000 })
+    expect(screen.getByText(/наценка на отход 36,4%/)).toBeTruthy()
   })
 
   it('в запрос уезжают обрезки, терияки и граммы соуса', async () => {
@@ -120,8 +149,8 @@ describe('жарка без цены', () => {
     need_text: 'Цена обрезков не задана — впиши, почём их считать.',
     trim: { weight: 2, price_per_kg: null, sum: null },
     sauce: { grams: 0, price_per_kg: null, sum: null },
-    teriyaki: { weight: 1.4, price_per_kg: null, sum: null, from_trim: 2, shrink: 0.6 },
-    yield_pct: 70, shrink_pct: 30, sauce_g_per_kg: 0, check: null,
+    teriyaki: { weight: 1.4, price_per_kg: null, sum: null, from_trim: 2, from_input: 2, shrink: 0.6 },
+    input_weight: 2, yield_pct: 70, shrink_pct: 30, sauce_g_per_kg: 0, check: null,
   }
 
   it('ужарка и выход считаются, даже когда цены обрезков нет', async () => {
