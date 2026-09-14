@@ -30,16 +30,20 @@ type Ctx = {
   branches?: { organization_id: string; name: string }[]
   products?: { trim: Prod; teriyaki: Prod; sauce: Prod }
   trim_price?: number
+  trim_from?: string
+  trim_const?: boolean        // обрезки по константе учёта, а не по себестоимости
   sauce_price?: number
   sauce_from?: string
   title?: string
 }
-type Line = { weight: number; price_per_kg: number; sum: number; from_trim?: number; shrink?: number }
-type Sauce = { grams: number; price_per_kg: number; sum: number }
+type Line = { weight: number; price_per_kg: number | null; sum: number | null; from_trim?: number; shrink?: number }
+type Sauce = { grams: number; price_per_kg: number | null; sum: number | null }
 type Calc = {
   ok: boolean; error?: string
   trim?: Line; teriyaki?: Line; sauce?: Sauce
-  yield_pct?: number; shrink_pct?: number; sauce_g_per_kg?: number; check?: number
+  yield_pct?: number; shrink_pct?: number; sauce_g_per_kg?: number; check?: number | null
+  /** деньги посчитаны; если нет — `need_text` говорит, какой цены не хватило */
+  money?: boolean; need?: string; need_text?: string
   saved?: boolean; id?: number
 }
 
@@ -98,7 +102,7 @@ export default function TeriyakiAct({ token, switcher }: {
   }, [fry, out, sauce, trimPrice, saucePrice, org, token])
 
   async function save() {
-    if (!calc?.ok) return
+    if (!calc?.ok || !calc.money) return
     setSaving(true)
     try {
       const r = await fetch(`/api/teriyaki/${token}/save`, {
@@ -150,25 +154,34 @@ export default function TeriyakiAct({ token, switcher }: {
           </div>
         )}
 
-        {/* Два веса и граммы. Ужарка не вводится: она разница первых двух. */}
+        {/* Два веса и граммы. Ужарка не вводится: она разница первых двух.
+            Порядок плиток — порядок жарки: сперва то, что кладут на сковороду
+            (обрезки и соус), потом то, что с неё снимают, и только следом
+            ужарка. Терияки, стоявшее между обрезками и соусом, читалось как
+            ещё один вход. */}
         <div style={{ marginTop: 14, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(158px,1fr))' }}>
           <Tile photo={PHOTO.trim} glyph={GLYPH.trim} label="Обрезки в жарку" hint="вход"
             value={fry} onChange={setFry} placeholder="2"
             foot={shownTrim ? `${tenge(shownTrim)}/кг` : 'цену ниже'} />
-          <Tile photo={PHOTO.teriyaki} glyph={GLYPH.teriyaki} label="Терияки" hint="со сковороды"
-            value={out} onChange={setOut} placeholder="1,4"
-            foot={w ? `${tenge(w.teriyaki!.price_per_kg)}/кг` : 'сколько сняли'} />
           <Tile photo={PHOTO.sauce} glyph={GLYPH.sauce} label="Соус терияки" unit="г"
             hint={shownSauce ? `по ${tenge(shownSauce)}/кг` : 'цену ниже'}
             value={sauce} onChange={setSauce} placeholder="200"
             foot={w && w.sauce && w.sauce.grams > 0
-              ? `${kg(w.sauce_g_per_kg)} г на кг · ${tenge(w.sauce.sum)}`
+              ? `${kg(w.sauce_g_per_kg)} г на кг${w.sauce.sum ? ` · ${tenge(w.sauce.sum)}` : ''}`
               : 'сколько налили'} />
+          <Tile photo={PHOTO.teriyaki} glyph={GLYPH.teriyaki} label="Терияки" hint="со сковороды"
+            value={out} onChange={setOut} placeholder="1,4"
+            foot={w && w.teriyaki!.price_per_kg ? `${tenge(w.teriyaki!.price_per_kg)}/кг` : 'сколько сняли'} />
           <Tile glyph="🔥" label="Ужарка" hint="считается сама" readOnly
             value={w ? kg(w.teriyaki!.shrink) : ''}
             tone={w ? yieldTone(w.yield_pct || 0) : undefined}
             foot={w
-              ? <b style={{ color: yieldTone(w.yield_pct || 0) }}>выход {pc(w.yield_pct)}</b>
+              ? <>
+                  <b style={{ color: yieldTone(w.yield_pct || 0) }}>выход {pc(w.yield_pct)}</b>
+                  <div style={{ marginTop: 2, fontSize: 11, color: 'var(--mute)' }}>
+                    {kg(w.trim!.weight)} − {kg(w.teriyaki!.weight)} · {pc(w.shrink_pct)}
+                  </div>
+                </>
               : 'обрезки − терияки'} />
         </div>
 
@@ -195,18 +208,37 @@ export default function TeriyakiAct({ token, switcher }: {
         </div>
 
         <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
-          Обрезки идут по константе учёта — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price || 0)}/кг</b>:
-          по накладным они не приходят ни разу.
+          {ctx.trim_price
+            ? <>Обрезки — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price)}/кг</b>{ctx.trim_from ? ` · ${ctx.trim_from}` : ''}.</>
+            : <>Себестоимости обрезков в iiko нет — впиши, почём их считать.</>}
           {ctx.sauce_price
-            ? <> Соус — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.sauce_price)}/кг</b> из накладных{ctx.sauce_from ? ` · ${ctx.sauce_from}` : ''}.</>
-            : <> Соуса в накладных за 60 дней нет — впиши цену, иначе граммы не во что пересчитать.</>}
+            ? <> Соус — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.sauce_price)}/кг</b>{ctx.sauce_from ? ` · ${ctx.sauce_from}` : ''}.</>
+            : <> Соуса нет ни в себестоимости, ни в накладных — впиши цену, иначе граммы не во что пересчитать.</>}
         </div>
+
+        {/* Ужарка и выход — это веса, и цена к ним не относится: показываем их
+            даже когда деньги посчитать не из чего. */}
+        {w && !w.money && (
+          <div style={{ marginTop: 12, fontSize: 12.5, color: 'var(--amb)' }}>
+            {w.need_text || 'Не хватает цены, чтобы посчитать деньги.'} Ужарка и выход жарки ниже уже посчитаны.
+          </div>
+        )}
+
+        {w && !w.money && (
+          <div style={{ marginTop: 14, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
+            <span>Выход жарки <b style={{ color: yieldTone(w.yield_pct || 0) }}>{pc(w.yield_pct)}</b></span>
+            <span>Ужарка <b style={{ color: 'var(--amb)' }}>{kg(w.teriyaki!.shrink)} кг</b> · {pc(w.shrink_pct)}</span>
+            {(w.sauce_g_per_kg || 0) > 0 && (
+              <span>Соуса <b style={{ color: 'var(--hi)' }}>{kg(w.sauce_g_per_kg)} г</b> на кг</span>
+            )}
+          </div>
+        )}
 
         {calc && !calc.ok && (
           <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{calc.error}</div>
         )}
 
-        {w && (
+        {w && w.money && (
           <>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16 }}>
               <thead><tr>

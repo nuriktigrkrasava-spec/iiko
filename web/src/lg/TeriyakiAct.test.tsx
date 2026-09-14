@@ -38,7 +38,7 @@ const SALMON = {
 
 /* 2 кг обрезков → 1.4 кг терияки, 200 г соуса: ужарка 0.6, выход 70 %. */
 const CALC = {
-  ok: true,
+  ok: true, money: true, need: '',
   trim: { weight: 2, price_per_kg: 8800, sum: 17600 },
   sauce: { grams: 200, price_per_kg: 4200, sum: 840 },
   teriyaki: { weight: 1.4, price_per_kg: 13171.43, sum: 18440, from_trim: 2, shrink: 0.6 },
@@ -108,6 +108,52 @@ describe('вкладка терияки', () => {
     await waitFor(() => expect(screen.getByText(/П\/Ф ОБРЕЗКИ ЛОСОСЬ/)).toBeTruthy(), { timeout: 2000 })
     expect(screen.getAllByText(/списать/).length).toBe(2)      // обрезки и соус
     expect(screen.getByText(/оприходовать/)).toBeTruthy()      // П/Ф терияки
+  })
+})
+
+describe('жарка без цены', () => {
+  /* Требование со скрина: ужарка «неправильно читается». Она разница двух
+     весов, и когда себестоимости обрезков в iiko нет, экран раньше отдавал
+     ошибку целиком — вместе с ужаркой, к которой цена отношения не имеет. */
+  const NO_PRICE = {
+    ok: true, money: false, need: 'trim_price',
+    need_text: 'Цена обрезков не задана — впиши, почём их считать.',
+    trim: { weight: 2, price_per_kg: null, sum: null },
+    sauce: { grams: 0, price_per_kg: null, sum: null },
+    teriyaki: { weight: 1.4, price_per_kg: null, sum: null, from_trim: 2, shrink: 0.6 },
+    yield_pct: 70, shrink_pct: 30, sauce_g_per_kg: 0, check: null,
+  }
+
+  it('ужарка и выход считаются, даже когда цены обрезков нет', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) => ({
+      ok: true,
+      json: async () => (String(url).includes('/period') ? { acts: [], total: { acts: 0 } }
+        : opts?.method === 'POST' ? NO_PRICE
+        : { ...CTX, trim_price: 0 }),
+    })) as unknown as typeof fetch)
+    const { container } = render(<TeriyakiAct token="1.sig" switcher={null} />)
+    await waitFor(() => expect(screen.getByText(/Обрезки в жарку/)).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('2'), { target: { value: '2' } })
+    fireEvent.change(screen.getByPlaceholderText('1,4'), { target: { value: '1.4' } })
+    await waitFor(() => expect(screen.getByText(/уже посчитаны/)).toBeTruthy(), { timeout: 2000 })
+    const shrink = Array.from(container.querySelectorAll('.sal-tile'))
+      .map((el) => el.textContent || '').find((t) => t.includes('Ужарка')) || ''
+    expect(shrink).toMatch(/0,6/)        // 2 − 1,4 — кг ужарки
+    expect(shrink).toMatch(/70%/)        // выход жарки
+    expect(screen.queryByText(/оприходовать/)).toBeNull()            // денег нет
+  })
+})
+
+describe('порядок на экране', () => {
+  it('соус стоит перед терияки: сперва что кладут, потом что снимают', async () => {
+    const { container } = render(<TeriyakiAct token="1.sig" switcher={null} />)
+    await waitFor(() => expect(screen.getByText(/Обрезки в жарку/)).toBeTruthy())
+    const labels = Array.from(container.querySelectorAll('.sal-tile'))
+      .map((el) => el.textContent || '')
+    const sauce = labels.findIndex((t) => t.includes('Соус терияки'))
+    const teriyaki = labels.findIndex((t) => /Терияки · со сковороды/.test(t))
+    expect(sauce).toBeGreaterThan(-1)
+    expect(teriyaki).toBeGreaterThan(sauce)
   })
 })
 

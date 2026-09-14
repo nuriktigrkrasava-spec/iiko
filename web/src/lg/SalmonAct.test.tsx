@@ -52,6 +52,42 @@ beforeEach(() => {
   })) as unknown as typeof fetch)
 })
 
+/* Требование со скрина: «отход не считается совсем». У угря константы обрезков
+   нет, и расчёт раньше падал в ошибку целиком — вместе с отходом, который от
+   цены не зависит вовсе. */
+const EEL_NO_TRIM_PRICE = {
+  ok: true, money: false, need: 'trim_price',
+  need_text: 'Цена обрезков не задана — впиши, почём их считать.',
+  kind: 'eel',
+  raw: { weight: 10, price_per_kg: 14000, sum: 140000 },
+  slice: { weight: 7, price_per_kg: null, sum: null },
+  trim: { weight: 2, price_per_kg: null, sum: null },
+  waste: { weight: 1, price_per_kg: 0, sum: 0 },
+  slice_pct: 70, trim_pct: 20, waste_pct: 10, check: null,
+}
+
+describe('отход без цены', () => {
+  it('у угря без цены обрезков считаются вес отхода и его процент', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) => ({
+      ok: true,
+      json: async () => (String(url).includes('/network') ? { branches: [] }
+        : String(url).includes('/period') ? { acts: [], total: { acts: 0 } }
+        : opts?.method === 'POST' ? EEL_NO_TRIM_PRICE : EEL),
+    })) as unknown as typeof fetch)
+    const { container } = render(<SalmonAct token="1.sig" />)
+    await waitFor(() => expect(screen.getByText(/Разбор угря/)).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '10' } })
+    fireEvent.change(screen.getByPlaceholderText('8'), { target: { value: '7' } })
+    fireEvent.change(screen.getByPlaceholderText('2'), { target: { value: '2' } })
+    await waitFor(() => expect(screen.getByText(/уже посчитаны/)).toBeTruthy(), { timeout: 2000 })
+    const waste = Array.from(container.querySelectorAll('.sal-tile'))
+      .map((el) => el.textContent || '').find((t) => t.includes('Отход')) || ''
+    expect(waste).toMatch(/10%/)          // процент отхода
+    expect(waste).toMatch(/10 − 7 − 2/)   // вычитание, из которого он получился
+    expect(screen.queryByText(/остаток стоимости/)).toBeNull()   // денег ещё нет
+  })
+})
+
 describe('экран разбора', () => {
   it('поля идут стейк → нарезка → обрезки, отход не вводится', async () => {
     render(<SalmonAct token="1.sig" />)

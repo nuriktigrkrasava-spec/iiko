@@ -953,6 +953,44 @@ class IikoWebClient:
                 return self._aggregate_stock_prices(rows)
         return {}
 
+    async def get_stock_costs(self, org_name: str = "") -> Dict[str, float]:
+        """Учётная себестоимость позиций ПО СКЛАДАМ ФИЛИАЛА: {productId: ₸ за единицу}.
+
+        get_stock_prices() усредняет остатки по всей корпорации, и для сети это
+        ровно та ошибка, из-за которой у каждого филиала выходила одна и та же
+        цена: остатки ЦЕХа перевешивают остатки точки. Здесь строки сначала
+        режутся по складам филиала и только потом усредняются, поэтому у
+        «Алиева» и у «Кунаева» себестоимость своя — какой она в учёте и есть.
+
+        Позиций с нулевым остатком в отчёте нет: у них нет и себестоимости.
+        Пустой ответ — это «не знаем», а не «ноль»; подставлять вместо него
+        цену из накладных чужого филиала нельзя, иначе вернётся та же одна
+        цена на всех.
+        """
+        self._ensure_caches()
+        if not hasattr(self, "_cost_cache"):
+            self._cost_cache: Dict[str, Tuple[datetime, Dict[str, float]]] = {}
+        key = (org_name or "").strip()
+        hit = self._cost_cache.get(key)
+        if hit and (datetime.now() - hit[0]) < timedelta(minutes=15):
+            return hit[1]
+
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
+        rows = await self.get_balance_rows(ts)
+        if key:
+            try:
+                stores = await self.get_stores(key)
+                ids = {s["id"] for s in stores if s.get("id")}
+            except Exception:
+                ids = set()
+            # Склады филиала не нашлись — считаем по всем, но это уже сетевое
+            # среднее: лучше честная общая цифра, чем пустой экран.
+            if ids:
+                rows = [r for r in rows if r.get("store") in ids]
+        out = self._aggregate_stock_prices(rows)
+        self._cost_cache[key] = (datetime.now(), out)
+        return out
+
     async def get_expense_acts(self, org_ids: List[str], date_from: str, date_to: str) -> Dict[str, Any]:
         """Расходы через OLAP TRANSACTIONS — INCOME_EXPENSES счета."""
         filters: Dict[str, Any] = {

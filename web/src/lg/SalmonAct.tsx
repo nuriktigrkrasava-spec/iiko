@@ -22,10 +22,13 @@ import TeriyakiAct from './TeriyakiAct'
    период администратор заносит ОДИН сводный акт руками. Два документа на один
    и тот же вес задвоили бы списание.
 
-   Цены — вход, а у угря и обрезки — тянутся из накладных: вбитая с
-   потолка цифра превращает себестоимость в фантазию. Поля рядом всё равно
-   есть: бывает разовый закуп по другой цене, и заставлять человека верить
-   истории накладных в таком случае неправильно. */
+   Цены — учётная себестоимость из iiko, по складам самого филиала. Накладная
+   осталась запасным источником: П/Ф приходит в филиал перемещением из ЦЕХа, у
+   него нет накладной вовсе, и поиск цены «у соседей» давал всей сети одну и ту
+   же цифру. Поля рядом всё равно есть: бывает разовый закуп по другой цене.
+
+   Веса считаются всегда, даже когда цены не нашлось: отход — это вес, и из-за
+   ненайденной цены обрезков пропадать с экрана он не должен. */
 
 type Prod = { id: string; name: string; unit?: string } | null
 type Ctx = {
@@ -45,11 +48,13 @@ type Ctx = {
   raw_short?: string
   kinds?: { key: string; title: string; tab: string }[]
 }
-type Line = { weight: number; price_per_kg: number; sum: number }
+type Line = { weight: number; price_per_kg: number | null; sum: number | null }
 type Calc = {
   ok: boolean; error?: string
   raw?: Line; slice?: Line; trim?: Line; waste?: Line
-  slice_pct?: number; trim_pct?: number; waste_pct?: number; check?: number
+  slice_pct?: number; trim_pct?: number; waste_pct?: number; check?: number | null
+  /** деньги посчитаны; если нет — `need_text` говорит, какой цены не хватило */
+  money?: boolean; need?: string; need_text?: string
   saved?: boolean; id?: number
 }
 
@@ -116,7 +121,7 @@ export default function SalmonAct({ token }: { token: string }) {
   }, [raw, slice, trim, price, trimPrice, org, token, kind])
 
   async function save() {
-    if (!calc?.ok) return
+    if (!calc?.ok || !calc.money) return
     setSaving(true)
     try {
       const r = await fetch(`/api/acts/${kind}/${token}/save`, {
@@ -192,16 +197,24 @@ export default function SalmonAct({ token }: { token: string }) {
             foot={ctx.price_per_kg ? `${tenge(ctx.price_per_kg)}/кг` : 'цена не найдена'} />
           <Tile photo={ph.slice} glyph={GLYPH.slice} label="Нарезка" hint="выход" value={slice}
             onChange={setSlice} placeholder="8"
-            foot={w ? `${pc(w.slice_pct)} · ${tenge(w.slice!.price_per_kg)}/кг` : undefined} />
+            foot={w ? `${pc(w.slice_pct)}${w.slice!.price_per_kg ? ` · ${tenge(w.slice!.price_per_kg)}/кг` : ''}` : undefined} />
           <Tile photo={ph.trim} glyph={GLYPH.trim} label="Обрезки"
             hint={shownTrim ? `по ${tenge(shownTrim)}` : 'цену ниже'}
             value={trim} onChange={setTrim} placeholder="2"
             foot={w ? `${pc(w.trim_pct)} веса` : undefined} />
+          {/* Отход не вводят: он остаток веса. Поэтому здесь и вес, и процент,
+              и само вычитание — видно, из чего он получился, а не только
+              сколько вышло. */}
           <Tile photo={ph.waste} glyph={GLYPH.waste} label="Отход" hint="кости, кожа" readOnly
             value={w ? kg(w.waste!.weight) : ''}
             tone={w ? wasteTone(w.waste_pct || 0) : undefined}
             foot={w
-              ? <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)} отхода</b>
+              ? <>
+                  <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)} отхода</b>
+                  <div style={{ marginTop: 2, fontSize: 11, color: 'var(--mute)' }}>
+                    {kg(w.raw!.weight)} − {kg(w.slice!.weight)} − {kg(w.trim!.weight)}
+                  </div>
+                </>
               : `${short} − нарезка − обрезки`} />
         </div>
 
@@ -230,18 +243,34 @@ export default function SalmonAct({ token }: { token: string }) {
 
         <div style={{ marginTop: 8, fontSize: 11.5, color: 'var(--mute)' }}>
           {ctx.price_per_kg
-            ? <>Цена из накладных: <b style={{ color: 'var(--hi)' }}>{tenge(ctx.price_per_kg)}/кг</b>{ctx.price_from ? ` · ${ctx.price_from}` : ''}. Поле можно переписать.</>
-            : <>В накладных этого филиала входа нет за 60 дней — впиши цену вручную.</>}
-          {askTrimPrice && <> Обрезков этой рыбы в накладных за 60 дней нет, а константы учёта у неё ещё не назначили — цену вводят здесь.</>}
-          {!askTrimPrice && !ctx.trim_const && ctx.trim_from
-            && <> Обрезки — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price || 0)}/кг</b> из накладных · {ctx.trim_from}.</>}
+            ? <>Себестоимость входа: <b style={{ color: 'var(--hi)' }}>{tenge(ctx.price_per_kg)}/кг</b>{ctx.price_from ? ` · ${ctx.price_from}` : ''}. Поле можно переписать.</>
+            : <>Себестоимости входа в iiko нет, и в накладных филиала его тоже нет — впиши цену вручную.</>}
+          {askTrimPrice && <> Себестоимости обрезков этой рыбы в iiko нет, а константы учёта у неё не назначено — цену вводят здесь.</>}
+          {!askTrimPrice && ctx.trim_from
+            && <> Обрезки — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price || 0)}/кг</b> · {ctx.trim_from}.</>}
         </div>
+
+        {/* Веса посчитаны, денег нет: говорим ровно, какой цены не хватило, и
+            не прячем при этом отход — он к цене отношения не имеет. */}
+        {w && !w.money && (
+          <div style={{ marginTop: 12, fontSize: 12.5, color: 'var(--amb)' }}>
+            {w.need_text || 'Не хватает цены, чтобы посчитать деньги.'} Веса и проценты ниже уже посчитаны.
+          </div>
+        )}
 
         {calc && !calc.ok && (
           <div style={{ marginTop: 12, fontSize: 13, color: 'var(--red)' }}>{calc.error}</div>
         )}
 
-        {w && (
+        {w && !w.money && (
+          <div style={{ marginTop: 14, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
+            <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{kg(w.waste!.weight)} кг</b> · {pc(w.waste_pct)}</span>
+            <span>В нарезку <b style={{ color: 'var(--grn)' }}>{kg(w.slice!.weight)} кг</b> · {pc(w.slice_pct)}</span>
+            <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>
+          </div>
+        )}
+
+        {w && w.money && (
           <>
             <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 16 }}>
               <thead><tr>
@@ -279,8 +308,8 @@ export default function SalmonAct({ token }: { token: string }) {
             </table>
 
             <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
-              <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)}</b></span>
-              <span>В обрезки <b style={{ color: 'var(--hi)' }}>{pc(w.trim_pct)}</b></span>
+              <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{kg(w.waste!.weight)} кг</b> · {pc(w.waste_pct)}</span>
+              <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>
               {/* Здесь стояла «Сходимость: X из Y» зелёным. Она не могла не
                   сойтись: нарезка считается как «вход − обрезки», а сходимость —
                   как «обрезки + отход + нарезка», то есть тот же вход длинной

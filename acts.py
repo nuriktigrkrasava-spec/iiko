@@ -182,12 +182,22 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
               kind: str = DEFAULT_KIND) -> Dict[str, Any]:
     """Разбор в весах и деньгах. Только арифметика, в iiko не ходит.
 
-    price_per_kg — цена входа из накладной;
+    price_per_kg — себестоимость входа;
     w_raw        — сколько входа пошло в разбор;
     w_slice      — сколько получилось нарезки (её и взвешивают);
     w_trim       — сколько получилось обрезков;
     отход        — остаток веса: вход − нарезка − обрезки. Себестоимость 0 ₸,
                    поэтому отход НЕ уменьшает стоимость нарезки — только вес.
+
+    ВЕСА СЧИТАЮТСЯ ВСЕГДА, деньги — только когда цены известны. Раньше расчёт
+    упирался в ненайденную цену и возвращал ошибку целиком: у угря, где
+    константы обрезков нет, экран не показывал ни отхода, ни процентов — при
+    том что человек всё взвесил. Отход — это вес, и к цене он не относится.
+
+    Ноль вместо неизвестной цены подставить нельзя: обрезки «бесплатно» молча
+    отдают свои деньги нарезке, и она дорожает на ровном месте. Поэтому
+    money=False и денежные поля пустые, а не нулевые — «неизвестно» и
+    «бесплатно» на экране должны выглядеть по-разному.
 
     Что с обрезками делают дальше — не дело этого расчёта: жарка идёт ПОСЛЕ
     разбора, отдельным документом, и улучшить ею разделку рыбы нельзя.
@@ -206,6 +216,35 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
         return {"ok": False,
                 "error": f"Нарезка и обрезки вместе тяжелее {spec['raw_gen']} — проверь весы"}
 
+    # Цена обрезков нужна ровно тогда, когда обрезки есть: разбор без них
+    # не должен упираться в цену того, чего в нём нет.
+    need = ("price" if price_per_kg <= 0 else
+            "trim_price" if (w_trim > 0 and trim_price <= 0) else "")
+    money = not need
+
+    weights = {
+        "ok": True,
+        "kind": spec["key"],
+        "slice_pct": round(w_slice / w_raw * 100, 1),
+        "trim_pct": round(w_trim / w_raw * 100, 1),
+        "waste_pct": round(w_waste / w_raw * 100, 1),
+        "money": money,
+        "need": need,
+        "trim_price": trim_price or None,
+    }
+    if not money:
+        # Цена входа могла найтись, даже если не нашлась цена обрезков, —
+        # показываем то, что знаем, и молчим о том, чего не знаем.
+        raw_sum = round(price_per_kg * w_raw, 2) if price_per_kg > 0 else None
+        return {
+            **weights,
+            "raw": {"weight": w_raw, "price_per_kg": price_per_kg or None, "sum": raw_sum},
+            "slice": {"weight": w_slice, "price_per_kg": None, "sum": None},
+            "trim": {"weight": w_trim, "price_per_kg": trim_price or None, "sum": None},
+            "waste": {"weight": w_waste, "price_per_kg": 0.0, "sum": 0.0},
+            "check": None,
+        }
+
     raw_sum = round(price_per_kg * w_raw, 2)
     trim_sum = round(trim_price * w_trim, 2)
     waste_sum = 0.0                       # отход по нулю: так ведётся учёт
@@ -216,16 +255,12 @@ def split_act(price_per_kg: float, w_raw: float, w_slice: float,
     per_kg = round(slice_sum / w_slice, 2) if w_slice > 0 else 0.0
 
     return {
-        "ok": True,
-        "kind": spec["key"],
+        **weights,
         "raw": {"weight": w_raw, "price_per_kg": price_per_kg, "sum": raw_sum},
         "slice": {"weight": w_slice, "price_per_kg": per_kg, "sum": slice_sum},
         "trim": {"weight": w_trim, "price_per_kg": trim_price, "sum": trim_sum},
         "waste": {"weight": w_waste, "price_per_kg": 0.0, "sum": waste_sum},
         "trim_price": trim_price,
-        "slice_pct": round(w_slice / w_raw * 100, 1),
-        "trim_pct": round(w_trim / w_raw * 100, 1),
-        "waste_pct": round(w_waste / w_raw * 100, 1),
         # Сумма разложенных строк. Оператору её показывать нельзя — она равна
         # стоимости входа тождественно (нарезка и есть остаток), и зелёная
         # «сходимость» на экране горела бы даже когда всё ушло в отход. А вот
@@ -251,10 +286,14 @@ def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
 
     w_fry       — сколько килограммов обрезков положили на сковороду;
     w_out       — сколько килограммов терияки с неё сняли. Разница — ужарка;
-    trim_price  — почём считать обрезки (константа учёта лосося);
+    trim_price  — себестоимость обрезков;
     g_sauce     — сколько ГРАММОВ соуса ушло. Граммы, а не килограммы: соус
                   льют половником, и в килограммах повар ошибается на порядок;
-    sauce_price — цена соуса из накладных, ₸ за килограмм.
+    sauce_price — себестоимость соуса, ₸ за килограмм.
+
+    Ужарка и выход жарки — это веса, и считаются они всегда. Пока расчёт
+    падал на ненайденной цене обрезков, главная цифра сковороды не доезжала
+    до экрана из-за того, что к ней не относится.
     """
     trim_price = float(TRIM_PRICE if trim_price is None else trim_price or 0)
     w_fry, w_out = float(w_fry or 0), float(w_out or 0)
@@ -269,28 +308,46 @@ def fry_teriyaki(w_fry: float, w_out: float, trim_price: Optional[float] = None,
     if w_out > w_fry + 1e-9:
         return {"ok": False,
                 "error": "Терияки тяжелее обрезков, что пошли в жарку — при жарке вес уходит"}
-    if trim_price <= 0:
-        return {"ok": False, "error": "Цена обрезков не задана — впиши, почём их считать"}
 
     w_shrink = round(w_fry - w_out, 3)
-    trim_sum = round(trim_price * w_fry, 2)
-    sauce_sum = round(sauce_price * g_sauce / 1000, 2)
-    out_sum = round(trim_sum + sauce_sum, 2)
-    return {
+    need = ("trim_price" if trim_price <= 0 else
+            "sauce_price" if (g_sauce > 0 and sauce_price <= 0) else "")
+    money = not need
+
+    weights = {
         "ok": True,
         "kind": "teriyaki",
-        "trim": {"weight": w_fry, "price_per_kg": trim_price, "sum": trim_sum},
-        "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
-                  "price_per_kg": sauce_price, "sum": sauce_sum},
-        "teriyaki": {"weight": w_out, "price_per_kg": round(out_sum / w_out, 2),
-                     "sum": out_sum, "from_trim": w_fry, "shrink": w_shrink},
-        "trim_price": trim_price,
-        "sauce_price": sauce_price,
+        "trim_price": trim_price or None,
+        "sauce_price": sauce_price or None,
         # выход жарки: сколько процентов сковорода вернула. Ниже — больше ужарка
         "yield_pct": round(w_out / w_fry * 100, 1),
         "shrink_pct": round(w_shrink / w_fry * 100, 1),
         # соуса на килограмм терияки: по этой цифре и ловится перелив
         "sauce_g_per_kg": round(g_sauce / w_out, 1),
+        "money": money,
+        "need": need,
+    }
+    if not money:
+        return {
+            **weights,
+            "trim": {"weight": w_fry, "price_per_kg": trim_price or None, "sum": None},
+            "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
+                      "price_per_kg": sauce_price or None, "sum": None},
+            "teriyaki": {"weight": w_out, "price_per_kg": None, "sum": None,
+                         "from_trim": w_fry, "shrink": w_shrink},
+            "check": None,
+        }
+
+    trim_sum = round(trim_price * w_fry, 2)
+    sauce_sum = round(sauce_price * g_sauce / 1000, 2)
+    out_sum = round(trim_sum + sauce_sum, 2)
+    return {
+        **weights,
+        "trim": {"weight": w_fry, "price_per_kg": trim_price, "sum": trim_sum},
+        "sauce": {"grams": round(g_sauce, 1), "weight": round(g_sauce / 1000, 4),
+                  "price_per_kg": sauce_price, "sum": sauce_sum},
+        "teriyaki": {"weight": w_out, "price_per_kg": round(out_sum / w_out, 2),
+                     "sum": out_sum, "from_trim": w_fry, "shrink": w_shrink},
         "check": out_sum,                    # = обрезки + соус, всё что вложили
     }
 

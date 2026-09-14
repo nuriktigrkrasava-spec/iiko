@@ -2885,6 +2885,17 @@ def _ensure_salmon(conn):
                       ("kind", "TEXT")):
         if col not in cols:
             conn.execute(f"ALTER TABLE salmon_acts ADD COLUMN {col} {decl}")
+    # Жарки, записанные ДО выноса терияки в свой документ, лежат без kind, и
+    # пустой kind читается как 'salmon'. Из-за этого они не попадали в свод
+    # жарок вовсе — ужарка за период недосчитывалась ровно на них, — а в свод
+    # разбора попадали строкой без входа и портили обрезки. Узнаём их по тому,
+    # чего у разбора не бывает: вес в жарку есть, а входа нет.
+    conn.execute(
+        "UPDATE salmon_acts SET kind = 'teriyaki' "
+        "WHERE COALESCE(NULLIF(kind,''),'') = '' "
+        "AND COALESCE(weight_fry,0) > 0 AND COALESCE(weight_raw,0) <= 0")
+    conn.execute(
+        "UPDATE salmon_acts SET kind = 'salmon' WHERE COALESCE(NULLIF(kind,''),'') = ''")
 
 
 def add_salmon_act(org_id: str, created_by: int, calc: Dict[str, Any],

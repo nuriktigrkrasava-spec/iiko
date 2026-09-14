@@ -170,6 +170,46 @@ def test_frying_is_not_part_of_the_act():
     print("  [OK] разбор считает только рыбу: вход = нарезка + обрезки + отход")
 
 
+def test_weights_are_counted_even_when_no_price_is_known():
+    """Отход — это вес, а не деньги, и цена на него не влияет.
+
+    Пока расчёт упирался в ненайденную цену, экран не показывал НИЧЕГО: ни
+    отхода, ни процентов. Для угря, у которого константы обрезков нет, это
+    означало «отход не считается совсем» — при том что взвесили всё, что надо.
+    """
+    r = acts.split_act(0, 10, 7, 2, trim_price=0, kind="eel")
+    assert r["ok"], r
+    assert r["waste"]["weight"] == 1.0 and r["waste_pct"] == 10.0, r
+    assert r["slice_pct"] == 70.0 and r["trim_pct"] == 20.0, r
+    assert r["money"] is False, r
+    print("  [OK] без цен: отход 1.0 кг, 10.0 % — веса считаются")
+
+
+def test_money_is_not_invented_when_a_price_is_missing():
+    """Ноль вместо ненайденной цены — не «бесплатно», а «неизвестно».
+
+    Если посчитать обрезки по нулю, их деньги молча уедут в нарезку и она
+    подорожает на ровном месте. Поэтому денег просто нет, пока нет цены.
+    """
+    r = acts.split_act(9300, 10, 7, 2, trim_price=0, kind="eel")
+    assert r["ok"] and r["money"] is False, r
+    assert r["slice"]["price_per_kg"] is None and r["slice"]["sum"] is None, r
+    assert r["trim"]["sum"] is None and r["check"] is None, r
+    assert r["need"] == "trim_price", r
+    # а с ценой обрезков — те же веса и уже деньги
+    full = acts.split_act(9300, 10, 7, 2, trim_price=9000, kind="eel")
+    assert full["money"] is True and full["waste"]["weight"] == r["waste"]["weight"], full
+    print("  [OK] нет цены обрезков — нет денег, но веса те же")
+
+
+def test_input_price_alone_does_not_block_the_weights():
+    """Цену входа тоже может не найтись — веса от этого не пропадают."""
+    r = acts.split_act(0, 10, 8, 1.5)
+    assert r["ok"] and r["money"] is False and r["need"] == "price", r
+    assert r["waste"]["weight"] == 0.5 and r["waste_pct"] == 5.0, r
+    print("  [OK] нет цены входа — отход 0.5 кг, 5.0 % на месте")
+
+
 def test_frying_loss_is_paid_by_the_teriyaki():
     """2 кг обрезков положили, сняли 1.4 — деньги обрезков никуда не делись,
     значит килограмм терияки дороже килограмма обрезков ровно на ужарку."""
@@ -190,6 +230,16 @@ def test_sauce_makes_the_teriyaki_more_expensive():
     assert r["check"] == r["trim"]["sum"] + r["sauce"]["sum"], r
     print(f"  [OK] соус 800 ₸ → терияки {r['teriyaki']['price_per_kg']} ₸/кг "
           f"вместо {dry['teriyaki']['price_per_kg']}")
+
+
+def test_shrink_is_counted_without_any_price():
+    """Ужарка — разница двух весов, и цена обрезков к ней отношения не имеет."""
+    r = acts.fry_teriyaki(2, 1.4, trim_price=0)
+    assert r["ok"] and r["money"] is False, r
+    assert r["teriyaki"]["shrink"] == 0.6 and r["yield_pct"] == 70.0, r
+    assert r["shrink_pct"] == 30.0, r
+    assert r["teriyaki"]["price_per_kg"] is None, r
+    print("  [OK] без цены обрезков ужарка 0.6 кг, выход 70.0 %")
 
 
 def test_sauce_per_kilo_is_the_number_that_catches_the_overpour():

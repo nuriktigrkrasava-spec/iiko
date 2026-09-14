@@ -808,60 +808,67 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
         catalog = []
     prods = A.find_products(catalog, spec["key"])
 
-    async def _price_at(org_id: str, product_id: str):
+    async def _invoice_price(org_id: str, product_id: str):
         st = await api.price_stats(org_id, product_id, 60, {"id": uid})
         best = (st or {}).get("best") or {}
         return (float(best.get("price_per_unit") or 0),
                 f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·"))
 
-    neighbours: List[Dict[str, Any]] = []
+    costs = await _stock_costs(client, info.get("org_name") or b.get("name") or "", real_org)
 
-    async def _price_of(role: str):
-        """Цена позиции из накладных: сперва свой филиал, потом соседи.
+    async def _cost_of(role: str):
+        """Себестоимость позиции: учётная из iiko, потом накладная СВОЕГО филиала.
 
-        Руками цену не спрашиваем, пока её можно найти: вбитая с потолка цифра
-        превращает себестоимость в фантазию, а поле остаётся — переписать
-        разовый закуп.
+        Раньше первым источником была накладная, а если позиции в ней нет —
+        цена бралась у соседей, с приоритетом ЦЕХа. Для П/Ф это давало ОДНУ
+        цену на всю сеть: в филиал стейк и пласт приходят внутренним
+        перемещением, накладной у них нет, и все четыре точки получали
+        цифру ЦЕХа. На вкладке «Угорь» это и был тот самый 9 300 ₸/кг.
+
+        Учётная себестоимость считается по складам самого филиала, поэтому
+        она у каждого своя — и это то число, по которому в iiko и живёт
+        позиция. Накладная осталась запасным источником для того, что в
+        филиал действительно закупают (соус), а поиск у соседей убран: он
+        подставлял правдоподобное чужое число вместо честного «не знаем».
         """
         prod = prods.get(role)
         if not prod:
             return 0.0, ""
+        cost = float(costs.get(prod["id"]) or 0)
+        if cost > 0:
+            return round(cost, 2), "себестоимость iiko"
         try:
-            price, src = await _price_at(real_org, prod["id"])
+            price, src = await _invoice_price(real_org, prod["id"])
         except Exception as e:
             logger.warning(f"[acts] цена {role} {real_org}: {e!r}")
             price, src = 0.0, ""
         if price > 0:
-            return price, src
-        # Бывает, что в этот филиал позиция не приходила (новый филиал, перерыв
-        # в поставках) — тогда берём цену там, где её закупали: товар общий.
-        nonlocal neighbours
-        if not neighbours:
-            neighbours = [r for r in api.get_restaurants(uid)
-                          if r["organization_id"] != real_org]
-            neighbours.sort(
-                key=lambda r: 0 if "цех" in (r.get("organization_name") or "").lower() else 1)
-        for r in neighbours[:4]:
-            try:
-                p2, from2 = await _price_at(r["organization_id"], prod["id"])
-            except Exception:
-                continue
-            if p2 > 0:
-                return p2, f'{from2} · закуп: {r.get("organization_name")}'
+            return price, f"накладная · {src}" if src else "накладная"
         return 0.0, ""
 
-    price, price_from = await _price_of("raw")
-    # Обрезки: у лосося это константа учёта (по накладным они не приходят), у
-    # угря её не назначали — там обрезки в накладных есть, и цена берётся из них.
-    trim_price, trim_from = float(spec["trim_price"] or 0), ""
-    if trim_price <= 0:
-        trim_price, trim_from = await _price_of("trim")
+    price, price_from = await _cost_of("raw")
+    # Обрезки: сперва их учётная себестоимость — она и есть то, во что они
+    # обошлись филиалу. Константа учёта осталась запасной (у лосося она
+    # назначена, у угря нет), а дальше цену спрашиваем полем в акте.
+    trim_price, trim_from = await _cost_of("trim")
+    trim_const = False
+    if trim_price <= 0 and spec["trim_price"]:
+        trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
     return {"branch": b, "products": prods, "price_per_kg": price,
             "price_from": price_from, "trim_price": trim_price,
-            "trim_from": trim_from, "trim_const": bool(spec["trim_price"]),
+            "trim_from": trim_from, "trim_const": trim_const,
             "kind": spec["key"], "title": spec["title"],
             "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
             "kinds": _TABS}
+
+
+async def _stock_costs(client, org_name: str, real_org: str) -> Dict[str, float]:
+    """Учётная себестоимость позиций филиала. Пусто — значит не знаем."""
+    try:
+        return await client.get_stock_costs(org_name)
+    except Exception as e:
+        logger.warning(f"[acts] себестоимость {real_org}: {e!r}")
+        return {}
 
 
 # Переключатель наверху экрана: две рыбы и жарка. Жарка стоит рядом, потому что
@@ -869,6 +876,25 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
 _TABS = ([{"key": k["key"], "title": k["title"], "tab": k["tab"]} for k in A.KINDS.values()]
          + [{"key": "teriyaki", "title": A.TERIYAKI_SPEC["title"],
              "tab": A.TERIYAKI_SPEC["tab"]}])
+
+
+async def _ctx_for(sc: Dict[str, Any], org: Optional[str], kind: str) -> Dict[str, Any]:
+    """Контекст разбора — демо-справочник или живой филиал.
+
+    Демо-ветка стояла только в GET: экран получал справочник и цены, а первый
+    же ввод веса уходил в POST, где `_rest_by_org("demo-b1")` не находил
+    подключения и возвращал 403. Поэтому в демо не считалось НИЧЕГО — ни
+    отхода, ни процентов, ни денег. Развилка одна на все маршруты, чтобы
+    следующий обработчик не забыл её снова.
+    """
+    if sc.get("demo"):
+        import demo as _demo
+        if kind == "teriyaki":
+            return {**_demo.teriyaki_context(), "branch": sc["branches"][0], "kinds": _TABS}
+        return {**_demo.acts_context(kind), "branch": sc["branches"][0], "kinds": _TABS}
+    if kind == "teriyaki":
+        return await _teriyaki_context(sc, org)
+    return await _salmon_context(sc, org, kind)
 
 
 def _kind_or_404(kind: str) -> Optional[str]:
@@ -887,15 +913,10 @@ async def acts_salmon_get(kind: str, token: str, org: Optional[str] = None):
         return JSONResponse({"error": "bad token"}, status_code=404)
     # по ссылке филиала акт делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    if sc.get("demo"):
-        # Демо: справочник и цены готовые, в iiko не ходим — там нечего искать.
-        import demo as _demo
-        ctx = {**_demo.acts_context(kind), "branch": sc["branches"][0],
-               "kinds": _TABS}
-    else:
-        ctx = await _salmon_context(sc, sc["org"] or org, kind)
-        if ctx.get("error"):
-            return JSONResponse(ctx, status_code=403)
+    # Демо: справочник и цены готовые, в iiko не ходим — там нечего искать.
+    ctx = await _ctx_for(sc, sc["org"] or org, kind)
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
     # филиалы для выбора — из УЖЕ разобранного доступа. Тут стоял _scope(uid), и
     # по ссылке филиала выпадал список всей сети: uid у неё — владелец.
     ctx["branches"] = sc["branches"]
@@ -921,19 +942,25 @@ NO_SAUCE_PRICE = ("Соуса терияки нет в накладных за 6
 
 
 def _prices(ctx: Dict[str, Any], payload: "SalmonPayload") -> Dict[str, Any]:
-    """Цены разбора: вход и обрезки. Обе ищутся в накладных и обе можно
+    """Цены разбора: вход и обрезки. Обе берутся из себестоимости и обе можно
     переписать руками — бывает разовый закуп по другой цене.
 
-    Обрезки лосося по накладным не приходят ни разу, поэтому там стоит константа
-    учёта; у угря её не назначали, и цену даёт либо накладная, либо человек.
+    Ненайденная цена здесь больше не ошибка. Веса и проценты от неё не
+    зависят, а расчёт целиком падал в ошибку и уносил с собой отход: у угря,
+    где константы обрезков нет, экран не показывал вообще ничего. Чего не
+    хватает для денег, скажет сам расчёт — полем `need`.
     """
-    price = float(payload.price_per_kg or ctx["price_per_kg"] or 0)
-    trim = float(payload.trim_price or ctx["trim_price"] or 0)
-    if price <= 0:
-        return {"error": NO_PRICE}
-    if trim <= 0:
-        return {"error": NO_TRIM_PRICE}
-    return {"price": price, "trim_price": trim}
+    return {"price": float(payload.price_per_kg or ctx["price_per_kg"] or 0),
+            "trim_price": float(payload.trim_price or ctx["trim_price"] or 0)}
+
+
+# Чего не хватило, чтобы посчитать деньги, — словами и на том же языке, на
+# котором человек видит поля.
+NEED_TEXT = {
+    "price": NO_PRICE,
+    "trim_price": NO_TRIM_PRICE,
+    "sauce_price": NO_SAUCE_PRICE,
+}
 
 
 @router.post("/api/acts/{kind}/{token}")
@@ -947,14 +974,14 @@ async def acts_salmon_calc(kind: str, token: str, payload: SalmonPayload):
         return JSONResponse({"error": "bad token"}, status_code=404)
     # по ссылке филиала разбор делается только по СВОЕМУ филиалу:
     # выбор из адреса игнорируем, иначе ссылка открыла бы чужой склад
-    ctx = await _salmon_context(sc, sc["org"] or payload.org, kind)
+    ctx = await _ctx_for(sc, sc["org"] or payload.org, kind)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     pr = _prices(ctx, payload)
-    if pr.get("error"):
-        return JSONResponse({"ok": False, "error": pr["error"]})
     res = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
                       payload.weight_trim, trim_price=pr["trim_price"], kind=kind)
+    if res.get("ok") and res.get("need"):
+        res["need_text"] = NEED_TEXT.get(res["need"], "")
     res["products"] = ctx["products"]
     res["branch"] = ctx["branch"]
     return JSONResponse(res)
@@ -971,16 +998,18 @@ async def acts_salmon_save(kind: str, token: str, payload: SalmonPayload):
         return JSONResponse({"error": "bad token"}, status_code=404)
     if not _kind_or_404(kind):
         return JSONResponse({"error": "неизвестный разбор"}, status_code=404)
-    ctx = await _salmon_context(sc, sc["org"] or payload.org, kind)
+    ctx = await _ctx_for(sc, sc["org"] or payload.org, kind)
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     pr = _prices(ctx, payload)
-    if pr.get("error"):
-        return JSONResponse({"ok": False, "error": pr["error"]})
     calc = A.split_act(pr["price"], payload.weight_raw, payload.weight_slice,
                        payload.weight_trim, trim_price=pr["trim_price"], kind=kind)
     if not calc.get("ok"):
         return JSONResponse(calc)
+    # Показывать разбор без денег можно, записывать — нет: в своде он встанет
+    # нулевой себестоимостью и утянет вниз среднее по филиалу.
+    if not calc.get("money"):
+        return JSONResponse({"ok": False, "error": NEED_TEXT.get(calc.get("need"), NO_PRICE)})
     aid = add_salmon_act(ctx["branch"]["organization_id"], sc["uid"], calc, pr["price"],
                          pr["trim_price"], payload.note or "", kind=kind)
     return JSONResponse({**calc, "saved": True, "id": aid})
@@ -1113,20 +1142,40 @@ async def _teriyaki_context(sc: Dict[str, Any], org: Optional[str]) -> Dict[str,
         logger.warning(f"[teriyaki] номенклатура {real_org}: {e!r}")
         catalog = []
     prods = A.find_products(catalog, "teriyaki")
+    costs = await _stock_costs(client, info.get("org_name") or b.get("name") or "", real_org)
 
-    sauce_price, sauce_from = 0.0, ""
-    if prods.get("sauce"):
-        # Соус приходит накладной как обычный товар — цену берём оттуда, а не
-        # константой: соус дорожает чаще, чем правят код.
+    async def _cost_of(role: str):
+        """Себестоимость позиции жарки: учётная из iiko, потом накладная.
+
+        Обрезки шли по константе 8 800 ₸ на всю сеть — от неё и была неверная
+        себестоимость лосося терияки: обрезки в филиале стоят столько, во
+        сколько их обошёлся разбор, а не столько, сколько записано в коде.
+        Константа осталась последней запасной, чтобы жарка не вставала совсем.
+        """
+        prod = prods.get(role)
+        if not prod:
+            return 0.0, ""
+        cost = float(costs.get(prod["id"]) or 0)
+        if cost > 0:
+            return round(cost, 2), "себестоимость iiko"
         try:
-            st = await api.price_stats(real_org, prods["sauce"]["id"], 60, {"id": uid})
+            st = await api.price_stats(real_org, prod["id"], 60, {"id": uid})
             best = (st or {}).get("best") or {}
-            sauce_price = float(best.get("price_per_unit") or 0)
-            sauce_from = f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·")
+            price = float(best.get("price_per_unit") or 0)
+            if price > 0:
+                src = f'{best.get("supplier_name") or ""} · {best.get("date") or ""}'.strip(" ·")
+                return price, f"накладная · {src}" if src else "накладная"
         except Exception as e:
-            logger.warning(f"[teriyaki] цена соуса {real_org}: {e!r}")
+            logger.warning(f"[teriyaki] цена {role} {real_org}: {e!r}")
+        return 0.0, ""
+
+    trim_price, trim_from = await _cost_of("trim")
+    trim_const = False
+    if trim_price <= 0 and spec["trim_price"]:
+        trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
+    sauce_price, sauce_from = await _cost_of("sauce")
     return {"branch": b, "products": prods,
-            "trim_price": spec["trim_price"],
+            "trim_price": trim_price, "trim_from": trim_from, "trim_const": trim_const,
             "sauce_price": sauce_price, "sauce_from": sauce_from,
             "kind": "teriyaki", "title": spec["title"], "kinds": _TABS}
 
@@ -1142,24 +1191,25 @@ class TeriyakiPayload(BaseModel):
 
 
 def _teriyaki_prices(ctx: Dict[str, Any], payload: "TeriyakiPayload") -> Dict[str, Any]:
-    """Цену соуса спрашиваем только когда его в самом деле лили: жарка без соуса
-    не должна упираться в цену того, чего в ней нет."""
-    trim = float(payload.trim_price or ctx["trim_price"] or 0)
-    sauce = float(payload.sauce_price or ctx.get("sauce_price") or 0)
-    if trim <= 0:
-        return {"error": NO_TRIM_PRICE}
-    if float(payload.weight_sauce or 0) > 0 and sauce <= 0:
-        return {"error": NO_SAUCE_PRICE}
-    return {"trim_price": trim, "sauce_price": sauce}
+    """Себестоимость обрезков и соуса; обе можно переписать руками.
+
+    Ненайденная цена здесь не ошибка: ужарка и выход жарки — это веса, и
+    падать на цене, к которой они не относятся, нельзя. Чего не хватает для
+    денег, скажет сам расчёт. Цена соуса при этом нужна только когда соус
+    в самом деле лили.
+    """
+    return {"trim_price": float(payload.trim_price or ctx["trim_price"] or 0),
+            "sauce_price": float(payload.sauce_price or ctx.get("sauce_price") or 0)}
 
 
 def _teriyaki_calc(ctx: Dict[str, Any], payload: "TeriyakiPayload") -> Dict[str, Any]:
     pr = _teriyaki_prices(ctx, payload)
-    if pr.get("error"):
-        return {"ok": False, "error": pr["error"]}
-    return A.fry_teriyaki(payload.weight_fry, payload.weight_teriyaki,
-                          trim_price=pr["trim_price"],
-                          g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
+    res = A.fry_teriyaki(payload.weight_fry, payload.weight_teriyaki,
+                         trim_price=pr["trim_price"],
+                         g_sauce=payload.weight_sauce, sauce_price=pr["sauce_price"])
+    if res.get("ok") and res.get("need"):
+        res["need_text"] = NEED_TEXT.get(res["need"], "")
+    return res
 
 
 @router.get("/api/teriyaki/{token}")
@@ -1167,13 +1217,9 @@ async def teriyaki_get(token: str, org: Optional[str] = None):
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    if sc.get("demo"):
-        import demo as _demo
-        ctx = {**_demo.teriyaki_context(), "branch": sc["branches"][0], "kinds": _TABS}
-    else:
-        ctx = await _teriyaki_context(sc, sc["org"] or org)
-        if ctx.get("error"):
-            return JSONResponse(ctx, status_code=403)
+    ctx = await _ctx_for(sc, sc["org"] or org, "teriyaki")
+    if ctx.get("error"):
+        return JSONResponse(ctx, status_code=403)
     ctx["branches"] = sc["branches"]
     ctx["role"] = sc["role"]
     return JSONResponse(ctx)
@@ -1185,7 +1231,7 @@ async def teriyaki_calc(token: str, payload: TeriyakiPayload):
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _teriyaki_context(sc, sc["org"] or payload.org)
+    ctx = await _ctx_for(sc, sc["org"] or payload.org, "teriyaki")
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     res = _teriyaki_calc(ctx, payload)
@@ -1202,12 +1248,16 @@ async def teriyaki_save(token: str, payload: TeriyakiPayload):
     sc = scope_of_token(token)
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
-    ctx = await _teriyaki_context(sc, sc["org"] or payload.org)
+    ctx = await _ctx_for(sc, sc["org"] or payload.org, "teriyaki")
     if ctx.get("error"):
         return JSONResponse(ctx, status_code=403)
     calc = _teriyaki_calc(ctx, payload)          # считаем заново: браузеру не верим
     if not calc.get("ok"):
         return JSONResponse(calc)
+    # Жарку без денег показываем, но не записываем: в своде она встанет нулевой
+    # себестоимостью терияки и испортит средневзвешенную цену периода.
+    if not calc.get("money"):
+        return JSONResponse({"ok": False, "error": NEED_TEXT.get(calc.get("need"), NO_TRIM_PRICE)})
     aid = add_teriyaki_act(ctx["branch"]["organization_id"], sc["uid"], calc,
                            payload.note or "")
     return JSONResponse({**calc, "saved": True, "id": aid})
