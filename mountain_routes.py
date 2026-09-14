@@ -846,23 +846,19 @@ async def _salmon_context(sc: Dict[str, Any], org: Optional[str],
             return price, f"накладная · {src}" if src else "накладная"
         return 0.0, ""
 
-    roles = A.roles_of(spec)
     price, price_from = await _cost_of("raw")
     # Обрезки: сперва их учётная себестоимость — она и есть то, во что они
-    # обошлись филиалу. Константа учёта осталась запасной. У угря обрезков нет
-    # вовсе, и спрашивать их цену нельзя: поле про несуществующую позицию
-    # человек всё равно чем-нибудь заполнит, и это попадёт в себестоимость.
-    trim_price, trim_from, trim_const = 0.0, "", False
-    if "trim" in roles:
-        trim_price, trim_from = await _cost_of("trim")
-        if trim_price <= 0 and spec["trim_price"]:
-            trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
+    # обошлись филиалу. Константа учёта осталась запасной (у лосося она
+    # назначена, у угря нет), а дальше цену спрашиваем полем в акте.
+    trim_price, trim_from = await _cost_of("trim")
+    trim_const = False
+    if trim_price <= 0 and spec["trim_price"]:
+        trim_price, trim_from, trim_const = float(spec["trim_price"]), "константа учёта", True
     return {"branch": b, "products": prods, "price_per_kg": price,
             "price_from": price_from, "trim_price": trim_price,
             "trim_from": trim_from, "trim_const": trim_const,
-            "kind": spec["key"], "title": spec["title"], "roles": roles,
+            "kind": spec["key"], "title": spec["title"],
             "raw_label": spec["raw_label"], "raw_short": spec["raw_short"],
-            "slice_label": spec.get("slice_label") or "Нарезка",
             "kinds": _TABS}
 
 

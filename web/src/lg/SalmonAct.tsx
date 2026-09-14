@@ -44,11 +44,8 @@ type Ctx = {
   trim_const?: boolean        // обрезки по константе учёта, а не из накладных
   kind?: string
   title?: string
-  /** какие позиции есть у этой рыбы: у лосося три выхода, у угря один */
-  roles?: string[]
   raw_label?: string
   raw_short?: string
-  slice_label?: string
   kinds?: { key: string; title: string; tab: string }[]
 }
 type Line = { weight: number; price_per_kg: number | null; sum: number | null }
@@ -63,12 +60,6 @@ type Calc = {
 
 const KINDS = [{ k: 'salmon', t: 'Лосось' }, { k: 'eel', t: 'Угорь' }, { k: 'teriyaki', t: 'Терияки' }]
 const num = (s: string) => Number(s.replace(',', '.')) || 0
-
-/** Есть ли у этой рыбы обрезки. Пока справочник не пришёл, верим виду рыбы:
-    у угря их нет ни на одном филиале, и отправлять их вес нельзя — сервер
-    такой акт отвергает, чтобы чужие килограммы не уехали в отход. */
-const hasTrimFor = (kind: string, ctx: Ctx | null) =>
-  (ctx?.roles ? ctx.roles.includes('trim') : kind !== 'eel')
 
 export default function SalmonAct({ token }: { token: string }) {
   const [kind, setKind] = useState('salmon')
@@ -120,7 +111,7 @@ export default function SalmonAct({ token }: { token: string }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           org, weight_raw: wr, weight_slice: num(slice),
-          weight_trim: hasTrimFor(kind, ctx) ? num(trim) : 0,
+          weight_trim: num(trim),
           price_per_kg: price ? num(price) : null,
           trim_price: trimPrice ? num(trimPrice) : null,
         }),
@@ -137,8 +128,7 @@ export default function SalmonAct({ token }: { token: string }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           org,
-          weight_raw: num(raw), weight_slice: num(slice),
-          weight_trim: hasTrimFor(kind, ctx) ? num(trim) : 0,
+          weight_raw: num(raw), weight_slice: num(slice), weight_trim: num(trim),
           price_per_kg: price ? num(price) : null,
           trim_price: trimPrice ? num(trimPrice) : null,
         }),
@@ -178,31 +168,23 @@ export default function SalmonAct({ token }: { token: string }) {
   )
 
   const p = ctx.products || { raw: null, trim: null, slice: null, waste: null }
+  const missing = !p.raw || !p.trim || !p.slice
   /* Позиции может не быть в номенклатуре филиала — тогда в таблице оставалась
      пустая ячейка, и строка читалась как «· остаток стоимости» без хозяина.
      Пустое место не объясняет ничего: подписываем роль и говорим прямо, что
      позиции нет, — это и есть причина, по которой акт не собрать. */
   const ROLE_NAME: Record<string, string> = {
-    raw: ctx.raw_label || 'Вход', slice: ctx.slice_label || 'Нарезка',
-    trim: 'Обрезки', waste: 'Отход',
+    raw: ctx.raw_label || 'Вход', slice: 'Нарезка', trim: 'Обрезки', waste: 'Отход',
   }
   const nameOf = (prod: Prod, role: string) => prod?.name || ROLE_NAME[role]
   const noProd = (prod: Prod) => !prod
-  /* Форма разбора у рыб разная. У угря в номенклатуре есть только он сам и
-     «П/Ф угорь»: обрезков нет ни на одном филиале сети. Спрашивать их вес и
-     цену там нельзя — поле про несуществующую позицию человек всё равно чем-
-     нибудь заполнит, и выдумка уедет в себестоимость. */
-  const roles = ctx.roles || ['raw', 'slice', 'trim', 'waste']
-  const hasTrim = roles.includes('trim')
-  const missing = !p.raw || !p.slice || (hasTrim && !p.trim)
-  const gone = (['raw', 'slice', 'trim'] as const)
-    .filter((r) => roles.includes(r) && !p[r]).map((r) => ROLE_NAME[r])
+  const gone = (['raw', 'slice', 'trim'] as const).filter((r) => !p[r]).map((r) => ROLE_NAME[r])
   const w = calc?.ok ? calc : null
   const ph = photosOf(kind)
   const short = ctx.raw_short || 'стейк'
   // цену спрашиваем только там, где её не нашли: у угря обрезки без константы
   // учёта, а соус в филиал мог не приходить 60 дней
-  const askTrimPrice = hasTrim && !ctx.trim_price
+  const askTrimPrice = !ctx.trim_price
   const shownTrim = Number(trimPrice ? num(trimPrice) : ctx.trim_price || 0)
 
   return (
@@ -225,15 +207,13 @@ export default function SalmonAct({ token }: { token: string }) {
           <Tile photo={ph.raw} glyph={GLYPH.raw} label={ctx.raw_label || 'Стейк в разбор'} hint="вход"
             value={raw} onChange={setRaw} placeholder="10"
             foot={ctx.price_per_kg ? `${tenge(ctx.price_per_kg)}/кг` : 'цена не найдена'} />
-          <Tile photo={ph.slice} glyph={GLYPH.slice} label={ROLE_NAME.slice} hint="выход" value={slice}
+          <Tile photo={ph.slice} glyph={GLYPH.slice} label="Нарезка" hint="выход" value={slice}
             onChange={setSlice} placeholder="8"
             foot={w ? `${pc(w.slice_pct)}${w.slice!.price_per_kg ? ` · ${tenge(w.slice!.price_per_kg)}/кг` : ''}` : undefined} />
-          {hasTrim && (
-            <Tile photo={ph.trim} glyph={GLYPH.trim} label="Обрезки"
-              hint={shownTrim ? `по ${tenge(shownTrim)}` : 'цену ниже'}
-              value={trim} onChange={setTrim} placeholder="2"
-              foot={w ? `${pc(w.trim_pct)} веса` : undefined} />
-          )}
+          <Tile photo={ph.trim} glyph={GLYPH.trim} label="Обрезки"
+            hint={shownTrim ? `по ${tenge(shownTrim)}` : 'цену ниже'}
+            value={trim} onChange={setTrim} placeholder="2"
+            foot={w ? `${pc(w.trim_pct)} веса` : undefined} />
           {/* Отход не вводят: он остаток веса. Поэтому здесь и вес, и процент,
               и само вычитание — видно, из чего он получился, а не только
               сколько вышло. */}
@@ -244,10 +224,10 @@ export default function SalmonAct({ token }: { token: string }) {
               ? <>
                   <b style={{ color: wasteTone(w.waste_pct || 0) }}>{pc(w.waste_pct)} отхода</b>
                   <div style={{ marginTop: 2, fontSize: 11, color: 'var(--mute)' }}>
-                    {kg(w.raw!.weight)} − {kg(w.slice!.weight)}{hasTrim && ` − ${kg(w.trim!.weight)}`}
+                    {kg(w.raw!.weight)} − {kg(w.slice!.weight)} − {kg(w.trim!.weight)}
                   </div>
                 </>
-              : `${short} − ${ROLE_NAME.slice.toLowerCase()}${hasTrim ? ' − обрезки' : ''}`} />
+              : `${short} − нарезка − обрезки`} />
         </div>
 
         <div style={{ marginTop: 12, display: 'grid', gap: 10, gridTemplateColumns: 'repeat(auto-fit,minmax(190px,1fr))' }}>
@@ -278,7 +258,7 @@ export default function SalmonAct({ token }: { token: string }) {
             ? <>Себестоимость входа: <b style={{ color: 'var(--hi)' }}>{tenge(ctx.price_per_kg)}/кг</b>{ctx.price_from ? ` · ${ctx.price_from}` : ''}. Поле можно переписать.</>
             : <>Себестоимости входа в iiko нет, и в накладных филиала его тоже нет — впиши цену вручную.</>}
           {askTrimPrice && <> Себестоимости обрезков этой рыбы в iiko нет, а константы учёта у неё не назначено — цену вводят здесь.</>}
-          {hasTrim && !askTrimPrice && ctx.trim_from
+          {!askTrimPrice && ctx.trim_from
             && <> Обрезки — <b style={{ color: 'var(--hi)' }}>{tenge(ctx.trim_price || 0)}/кг</b> · {ctx.trim_from}.</>}
         </div>
 
@@ -298,7 +278,7 @@ export default function SalmonAct({ token }: { token: string }) {
           <div style={{ marginTop: 14, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
             <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{kg(w.waste!.weight)} кг</b> · {pc(w.waste_pct)}</span>
             <span>В нарезку <b style={{ color: 'var(--grn)' }}>{kg(w.slice!.weight)} кг</b> · {pc(w.slice_pct)}</span>
-            {hasTrim && <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>}
+            <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>
           </div>
         )}
 
@@ -324,14 +304,12 @@ export default function SalmonAct({ token }: { token: string }) {
                   <td style={tdR}><b>{tenge(w.slice!.price_per_kg)}</b></td>
                   <td style={tdR}><b>{tenge(w.slice!.sum)}</b></td>
                 </tr>
-                {hasTrim && (
-                  <tr>
-                    <td style={td}>{nameOf(p.trim, 'trim')}{noProd(p.trim) && <span style={{ color: 'var(--mute)', fontSize: 11 }}> · нет в номенклатуре</span>}</td>
-                    <td style={tdR}>{kg(w.trim!.weight)}</td>
-                    <td style={tdR}>{tenge(w.trim!.price_per_kg)}</td>
-                    <td style={tdR}>{tenge(w.trim!.sum)}</td>
-                  </tr>
-                )}
+                <tr>
+                  <td style={td}>{nameOf(p.trim, 'trim')}{noProd(p.trim) && <span style={{ color: 'var(--mute)', fontSize: 11 }}> · нет в номенклатуре</span>}</td>
+                  <td style={tdR}>{kg(w.trim!.weight)}</td>
+                  <td style={tdR}>{tenge(w.trim!.price_per_kg)}</td>
+                  <td style={tdR}>{tenge(w.trim!.sum)}</td>
+                </tr>
                 <tr>
                   <td style={{ ...td, color: 'var(--mute)' }}>{nameOf(p.waste, 'waste')} <span style={{ fontSize: 11 }}>· по нулю</span></td>
                   <td style={tdR}>{kg(w.waste!.weight)}</td>
@@ -343,7 +321,7 @@ export default function SalmonAct({ token }: { token: string }) {
 
             <div style={{ marginTop: 10, display: 'flex', gap: 16, flexWrap: 'wrap', fontSize: 12.5, color: 'var(--mute)' }}>
               <span>Отход <b style={{ color: wasteTone(w.waste_pct || 0) }}>{kg(w.waste!.weight)} кг</b> · {pc(w.waste_pct)}</span>
-              {hasTrim && <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>}
+              <span>В обрезки <b style={{ color: 'var(--hi)' }}>{kg(w.trim!.weight)} кг</b> · {pc(w.trim_pct)}</span>
               {/* Здесь стояла «Сходимость: X из Y» зелёным. Она не могла не
                   сойтись: нарезка считается как «вход − обрезки», а сходимость —
                   как «обрезки + отход + нарезка», то есть тот же вход длинной
@@ -352,7 +330,7 @@ export default function SalmonAct({ token }: { token: string }) {
                   которых никто не проверял. Настоящий контроль здесь — процент
                   отхода слева, он и остался. */}
               <span style={{ marginLeft: 'auto' }}>
-                себестоимость — <b style={{ color: 'var(--hi)' }}>{tenge(w.slice!.price_per_kg)}/кг</b>
+                себестоимость нарезки — <b style={{ color: 'var(--hi)' }}>{tenge(w.slice!.price_per_kg)}/кг</b>
               </span>
             </div>
 

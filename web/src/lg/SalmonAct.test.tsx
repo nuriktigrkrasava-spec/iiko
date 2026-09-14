@@ -27,20 +27,20 @@ const CTX = {
           { key: 'eel', title: 'Разбор угря', tab: 'Угорь' }],
 }
 
-/* Угорь разбирается иначе: один выход и отход. В номенклатуре сети по нему
-   ровно две строки — «угорь» и «П/Ф угорь», обрезков нет ни на одном филиале. */
+/* Угорь разбирается так же, но без жарки, и цена обрезков у него ещё не
+   константа учёта — её спрашивают полем. */
 const EEL = {
   ...CTX,
   products: {
-    raw: { id: '11', name: 'угорь' },
-    slice: { id: '13', name: 'П/Ф угорь' },
+    raw: { id: '11', name: 'Пласт угря' },
+    slice: { id: '13', name: 'П/Ф НАРЕЗКА УГОРЬ' },
+    trim: { id: '12', name: 'П/Ф ОБРЕЗКИ УГОРЬ' },
     waste: { id: '16', name: 'Отход угря' },
   },
-  roles: ['raw', 'slice', 'waste'],
-  price_per_kg: 14000, price_from: 'себестоимость iiko', trim_price: 0,
+  price_per_kg: 14000, price_from: 'ЦЕХ · 2026-09-01', trim_price: 0,
   trim_const: false, sauce_price: 0, sauce_from: '',
-  kind: 'eel', title: 'Разбор угря', raw_label: 'Угорь в разбор',
-  slice_label: 'П/Ф угорь', raw_short: 'угорь', teriyaki: false,
+  kind: 'eel', title: 'Разбор угря', raw_label: 'Пласт угря',
+  raw_short: 'пласт', teriyaki: false,
 }
 
 beforeEach(() => {
@@ -52,13 +52,13 @@ beforeEach(() => {
   })) as unknown as typeof fetch)
 })
 
-/* Требование со скрина: «отход не считается совсем». Когда цены обрезков нет
-   ни в себестоимости, ни константой, расчёт падал в ошибку целиком — вместе с
-   отходом, который от цены не зависит вовсе. */
-const NO_TRIM_PRICE = {
+/* Требование со скрина: «отход не считается совсем». У угря константы обрезков
+   нет, и расчёт раньше падал в ошибку целиком — вместе с отходом, который от
+   цены не зависит вовсе. */
+const EEL_NO_TRIM_PRICE = {
   ok: true, money: false, need: 'trim_price',
   need_text: 'Цена обрезков не задана — впиши, почём их считать.',
-  kind: 'salmon',
+  kind: 'eel',
   raw: { weight: 10, price_per_kg: 14000, sum: 140000 },
   slice: { weight: 7, price_per_kg: null, sum: null },
   trim: { weight: 2, price_per_kg: null, sum: null },
@@ -67,15 +67,15 @@ const NO_TRIM_PRICE = {
 }
 
 describe('отход без цены', () => {
-  it('без цены обрезков считаются вес отхода и его процент', async () => {
+  it('у угря без цены обрезков считаются вес отхода и его процент', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) => ({
       ok: true,
       json: async () => (String(url).includes('/network') ? { branches: [] }
         : String(url).includes('/period') ? { acts: [], total: { acts: 0 } }
-        : opts?.method === 'POST' ? NO_TRIM_PRICE : { ...CTX, trim_price: 0, trim_const: false }),
+        : opts?.method === 'POST' ? EEL_NO_TRIM_PRICE : EEL),
     })) as unknown as typeof fetch)
     const { container } = render(<SalmonAct token="1.sig" />)
-    await waitFor(() => expect(screen.getByText(/Разбор лосося/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/Разбор угря/)).toBeTruthy())
     fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '10' } })
     fireEvent.change(screen.getByPlaceholderText('8'), { target: { value: '7' } })
     fireEvent.change(screen.getByPlaceholderText('2'), { target: { value: '2' } })
@@ -93,11 +93,12 @@ describe('отход без цены', () => {
    строку таблицы в «· остаток стоимости» без хозяина. */
 describe('позиции, которых нет в номенклатуре', () => {
   const HALF = {
-    ...CTX,
-    products: { raw: { id: '1', name: 'П/Ф ЛОСОСЬ СТЕЙК' }, slice: null, trim: null, waste: null },
+    ...EEL,
+    products: { raw: { id: '11', name: 'П/Ф угорь' }, slice: null, trim: null, waste: null },
+    trim_price: 12,
   }
   const CALC = {
-    ok: true, money: true, need: '', kind: 'salmon',
+    ok: true, money: true, need: '', kind: 'eel',
     raw: { weight: 12, price_per_kg: 9300, sum: 111600 },
     slice: { weight: 10, price_per_kg: 11157.6, sum: 111576 },
     trim: { weight: 2, price_per_kg: 12, sum: 24 },
@@ -113,7 +114,7 @@ describe('позиции, которых нет в номенклатуре', ()
         : opts?.method === 'POST' ? CALC : HALF),
     })) as unknown as typeof fetch)
     render(<SalmonAct token="1.sig" />)
-    await waitFor(() => expect(screen.getByText(/Разбор лосося/)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/Разбор угря/)).toBeTruthy())
     fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '12' } })
     await waitFor(() => expect(screen.getAllByText(/нет в номенклатуре/).length).toBeGreaterThan(1),
       { timeout: 2000 })
@@ -180,34 +181,19 @@ describe('в разборе жарки нет', () => {
 })
 
 describe('переключение рыбы', () => {
-  it('у угря два веса и никаких обрезков', async () => {
+  it('угорь спрашивает свой пласт и цену обрезков', async () => {
     render(<SalmonAct token="1.sig" />)
     await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
 
     fireEvent.click(screen.getByText('Угорь'))
-    // формула отхода у угря короче: вычитается только выход
-    await waitFor(() => expect(screen.getByText('угорь − п/ф угорь')).toBeTruthy())
-    expect(screen.getAllByText(/Угорь в разбор/).length).toBeGreaterThan(0)
-    // обрезков у угря нет: ни плитки веса, ни поля цены
-    expect(screen.queryByText(/Обрезки/)).toBeNull()
-    expect(screen.queryByPlaceholderText('почём считать')).toBeNull()
+    // «Пласт угря» теперь и подпись плитки, и имя позиции в шапке — ждём формулу
+    await waitFor(() => expect(screen.getByText('пласт − нарезка − обрезки')).toBeTruthy())
+    expect(screen.getAllByText(/Пласт угря/).length).toBeGreaterThan(0)
+    // цена обрезков угря ещё не константа — без поля разбор не собрать
+    expect(screen.getByPlaceholderText('почём считать')).toBeTruthy()
     // и запросы уходят на свой разбор, а не на лососёвый
     expect((fetch as unknown as { mock: { calls: [string][] } }).mock.calls
       .some(([u]) => String(u).includes('/api/acts/eel/'))).toBe(true)
-  })
-
-  it('вес обрезков не уезжает на сервер там, где обрезков нет', async () => {
-    render(<SalmonAct token="1.sig" />)
-    await waitFor(() => expect(screen.getByText(/Стейк в разбор/)).toBeTruthy())
-    fireEvent.click(screen.getByText('Угорь'))
-    await waitFor(() => expect(screen.getByText('угорь − п/ф угорь')).toBeTruthy())
-    fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '12' } })
-    await waitFor(() => {
-      const calls = (fetch as unknown as { mock: { calls: [string, RequestInit?][] } }).mock.calls
-      const post = calls.find(([u, o]) => o?.method === 'POST' && String(u).includes('/api/acts/eel/'))
-      expect(post).toBeTruthy()
-      expect(JSON.parse(String(post![1]!.body)).weight_trim).toBe(0)
-    }, { timeout: 2000 })
   })
 })
 
