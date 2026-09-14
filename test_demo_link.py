@@ -209,3 +209,58 @@ def test_hints_are_only_for_the_demo_link():
     assert json.loads(got.body)["demo"] is True
     real = asyncio.run(M.demo_hints("12345.подделка"))
     assert json.loads(real.body)["hints"] == {}
+
+
+def test_task_numbers_match_what_the_screens_show(tmp_path, monkeypatch):
+    """Сверка всех чисел демо. Задача, обещающая «отход 7.4 %» при реальных 7.6,
+    убивает демо ровно в тот момент, когда клиент решит проверить. Поэтому текст
+    задач считается из тех же источников, что и цифры на экранах, — а тест
+    сторожит, что источник действительно один.
+    """
+    import acts as A
+    monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "nums.db"))
+    D.init_db()
+    demo.seed()
+
+    rows = D.get_salmon_acts([b["organization_id"] for b in demo.BRANCHES], limit=99)
+    for b in demo.BRANCHES:
+        mine = [r for r in rows if r["organization_id"] == b["organization_id"]]
+        if not mine:
+            continue
+        real = A.summarize(mine)["waste_pct"]
+        assert abs(real - demo.waste_pct(b["organization_id"])) < 0.05, (b["name"], real)
+
+    # отход «Кунаева» действительно выше нормы, у остальных — в норме
+    assert demo.waste_pct("demo-b3") > 5, demo.waste_pct("demo-b3")
+    for org in ("demo-b1", "demo-b2", "demo-b4"):
+        assert demo.waste_pct(org) <= 5, (org, demo.waste_pct(org))
+
+    # число в тексте задачи — то же, что посчиталось
+    t = dict(demo.tasks())
+    assert f"{demo.waste_pct('demo-b3')} %" in t["demo-b3"][0][1]
+    assert f"{demo.late_pct('Жибек Жолы 7')} %" in t["demo-b4"][0][1]
+    assert f"{demo.signals()['Сатпаева 30']['plan']['pct']} %" in t["demo-b2"][0][1]
+
+
+def test_shifts_section_has_people(tmp_path, monkeypatch):
+    """Раздел смен без привязанных сотрудников выглядит так, будто мини-апп
+    никто не подключил. У «Жибек Жолы» подключены не все — это его болячка."""
+    monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "staff.db"))
+    D.init_db()
+    demo.seed()
+    for b in demo.BRANCHES:
+        acc = D.list_staff_access(b["organization_id"])
+        assert len(acc) == len(demo.TEAM), b["name"]
+        bound = sum(1 for a in acc if a["telegram_id"])
+        assert bound == (len(demo.TEAM) - 1 if b["organization_id"] == "demo-b4"
+                         else len(demo.TEAM)), b["name"]
+
+
+def test_the_branch_switcher_shows_the_demo_network(tmp_path, monkeypatch):
+    """Переключатель отдавал один «Демо Ресторан», и «Расписание» жило в другом
+    филиале, чем «Гора»: сеть на доске была, а выбрать её было нельзя."""
+    import asyncio
+    code, token = _link()
+    got = asyncio.run(api.list_restaurants(user={"id": 0}, x_site_token=token))
+    assert len(got) == len(demo.BRANCHES), got
+    assert {r["organization_name"] for r in got} == {b["name"] for b in demo.BRANCHES}

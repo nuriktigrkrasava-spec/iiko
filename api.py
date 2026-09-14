@@ -1133,7 +1133,18 @@ def _safe_restaurant(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/api/restaurants")
-async def list_restaurants(user: Dict = Depends(get_current_user)):
+async def list_restaurants(user: Dict = Depends(get_current_user),
+                           x_site_token: Optional[str] = Header(None, alias="X-Site-Token")):
+    # Демо-ссылка: переключатель показывает выдуманную СЕТЬ. Без этого он отдавал
+    # один «Демо Ресторан», экраны спрашивали данные по нему, и «Расписание» с
+    # «Гора» жили в разных филиалах — сеть на доске была, а выбрать её нельзя.
+    if x_site_token:
+        import mountain_routes as _mr
+        if _mr.demo_from_token(x_site_token):
+            import demo as _demo
+            return [{"id": i + 1, "organization_id": b["organization_id"],
+                     "organization_name": b["name"], "has_cloud": False}
+                    for i, b in enumerate(_demo.BRANCHES)]
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     rests = get_restaurants(tid)

@@ -262,7 +262,7 @@ def seed(force: bool = False) -> Dict[str, int]:
         org = b["organization_id"]
         if org in existing and not force:
             continue
-        for title, detail, money, effort in _TASKS.get(org, []):
+        for title, detail, money, effort in tasks().get(org, []):
             add_branch_task(org, b["name"], title, detail=detail, money=money,
                             effort=effort, created_by=0)
             made["tasks"] += 1
@@ -272,6 +272,7 @@ def seed(force: bool = False) -> Dict[str, int]:
                             detail="", money=0, effort="средне", created_by=0)
             made["tasks"] += 1
 
+    made["staff"] = _seed_staff_access(force)
     made["done"] = _close_some_tasks()
     made["checklists"] = _seed_checklists(force)
     made["acts"] = _seed_acts(force)
@@ -303,6 +304,30 @@ def _close_some_tasks() -> int:
 # Сколько ДОПОЛНИТЕЛЬНЫХ (уже закрытых) задач завести филиалу: они дают очки,
 # а в списке открытых не висят.
 _EXTRA_DONE = {"demo-b1": 6, "demo-b2": 1, "demo-b3": 4, "demo-b4": 2}
+
+
+# Команда филиала. Те же имена, что отдаёт демо-справочник сотрудников
+# (_DEMO_TEAM в api), иначе на «Расписании» одни люди, а в «Сменах» другие.
+TEAM = [("d1", "Виктория Ким"), ("d2", "Артём Волков"), ("d3", "Асан Нуров")]
+
+
+def _seed_staff_access(force: bool) -> int:
+    """Привязанные сотрудники: без них экран смен показывает пустой список и
+    выглядит так, будто мини-апп никто не подключил."""
+    from database import issue_staff_access, bind_staff_access, list_staff_access
+    n = 0
+    for bi, b in enumerate(BRANCHES):
+        org = b["organization_id"]
+        if list_staff_access(org) and not force:
+            continue
+        for i, (eid, name) in enumerate(TEAM):
+            code = issue_staff_access(org, eid, name)
+            # у «Жибек Жолы» подключён не весь состав — так бывает, и на это
+            # управляющему как раз и надо смотреть
+            if not (org == "demo-b4" and i == len(TEAM) - 1):
+                bind_staff_access(code, 900000 + bi * 10 + i)
+            n += 1
+    return n
 
 
 def _seed_checklists(force: bool) -> int:
@@ -343,27 +368,64 @@ _DONE_TITLES = [
     "Проверить закуп рыбы у второго поставщика",
 ]
 
-_TASKS: Dict[str, List] = {
-    "demo-b1": [
-        ("Снять стоп-лист по лососю", "Третий день в стопе — теряем роллы на витрине.",
-         180_000, "средне"),
-    ],
-    "demo-b2": [
-        ("Разобрать провал плана по доставке", "87 % плана вторую неделю. Проверь курьеров и время сборки.",
-         640_000, "сложно"),
-        ("Фудкост 34.8 % при норме 32", "Смотри списания и порции по горячему цеху.",
-         420_000, "сложно"),
-    ],
-    "demo-b3": [
-        ("Отход при разборе 7.4 %", "Норма до 5. Пересмотри, кто разделывает и чем.",
-         210_000, "средне"),
-    ],
-    "demo-b4": [
-        ("Опоздания 12.4 % смен", "Каждая восьмая смена начинается позже графика.",
-         95_000, "легко"),
-        ("Сдать чек-листы за вчера", "Пропущены два слота из четырёх.", 0, "легко"),
-    ],
-}
+# Разборы: (филиал, вход, нарезка, обрезки). Отход считается сам и выходит
+# разным — у «Кунаева» выше нормы, и это видно в таблице по сети.
+_ACT_PLAN = [
+    ("demo-b1", 12.0, 9.6, 2.1), ("demo-b1", 10.0, 8.1, 1.7),
+    ("demo-b2", 11.5, 9.0, 2.0), ("demo-b3", 12.0, 8.9, 2.2),
+    ("demo-b3", 9.0, 6.6, 1.7), ("demo-b4", 10.5, 8.3, 1.9),
+]
+
+
+def waste_pct(org: str) -> float:
+    """Отход филиала по засеянным разборам. Задачи берут число ОТСЮДА, а не
+    пишут его руками: разойдясь на 0.2 %, демо перестаёт быть убедительным
+    ровно в тот момент, когда клиент решит сверить."""
+    import acts as A
+    rows = [{"weight_raw": raw, "weight_slice": sl, "weight_trim": tr,
+             "weight_waste": round(raw - sl - tr, 3), "price_per_kg": 9300,
+             "trim_price": A.TRIM_PRICE}
+            for o, raw, sl, tr in _ACT_PLAN if o == org]
+    return A.summarize(rows)["waste_pct"] if rows else 0.0
+
+
+def late_pct(name: str) -> float:
+    sl = signals()[name]["staff_late"]
+    return round(sl["late"] / sl["total"] * 100, 1)
+
+
+def tasks() -> Dict[str, List]:
+    """Задачи филиалов. Числа в тексте берутся из тех же источников, что и
+    цифры на экранах, — иначе задача обещает одно, а доска показывает другое.
+    """
+    sg = signals()
+    return {
+        "demo-b1": [
+            ("Снять стоп-лист по лососю",
+             "Третий день в стопе — теряем роллы на витрине.", 180_000, "средне"),
+        ],
+        "demo-b2": [
+            ("Разобрать провал плана по доставке",
+             f"{sg['Сатпаева 30']['plan']['pct']} % плана вторую неделю. "
+             "Проверь курьеров и время сборки.", 640_000, "сложно"),
+            ("Выручка падает",
+             f"{abs(sg['Сатпаева 30']['changes']['revenue_pct'])} % к прошлому периоду, "
+             f"заказов меньше на {abs(sg['Сатпаева 30']['changes']['orders_pct'])} %. "
+             "Смотри доставку и стоп-лист.", 420_000, "сложно"),
+        ],
+        "demo-b3": [
+            ("Отход при разборе выше нормы",
+             f"{waste_pct('demo-b3')} % при норме до 5. "
+             "Пересмотри, кто разделывает и чем.", 210_000, "средне"),
+        ],
+        "demo-b4": [
+            ("Опоздания сотрудников",
+             f"{late_pct('Жибек Жолы 7')} % смен начинаются позже графика.",
+             95_000, "легко"),
+            ("Сдать чек-листы за вчера",
+             "Пропущены два слота из четырёх.", 0, "легко"),
+        ],
+    }
 
 
 def _seed_acts(force: bool) -> int:
@@ -372,15 +434,8 @@ def _seed_acts(force: bool) -> int:
     from database import add_salmon_act, get_salmon_acts
     if get_salmon_acts([b["organization_id"] for b in BRANCHES], limit=1) and not force:
         return 0
-    # (филиал, вход, нарезка, обрезки) — отход считается сам и выходит разным:
-    # у «Кунаева» он выше нормы, и это видно в таблице по сети.
-    plan = [
-        ("demo-b1", 12.0, 9.6, 2.1), ("demo-b1", 10.0, 8.1, 1.7),
-        ("demo-b2", 11.5, 9.0, 2.0), ("demo-b3", 12.0, 8.9, 2.2),
-        ("demo-b3", 9.0, 6.6, 1.7), ("demo-b4", 10.5, 8.3, 1.9),
-    ]
     n = 0
-    for org, raw, sl, trim in plan:
+    for org, raw, sl, trim in _ACT_PLAN:
         calc = A.split_salmon(9300, raw, sl, trim)
         if calc.get("ok"):
             add_salmon_act(org, 0, calc, 9300, A.TRIM_PRICE)
