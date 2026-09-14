@@ -9018,7 +9018,16 @@ async def employees_directory(org_id: str, user: Dict = Depends(get_current_user
     сотрудников всего сервера одной пачкой, и без этого управляющий искал бы
     свою бригаду среди чужих точек."""
     if _use_demo_data(user, org_id):
-        return {"employees": [{"id": m["id"], "name": m["name"], "shifts": 0}
+        # Смены считаем ПО-НАСТОЯЩЕМУ: в сетку графика попадают только те, кого
+        # уже ставили, а с жёстким нулём демо-бригада не показывалась вовсе —
+        # экран писал «в этом филиале ещё никого не ставили».
+        from database import staff_shift_counts
+        try:
+            cnt = staff_shift_counts(org_id)
+        except Exception:
+            cnt = {}
+        return {"employees": [{"id": m["id"], "name": m["name"],
+                               "shifts": int(cnt.get(m["id"], 0))}
                               for m in _DEMO_TEAM]}
     real_org = _get_org_id(org_id, user)
     info = _get_restaurant_info(real_org, user)

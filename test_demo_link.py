@@ -284,3 +284,14 @@ def test_the_schedule_grid_has_shifts(tmp_path, monkeypatch):
     demo.seed()
     assert len(D.get_staff_schedule("demo-b1", monday.isoformat(),
                                     (monday + timedelta(days=6)).isoformat())) == len(rows)
+
+
+def test_demo_employees_report_real_shift_counts(tmp_path, monkeypatch):
+    """В сетку графика попадают только те, у кого shifts > 0. Демо-справочник
+    отдавал жёсткий ноль, и бригада не показывалась вовсе."""
+    monkeypatch.setattr(D, "DB_PATH", str(tmp_path / "emp.db"))
+    D.init_db()
+    demo.seed()
+    counts = D.staff_shift_counts("demo-b1")
+    assert set(counts) == {eid for eid, _ in demo.TEAM}, counts
+    assert all(v > 0 for v in counts.values()), counts
