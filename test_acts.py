@@ -138,6 +138,25 @@ def test_eel_error_speaks_about_the_eel():
     print(f"  [OK] «{bad['error']}»")
 
 
+def test_eel_price_comes_from_the_fish_not_from_the_prepared():
+    """Цена входа берётся с «угорь», а не с «П/Ф угорь».
+
+    В номенклатуре сети по угрю всего две строки, и обе начинаются с одного
+    слова. Вход подбирался запасным поиском по слову «угор», поэтому на
+    половине филиалов в него вставал П/Ф — то есть выход, — и цена приходила
+    с того, что из угря уже сделали.
+    """
+    catalog = [
+        {"id": "p", "name": "П/Ф угорь", "unit": "кг"},
+        {"id": "g", "name": "угорь", "unit": "кг"},
+    ]
+    got = acts.find_products(catalog, "eel")
+    assert got["raw"]["id"] == "g", got
+    # и в обратном порядке справочника — тот же вход
+    assert acts.find_products(list(reversed(catalog)), "eel")["raw"]["id"] == "g"
+    print("  [OK] вход угря — «угорь», в любом порядке справочника")
+
+
 def test_eel_products_found_by_name_or_by_words():
     """Имя из справочника Алиева, а если филиал назвал по-своему — по словам."""
     p = acts.find_products([
