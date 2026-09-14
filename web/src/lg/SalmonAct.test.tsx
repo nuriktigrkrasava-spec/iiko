@@ -88,6 +88,42 @@ describe('отход без цены', () => {
   })
 })
 
+/* На живой сети у угря в номенклатуре есть только «угорь» и «П/Ф угорь»:
+   ни нарезки, ни обрезков, ни отхода. Пустая ячейка вместо имени превращала
+   строку таблицы в «· остаток стоимости» без хозяина. */
+describe('позиции, которых нет в номенклатуре', () => {
+  const HALF = {
+    ...EEL,
+    products: { raw: { id: '11', name: 'П/Ф угорь' }, slice: null, trim: null, waste: null },
+    trim_price: 12,
+  }
+  const CALC = {
+    ok: true, money: true, need: '', kind: 'eel',
+    raw: { weight: 12, price_per_kg: 9300, sum: 111600 },
+    slice: { weight: 10, price_per_kg: 11157.6, sum: 111576 },
+    trim: { weight: 2, price_per_kg: 12, sum: 24 },
+    waste: { weight: 0, price_per_kg: 0, sum: 0 },
+    slice_pct: 83.3, trim_pct: 16.7, waste_pct: 0, check: 111600,
+  }
+
+  it('строка без позиции подписана ролью и помечена, а не пуста', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) => ({
+      ok: true,
+      json: async () => (String(url).includes('/network') ? { branches: [] }
+        : String(url).includes('/period') ? { acts: [], total: { acts: 0 } }
+        : opts?.method === 'POST' ? CALC : HALF),
+    })) as unknown as typeof fetch)
+    render(<SalmonAct token="1.sig" />)
+    await waitFor(() => expect(screen.getByText(/Разбор угря/)).toBeTruthy())
+    fireEvent.change(screen.getByPlaceholderText('10'), { target: { value: '12' } })
+    await waitFor(() => expect(screen.getAllByText(/нет в номенклатуре/).length).toBeGreaterThan(1),
+      { timeout: 2000 })
+    expect(screen.getAllByText(/Нарезка/).length).toBeGreaterThan(0)
+    // и сверху сказано, каких именно позиций не хватает
+    expect(screen.getByText(/нарезка, обрезки/)).toBeTruthy()
+  })
+})
+
 describe('экран разбора', () => {
   it('поля идут стейк → нарезка → обрезки, отход не вводится', async () => {
     render(<SalmonAct token="1.sig" />)

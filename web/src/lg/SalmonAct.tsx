@@ -169,6 +169,16 @@ export default function SalmonAct({ token }: { token: string }) {
 
   const p = ctx.products || { raw: null, trim: null, slice: null, waste: null }
   const missing = !p.raw || !p.trim || !p.slice
+  /* Позиции может не быть в номенклатуре филиала — тогда в таблице оставалась
+     пустая ячейка, и строка читалась как «· остаток стоимости» без хозяина.
+     Пустое место не объясняет ничего: подписываем роль и говорим прямо, что
+     позиции нет, — это и есть причина, по которой акт не собрать. */
+  const ROLE_NAME: Record<string, string> = {
+    raw: ctx.raw_label || 'Вход', slice: 'Нарезка', trim: 'Обрезки', waste: 'Отход',
+  }
+  const nameOf = (prod: Prod, role: string) => prod?.name || ROLE_NAME[role]
+  const noProd = (prod: Prod) => !prod
+  const gone = (['raw', 'slice', 'trim'] as const).filter((r) => !p[r]).map((r) => ROLE_NAME[r])
   const w = calc?.ok ? calc : null
   const ph = photosOf(kind)
   const short = ctx.raw_short || 'стейк'
@@ -181,12 +191,14 @@ export default function SalmonAct({ token }: { token: string }) {
     <>
       <Glass span={12}>
         <Eyebrow t={ctx.title || 'Разбор лосося'}
-          hint={`вход ${p.raw?.name || '—'}${shownTrim ? ` · обрезки по ${tenge(shownTrim)}/кг` : ''}`} />
+          hint={`вход ${p.raw ? p.raw.name : `${ROLE_NAME.raw} — нет в номенклатуре`}${shownTrim ? ` · обрезки по ${tenge(shownTrim)}/кг` : ''}`} />
         {switcher}
 
         {missing && (
           <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--amb)' }}>
-            В номенклатуре этого филиала нет одной из позиций разбора — акт не собрать.
+            В номенклатуре этого филиала нет {gone.length > 1 ? 'позиций' : 'позиции'}:{' '}
+            <b>{gone.join(', ').toLowerCase()}</b> — акт не собрать и в iiko его не занести.
+            Сперва позицию заводят в номенклатуре, и она подтянется сюда сама.
           </div>
         )}
 
@@ -281,25 +293,25 @@ export default function SalmonAct({ token }: { token: string }) {
               </tr></thead>
               <tbody>
                 <tr>
-                  <td style={td}>{p.raw?.name} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· вход</span></td>
+                  <td style={td}>{nameOf(p.raw, 'raw')} <span style={{ color: 'var(--mute)', fontSize: 11 }}>· {noProd(p.raw) ? 'нет в номенклатуре' : 'вход'}</span></td>
                   <td style={tdR}>{kg(w.raw!.weight)}</td>
                   <td style={tdR}>{tenge(w.raw!.price_per_kg)}</td>
                   <td style={tdR}>{tenge(w.raw!.sum)}</td>
                 </tr>
                 <tr>
-                  <td style={{ ...td, color: 'var(--grn)', fontWeight: 650 }}>{p.slice?.name} <span style={{ color: 'var(--mute)', fontSize: 11, fontWeight: 400 }}>· остаток стоимости</span></td>
+                  <td style={{ ...td, color: 'var(--grn)', fontWeight: 650 }}>{nameOf(p.slice, 'slice')} <span style={{ color: 'var(--mute)', fontSize: 11, fontWeight: 400 }}>· {noProd(p.slice) ? 'нет в номенклатуре' : 'остаток стоимости'}</span></td>
                   <td style={tdR}><b>{kg(w.slice!.weight)}</b></td>
                   <td style={tdR}><b>{tenge(w.slice!.price_per_kg)}</b></td>
                   <td style={tdR}><b>{tenge(w.slice!.sum)}</b></td>
                 </tr>
                 <tr>
-                  <td style={td}>{p.trim?.name}</td>
+                  <td style={td}>{nameOf(p.trim, 'trim')}{noProd(p.trim) && <span style={{ color: 'var(--mute)', fontSize: 11 }}> · нет в номенклатуре</span>}</td>
                   <td style={tdR}>{kg(w.trim!.weight)}</td>
                   <td style={tdR}>{tenge(w.trim!.price_per_kg)}</td>
                   <td style={tdR}>{tenge(w.trim!.sum)}</td>
                 </tr>
                 <tr>
-                  <td style={{ ...td, color: 'var(--mute)' }}>{p.waste?.name || 'Отход'} <span style={{ fontSize: 11 }}>· по нулю</span></td>
+                  <td style={{ ...td, color: 'var(--mute)' }}>{nameOf(p.waste, 'waste')} <span style={{ fontSize: 11 }}>· по нулю</span></td>
                   <td style={tdR}>{kg(w.waste!.weight)}</td>
                   <td style={tdR}>0</td>
                   <td style={tdR}>0</td>
