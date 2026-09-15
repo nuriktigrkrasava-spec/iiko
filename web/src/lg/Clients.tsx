@@ -1,5 +1,5 @@
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Bullet, Insight, GBar } from './ui'
+import { Glass, Chart, Bullet, Insight, GBar, PageState as Note } from './ui'
 import { barChart, color } from './charts'
 import { tenge, num } from '../lib/format'
 
@@ -34,10 +34,6 @@ const th: React.CSSProperties = { fontSize: 10, letterSpacing: '.1em', textTrans
 const td: React.CSSProperties = { padding: '11px 0', borderBottom: '1px solid var(--hair-2)', fontSize: 13 }
 const tdR: React.CSSProperties = { ...td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', letterSpacing: '-.01em' }
 
-function Note({ children }: { children: React.ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
-
 /* иконка RFM-сегмента (корона / сердце / росток / звезда / тревога / сон / призрак) */
 const SEG_ICON: Record<string, string> = {
   champions: '<path d="M5 8l3 3 4-6 4 6 3-3-1.5 10h-11z"/><path d="M6 21h12"/>',
@@ -71,7 +67,7 @@ function Tile({ label, value, share, c }: { label: string; value: string; share:
 export default function Clients() {
   const cl = useApi<Clients>('clients', { period: 'month' })
   const rt = useApi<Retention>('retention', { period: 'month' })
-  if (cl.loading || rt.loading) return <Note>Считаем клиентскую базу и RFM…</Note>
+  if (cl.loading || rt.loading) return <Note loading>Считаем клиентскую базу и RFM…</Note>
   if (cl.error || !cl.data || !rt.data) return <Note>Не удалось собрать аналитику по клиентам: {cl.error || rt.error}</Note>
 
   const s = cl.data.segments

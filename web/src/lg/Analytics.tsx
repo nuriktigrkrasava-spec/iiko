@@ -1,6 +1,6 @@
 import { useApi } from '../lib/useApi'
 import { periodLabel } from '../lib/api'
-import { Glass, Chart, Delta, Orb } from './ui'
+import { Glass, Chart, Delta, Orb, PageState as Note } from './ui'
 import { barChart } from './charts'
 import { tenge } from '../lib/format'
 
@@ -25,15 +25,10 @@ type FC = { fact_pct: number; norm_pct: number; diff_pct: number }
 const GRAD = 'linear-gradient(90deg,#4f6ef7 0%,#7b5cff 42%,#ff9d4d 78%,#ffd24d 100%)'
 const orbTone = (s: Health['status']) => (s === 'red' ? 'red' : s === 'yellow' ? 'amber' : 'green')
 
-/* Заглушки состояния — единый вид на всю сетку */
-function Note({ children }: { children: React.ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
-
 /* ─────────── Вариант A · Советник (вывод + потери + план) ─────────── */
 export function AIAdvisor() {
   const { data, error, loading } = useApi<Insights>('insights')
-  if (loading) return <Note>ИИ сводит все данные…</Note>
+  if (loading) return <Note loading>ИИ сводит все данные…</Note>
   if (error || !data) return <Note>Не удалось собрать аналитику: {error}</Note>
 
   const hColor = (s: Health['status']) => (s === 'red' ? 'var(--red)' : s === 'yellow' ? 'var(--amb)' : 'var(--grn)')
@@ -137,7 +132,7 @@ export function AIOverview() {
   const ins = useApi<Insights>('insights')
   const dash = useApi<Dash>('dashboard', { period: 'month' })
   const fc = useApi<FC>('foodcost', { period: 'month' })
-  if (ins.loading || dash.loading || fc.loading) return <Note>ИИ сводит все данные…</Note>
+  if (ins.loading || dash.loading || fc.loading) return <Note loading>ИИ сводит все данные…</Note>
   if (ins.error || !ins.data || !dash.data || !fc.data) return <Note>Не удалось собрать аналитику: {ins.error || dash.error || fc.error}</Note>
 
   const d = dash.data

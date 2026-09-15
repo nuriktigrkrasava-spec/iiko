@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Glass, tg, fmt } from './ui'
+import { Glass, tg, fmt, PageState as Note } from './ui'
 import { useApi, useOrg } from '../lib/useApi'
 import { setShift, removeShift, shiftFor, syncPlan } from './scheduleStore'
 import ShiftAdmin from './ShiftAdmin'
@@ -32,10 +32,6 @@ function mondayOf(d: Date) {
   const x = new Date(d); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); x.setHours(0, 0, 0, 0); return x
 }
 function addDays(d: Date, n: number) { const x = new Date(d); x.setDate(x.getDate() + n); return x }
-
-function Note({ children }: { children: React.ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
 
 /* Инлайн-редактор смены в клетке недели */
 function CellEditor({ init, onSave, onClear, onClose }: {
@@ -165,7 +161,7 @@ export default function Schedule() {
     return all.filter((e) => !shown.has(e.id))
   }, [all, rows])
 
-  if (loading) return <Note>Загружаю сотрудников…</Note>
+  if (loading) return <Note loading>Загружаю сотрудников…</Note>
   if (error || !data) return <Note>Не удалось загрузить сотрудников: {error}</Note>
 
   const cell: React.CSSProperties = { padding: '9px 6px', textAlign: 'center', fontSize: 12, borderTop: '1px solid var(--hair-2)' }

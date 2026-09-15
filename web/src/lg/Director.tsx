@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { useApi } from '../lib/useApi'
-import { Glass, GBar, gfill, PlanFallback } from './ui'
+import { Glass, GBar, gfill, PlanFallback, PageState as Note } from './ui'
 import { tenge } from '../lib/format'
 
 /* ШАГ 4 — Директор (домашний экран): ОДНА оценка состояния 0–100 из взвешенных
@@ -30,9 +30,6 @@ type Task = { key: string; metric: string; before: string; after: string; money:
 const RED = 'var(--red)'; const GRN = 'var(--grn)'; const AMB = 'var(--amb)'
 const scoreCol = (s: number) => (s >= 70 ? GRN : s >= 45 ? AMB : RED)
 
-function Note({ children }: { children: ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
 function Eyebrow({ t, hint }: { t: string; hint?: ReactNode }) {
   return <div className="eyebrow"><span>{t}</span>{hint && <span className="hint">{hint}</span>}</div>
 }

@@ -1,6 +1,5 @@
-import type { ReactNode } from 'react'
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Delta } from './ui'
+import { Glass, Chart, Delta, PageState as Note } from './ui'
 import { barChart, bar } from './charts'
 import { tenge } from '../lib/format'
 
@@ -37,11 +36,6 @@ const ru1 = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')
 /* строка приоритета — ранг, заголовок, тег, деньги справа, деталь */
 type Prio = { rank: number; c: string; tag: string; grew: boolean; title: string; money: string; detail: string }
 
-/* Заглушка состояния — единый вид на всю сетку */
-function Note({ children }: { children: ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
-
 /* последние две недели с ненулевой выручкой */
 function lastTwo(weeks: CmpRow[]): [CmpRow | undefined, CmpRow | undefined] {
   const live = weeks.filter((w) => w.total_rev > 0)
@@ -57,7 +51,7 @@ export default function Report() {
   const ins = useApi<Ins>('insights')
 
   const loading = dash.loading || cmp.loading || fc.loading || sales.loading || rev.loading || ins.loading
-  if (loading) return <Note>Собираю отчёт недели…</Note>
+  if (loading) return <Note loading>Собираю отчёт недели…</Note>
   if (dash.error || !dash.data) return <Note>Не удалось собрать отчёт: {dash.error}</Note>
 
   const d = dash.data

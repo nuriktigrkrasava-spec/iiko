@@ -171,7 +171,7 @@ export async function getBranches(): Promise<Branch[]> {
   } catch { return DEMO_BRANCHES }
 }
 
-export async function apiGet<T>(path: string, params: Record<string, string> = {}): Promise<T> {
+export async function apiGet<T>(path: string, params: Record<string, string> = {}, signal?: AbortSignal): Promise<T> {
   const qs = new URLSearchParams(params).toString()
   const org = currentOrg
   const url = `/api/${path}/${org}${qs ? `?${qs}` : ''}`
@@ -183,7 +183,7 @@ export async function apiGet<T>(path: string, params: Record<string, string> = {
     if (hit !== undefined) return Promise.resolve(hit as T)
     throw new Error(`${path}: нет вшитых данных`)
   }
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
+  const res = await fetch(url, { headers: { Accept: 'application/json' }, signal })
   if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`)
   return res.json() as Promise<T>
 }

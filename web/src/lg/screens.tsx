@@ -1,16 +1,11 @@
 import type { ReactNode } from 'react'
-import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback } from './ui'
+import { Glass, Chart, Light, Bullet, Insight, Delta, fmt, PlanFallback, PageState as Note } from './ui'
 import { areaChart, barChart, slope, donut, hbar, legend, color, bar } from './charts'
 import { useApi } from '../lib/useApi'
 import { periodLabel } from '../lib/api'
 import { tenge } from '../lib/format'
 import Kds from './Kds'
 import LateDeliveries from './LateDeliveries'
-
-/* Заглушка на всю сетку, пока грузятся живые данные */
-function Note({ children }: { children: ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
 
 /* ── мелкие помощники ── */
 function Eyebrow({ t, hint }: { t: string; hint?: string }) {
@@ -59,7 +54,7 @@ function Tile({ label, value, delta, invert }: { label: string; value: string; d
 }
 export function Dash() {
   const { data, error, loading } = useApi<DashT>('dashboard')
-  if (loading) return <Note>Собираю выручку…</Note>
+  if (loading) return <Note loading>Собираю выручку…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   const c = data.chart_7days
   // Полные суммы, а не «0,6 млн»: владелец сравнивает дни между собой, и
@@ -105,7 +100,7 @@ type FCT = {
 export function FC() {
   // самохостед iikoWeb считает теоретический фудкост по техкартам только с compute=1
   const { data, error, loading } = useApi<FCT>('foodcost', { compute: '1' })
-  if (loading) return <Note>Считаю фудкост по техкартам…</Note>
+  if (loading) return <Note loading>Считаю фудкост по техкартам…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   // Владелец не завёл техкарты/приходные цены → себестоимость взять неоткуда: ставим планом, а не 0/пусто.
   if (data.fact_pct == null) return (
@@ -167,7 +162,7 @@ type ExpT = {
 }
 export function Exp() {
   const { data, error, loading } = useApi<ExpT>('expenses')
-  if (loading) return <Note>Собираю расходы…</Note>
+  if (loading) return <Note loading>Собираю расходы…</Note>
   if (error || !data) return <Note>Не удалось загрузить: {error}</Note>
   const cats = [...data.categories].sort((a, b) => b.amount - a.amount)
   const dseg = cats.map((c, i) => ({ l: c.name, v: c.amount, c: color(i) }))
@@ -259,7 +254,7 @@ export function Staff() {
   // отрезке. Раньше карточка молча слушалась глобального фильтра, которого на
   // этом экране нет — и при фильтре «Вчера» шесть дней из семи показывали «—».
   const hm = useApi<HeatT>('load-heatmap', { period: 'month' })
-  if (sh.loading || co.loading || hm.loading) return <Note>Собираю смены и загрузку…</Note>
+  if (sh.loading || co.loading || hm.loading) return <Note loading>Собираю смены и загрузку…</Note>
   if (sh.error || !sh.data) return <Note>Не удалось загрузить: {sh.error}</Note>
   const staff = [...sh.data.staff].sort((a, b) => b.revenue - a.revenue)
   const maxRev = Math.max(...staff.map((s) => s.revenue), 1)

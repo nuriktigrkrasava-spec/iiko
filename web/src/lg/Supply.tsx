@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Delta, Orb, Insight } from './ui'
+import { Glass, Chart, Delta, Orb, Insight, PageState as Note } from './ui'
 import { hbar, bar } from './charts'
 import { tenge, num } from '../lib/format'
 import InvoicePunch from './InvoicePunch'
@@ -24,8 +24,6 @@ const td: React.CSSProperties = { padding: '11px 0', borderBottom: '1px solid va
 const tdR: React.CSSProperties = { ...td, textAlign: 'right', fontVariantNumeric: 'tabular-nums', letterSpacing: '-.01em' }
 function Sub({ children }: { children: React.ReactNode }) { return <div style={{ fontSize: 10, color: 'var(--mute)', marginTop: 2 }}>{children}</div> }
 function Eyebrow({ t, hint }: { t: string; hint?: string }) { return <div className="eyebrow"><span>{t}</span>{hint && <span className="hint">{hint}</span>}</div> }
-function Note({ children }: { children: React.ReactNode }) { return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass> }
-
 /* мелкая иконка-искра для флагманского блока */
 const Spark = () => <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.7 1.4 6.8L12 17.8 5.9 20.5l1.4-6.8L2.2 9l6.9-.7z" /></svg>
 const Arrow = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13M12 6l6 6-6 6" /></svg>
@@ -194,7 +192,7 @@ export default function Supply() {
      поставщикам» ниже считается за месяц и терять его окно нельзя. */
   const invWeek = useApi<Invoices>('invoices', { period: 'week' })
 
-  if (stock.loading || wo.loading || cn.loading || wd.loading || inv.loading || invWeek.loading) return <Note>Сводим склад и закупки…</Note>
+  if (stock.loading || wo.loading || cn.loading || wd.loading || inv.loading || invWeek.loading) return <Note loading>Сводим склад и закупки…</Note>
   if (!stock.data || !wo.data || !cn.data || !wd.data) return <Note>Не удалось собрать данные склада: {stock.error || wo.error || cn.error || wd.error}</Note>
 
   const items = stock.data.items

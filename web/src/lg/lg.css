@@ -9,13 +9,13 @@
     radial-gradient(70% 55% at 50% -10%, rgba(45,107,255,.06) 0%, transparent 62%),
     linear-gradient(180deg, #f7f8fb 0%, #edf0f5 100%);
 
-  --glass: linear-gradient(135deg, rgba(255,255,255,.66), rgba(255,255,255,.44));
-  --glass-2: rgba(255,255,255,.5);
+  --glass: rgba(255,255,255,.78);
+  --glass-2: rgba(118,118,128,.08);
   --glass-hi: rgba(255,255,255,.9);
   --sheen: rgba(255,255,255,.85);
-  --hair: rgba(20,26,44,.10);
-  --hair-2: rgba(20,26,44,.06);
-  --card:#ffffff; --shadow:0 1px 2px rgba(20,30,60,.05), 0 10px 26px -16px rgba(20,30,60,.16);
+  --hair: rgba(60,60,67,.14);
+  --hair-2: rgba(60,60,67,.09);
+  --card:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.03), 0 12px 32px -22px rgba(0,0,0,.22);
 
   --bevel:
     0 2px 6px rgba(20,30,60,.06),
@@ -31,13 +31,13 @@
   --deep:#1a2233;
   --grn:#1faa53; --amb:#e08600; --red:#ff3b30;
 
-  --r:26px; --blur:16px;
-  /* Inter — как у Linear: одна семья, плотная разрядка, без заглавных */
-  --font:"Inter",-apple-system,"SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;
-  --font-display:"Unbounded",var(--font);
+  --r:22px; --blur:20px;
+  /* Системная гарнитура Apple: быстрее внешних шрифтов и спокойнее в цифрах. */
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",sans-serif;
+  --font-display:var(--font);
   --font-body:var(--font);
   --font-ui:var(--font);
-  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --mono:"SFMono-Regular",ui-monospace,Menlo,monospace;
   --card-2:#ffffff;
   --spring:cubic-bezier(.34,1.4,.5,1);
 }
@@ -79,8 +79,8 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 :root[data-theme="dark"] body{background:#0a0b0d}
 
 /* витринная типографика — Inter, чуть плотнее и строже (без «изящности») */
-.display{font-family:var(--font-display); font-weight:600; letter-spacing:-.03em}
-.lg-dock-label,.lg-tab span{font-family:var(--font-display); letter-spacing:.005em}
+.display{font-family:var(--font-display); font-weight:700; letter-spacing:-.035em}
+.lg-dock-label,.lg-tab span{font-family:var(--font-display)}
 .lg-root p{font-family:var(--font-body)}
 
 /* обои: чистый матовый фон (без фото — как Linear/Stripe) */
@@ -98,31 +98,23 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   radial-gradient(46% 50% at 60% 100%, rgba(150,200,255,.12), transparent 72%),
   #eef1f8; background-image:none}
 
-/* тонкое зерно поверх фона — глубина «как у Linear», убирает плоскость */
-.lg-grain{position:fixed; inset:0; z-index:-1; pointer-events:none; opacity:.05;
-  background-image:url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='180'%20height='180'%3E%3Cfilter%20id='n'%3E%3CfeTurbulence%20type='fractalNoise'%20baseFrequency='0.8'%20numOctaves='2'%20stitchTiles='stitch'/%3E%3C/filter%3E%3Crect%20width='100%25'%20height='100%25'%20filter='url(%23n)'/%3E%3C/svg%3E");
-  background-size:180px 180px}
-:root[data-theme="dark"] .lg-grain{opacity:.08; mix-blend-mode:overlay}
-
 /* Бенто-карточки (референс image 1): полупрозрачное стекло navy + блюр + тонкая светлая рамка */
 /* Блюра на карточках НЕТ намеренно. За ними лежит статичный градиент-обои —
    размывать его нечего, а backdrop-filter на каждой из 10–16 карточек заставлял
    браузер перерисовывать фон под каждой при любом скролле. Плотность подняли,
    чтобы вид остался тем же. Блюр оставлен только там, где под ним реально
    проезжает контент: док, таб-бар, панель ассистента. */
-.glass{position:relative; border-radius:22px;
-  background:linear-gradient(158deg, rgba(52,55,64,.72), rgba(18,20,25,.62));
-  border:1px solid rgba(255,255,255,.12);
-  box-shadow:0 1px 0 rgba(255,255,255,.18) inset, 0 0 46px rgba(255,255,255,.02) inset, 0 26px 60px -30px rgba(0,0,0,.9); padding:22px 24px}
-/* верхняя кромка-блик — статичный «глянец» настоящего стекла */
-.glass::before{content:''; position:absolute; left:0; right:0; top:0; height:44%; border-radius:22px 22px 0 0;
-  background:linear-gradient(180deg, rgba(255,255,255,.11), transparent); pointer-events:none; z-index:0}
+.glass{position:relative; border-radius:var(--r);
+  background:rgba(28,28,30,.76); border:1px solid rgba(255,255,255,.10);
+  box-shadow:0 1px 0 rgba(255,255,255,.10) inset, 0 18px 48px -30px rgba(0,0,0,.78);
+  padding:24px}
+.glass::before{content:''; position:absolute; inset:0; border-radius:inherit;
+  background:linear-gradient(180deg,rgba(255,255,255,.045),transparent 30%); pointer-events:none; z-index:0}
 .glass>*{position:relative; z-index:1}
 :root[data-theme="light"] .glass{
-  background:linear-gradient(158deg, rgba(255,255,255,.86), rgba(255,255,255,.74));
-  border:1px solid rgba(255,255,255,.80);
-  box-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 18px 44px -26px rgba(20,30,60,.24)}
-:root[data-theme="light"] .glass::before{background:linear-gradient(180deg, rgba(255,255,255,.5), transparent)}
+  background:rgba(255,255,255,.86); border:1px solid rgba(255,255,255,.92);
+  box-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 14px 36px -26px rgba(20,30,60,.30)}
+:root[data-theme="light"] .glass::before{background:linear-gradient(180deg,rgba(255,255,255,.28),transparent 28%)}
 
 /* тонкий матовый скролл-бар вместо системного (та самая «полоса», что бесила) */
 *{scrollbar-width:thin; scrollbar-color:var(--hair) transparent}
@@ -132,7 +124,7 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 *::-webkit-scrollbar-thumb:hover{background:var(--mute)}
 .lg-side nav{overflow-x:hidden}
 
-.eyebrow{font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--mute); font-weight:650;
+.eyebrow{font-size:12px; letter-spacing:.055em; text-transform:uppercase; color:var(--mute); font-weight:650;
   display:flex; justify-content:space-between; gap:10px; align-items:baseline}
 .eyebrow .hint{letter-spacing:0; text-transform:none; color:var(--mute); font-weight:450; font-size:12px}
 .lg-root p{line-height:1.55}
@@ -233,7 +225,11 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 /* flex-wrap — страховка: длинное имя раздела и плашка филиала на узком экране
    переносятся, а не распирают страницу в горизонтальную прокрутку. */
 .lg-head{position:relative; display:flex; align-items:flex-end; justify-content:space-between;
-  flex-wrap:wrap; gap:20px; padding:22px 40px 8px; background:transparent}
+  flex-wrap:wrap; gap:24px; padding:28px 32px 12px; max-width:1360px; width:100%; margin:0 auto}
+.lg-title{margin:3px 0 0; font-size:34px; line-height:1.08}
+.lg-section-label{font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--mute); font-weight:600}
+.lg-head-actions{display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap}
+.lg-content{padding:20px 32px 128px; max-width:1360px; width:100%; margin:0 auto}
 .lg-seg{position:relative; display:flex; gap:2px; background:var(--glass-2); border:1px solid var(--hair);
   border-radius:13px; padding:3px}
 .lg-per{position:relative; font:inherit; font-size:12px; color:var(--lo); background:none; border:0;
@@ -243,7 +239,7 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   box-shadow:0 1px 0 var(--glass-hi), 0 4px 12px -6px rgba(20,40,90,.3)}
 
 /* ── Бейдж источника данных (ДЕМО / LIVE) ── */
-.lg-data-badge{display:inline-flex; align-items:center; gap:6px; font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:6px 11px; border-radius:20px; white-space:nowrap}
+.lg-data-badge{display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:650; letter-spacing:.04em; text-transform:uppercase; padding:7px 11px; border-radius:999px; white-space:nowrap}
 .lg-data-badge .dot{width:7px; height:7px; border-radius:50%; flex:none}
 .lg-data-badge.demo{color:var(--amb); background:color-mix(in srgb,var(--amb) 14%,transparent); border:1px solid color-mix(in srgb,var(--amb) 40%,transparent)}
 .lg-data-badge.demo .dot{background:var(--amb)}
@@ -415,7 +411,13 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 
 /* ── Таб-бар ── */
 .lg-tabbar{display:none}
-.lg-bento{width:100%}
+.lg-bento{width:100%; gap:20px !important}
+.lg-page-state{display:flex; align-items:center; min-height:88px; gap:14px; color:var(--mute); font-size:14px}
+.lg-app-loader{min-height:100vh; display:flex; align-items:center; justify-content:center; gap:14px; color:var(--mute); font-size:14px}
+.lg-state-mark{display:inline-flex; align-items:center; gap:4px; flex:none}
+.lg-state-mark i{display:block; width:6px; height:6px; border-radius:50%; background:var(--acc); animation:lg-pulse 1.1s ease-in-out infinite}
+.lg-state-mark i:nth-child(2){animation-delay:.12s}.lg-state-mark i:nth-child(3){animation-delay:.24s}
+@keyframes lg-pulse{0%,70%,100%{opacity:.28;transform:translateY(0)}35%{opacity:1;transform:translateY(-3px)}}
 /* Элемент грида по умолчанию min-width:auto — широкая таблица внутри карточки
    растягивала колонку, а с ней и всю страницу (670px в окне 390px, содержимое
    уезжало за край на телефоне). Ноль заставляет карточку ужиматься, а таблица
@@ -425,12 +427,10 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 @media (max-width:900px){
   .lg-dock{display:none}
   .lg-side{display:none}
-  .lg-head{padding:15px 16px}
-  .lg-root main>div{padding:16px 14px 120px !important}
-  .lg-bento{grid-template-columns:repeat(2,1fr) !important}
-  .lg-bento>*{grid-column:span 2 !important}
-  .lg-head{padding:15px 16px}
-  .lg-root main>div{padding:16px 14px 120px !important}
+  .lg-head{padding:20px 16px 8px; gap:16px; align-items:flex-start}
+  .lg-title{font-size:30px}
+  .lg-head-actions{width:100%; justify-content:flex-start}
+  .lg-content{padding:16px 14px 120px}
   .lg-bento{grid-template-columns:repeat(2,1fr) !important}
   .lg-bento>*{grid-column:span 2 !important}
   /* Таблицы в карточках. Их в приложении десяток, и почти все — денежные, по
@@ -442,7 +442,7 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   .lg-tabbar{display:flex; position:fixed; left:10px; right:10px; bottom:10px; z-index:20; padding:7px;
     justify-content:space-around; border-radius:24px;
     background:var(--card); border:1px solid var(--hair); box-shadow:0 14px 40px -16px rgba(0,0,0,.5)}
-  .lg-tab{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; font:inherit; font-size:9.5px;
+  .lg-tab{flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; font:inherit; font-size:11px;
     color:var(--lo); background:none; border:0; cursor:pointer; padding:7px 4px; border-radius:16px; transition:.18s}
   .lg-tab.on{color:var(--hi); background:color-mix(in srgb,var(--acc) 16%,transparent)}
   /* агент стоит над таб-баром, а не поверх него: иначе он перехватывает тапы
@@ -463,8 +463,16 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 .lg-sheet-item.on{background:color-mix(in srgb,var(--acc) 15%,transparent); font-weight:600}
 .lg-sheet-badge{position:absolute; right:14px; width:6px; height:6px; border-radius:50%}
 
-@media (max-width:560px){ .lg-bento{grid-template-columns:1fr !important} .lg-bento>*{grid-column:span 1 !important} }
-@media (prefers-reduced-motion:reduce){ .lg-wallpaper{animation:none} }
+@media (max-width:560px){
+  .lg-bento{grid-template-columns:1fr !important; gap:14px !important}
+  .lg-bento>*{grid-column:span 1 !important}
+  .glass{padding:20px}
+  .lg-seg{max-width:100%; overflow-x:auto}
+  .lg-per{padding:7px 11px}
+}
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{scroll-behavior:auto !important; animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important}
+}
 
 
 /* «Гора»: склон + рейтинг рядом. На узком экране колонки складываются —

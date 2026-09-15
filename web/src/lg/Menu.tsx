@@ -1,6 +1,5 @@
-import type { ReactNode } from 'react'
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Bullet, Insight } from './ui'
+import { Glass, Chart, Bullet, Insight, PageState as Note } from './ui'
 import { donut, hbar, legend, color, bar } from './charts'
 import { tenge, num } from '../lib/format'
 
@@ -20,11 +19,6 @@ type Sales = {
 type Pair = { a: string; b: string; count: number }
 type Companion = { name: string; count: number }
 type Companions = { pairs: Pair[]; companions: Record<string, Companion[]> }
-
-/* ── Заглушка состояния — единый вид на всю сетку ── */
-function Note({ children }: { children: ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
 
 /* ── Табличные стили (как в screens.tsx) ── */
 const th: React.CSSProperties = { fontSize: 10, letterSpacing: '.1em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600, textAlign: 'left', padding: '0 0 10px', borderBottom: '1px solid var(--hair)' }
@@ -58,7 +52,7 @@ export default function Menu() {
   const sales = useApi<Sales>('sales', { period: 'month' })
   const comp = useApi<Companions>('companions', { period: 'month' })
 
-  if (sales.loading || comp.loading) return <Note>Сводим продажи и меню…</Note>
+  if (sales.loading || comp.loading) return <Note loading>Сводим продажи и меню…</Note>
   if (sales.error || !sales.data) return <Note>Не удалось собрать аналитику: {sales.error}</Note>
   const s = sales.data
   const c = comp.data

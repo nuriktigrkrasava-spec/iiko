@@ -4,6 +4,7 @@ import './index.css'
 import './lg/lg.css'
 import App from './lg/LiquidApp.tsx'
 import { getStaffCode, getJoinToken, loadPref, savePref } from './lib/api'
+import { AppFallback } from './lg/ui'
 
 /* Приложений внутри одного бандла три, и решает адрес.
 
@@ -36,7 +37,7 @@ function StaffApp() {
   const [code, setCode] = useState(() => getStaffCode())
   const join = getJoinToken()
   return (
-    <Suspense fallback={<div style={{ padding: 20, fontSize: 14, opacity: 0.6 }}>Загружаю…</div>}>
+    <Suspense fallback={<AppFallback />}>
       {join && !code ? <Join token={join} onDone={setCode} /> : <MyShift />}
     </Suspense>
   )

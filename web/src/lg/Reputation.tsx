@@ -1,5 +1,5 @@
 import { useApi } from '../lib/useApi'
-import { Glass, Chart, Delta, Orb, Insight, GBar, PlanFallback } from './ui'
+import { Glass, Chart, Delta, Orb, Insight, GBar, PlanFallback, PageState as Note } from './ui'
 import { donut, hbar, legend } from './charts'
 import { num } from '../lib/format'
 import {BrandChip, BRAND_COLOR, brandKey} from './brands'
@@ -16,11 +16,6 @@ type Platform = {
 }
 type Review = { rating: number; text: string; date: string; author: string }
 type Reviews = { platforms: Platform[]; reviews: Review[] }
-
-/* Заглушка состояния — единый вид на всю сетку */
-function Note({ children }: { children: React.ReactNode }) {
-  return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>{children}</div></Glass>
-}
 
 /* ── Тональность ── */
 type Tone = 'pos' | 'neu' | 'neg'
@@ -48,7 +43,7 @@ const THEMES: { l: string; keys: string[] }[] = [
 
 export default function Reputation() {
   const { data, error, loading } = useApi<Reviews>('reviews', { period: 'month' })
-  if (loading) return <Note>Собираем отзывы со всех площадок…</Note>
+  if (loading) return <Note loading>Собираем отзывы со всех площадок…</Note>
   if (error || !data) return <Note>Не удалось загрузить отзывы: {error}</Note>
 
   const platforms = data.platforms ?? []

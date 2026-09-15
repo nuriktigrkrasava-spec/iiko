@@ -19,14 +19,15 @@ export function useApi<T>(path: string, params: Record<string, string> = {}) {
 
   useEffect(() => {
     if (!org) return // филиал ещё не выбран — ждём, не показываем демо (loading остаётся true)
+    const request = new AbortController()
     let alive = true
     setLoading(true)
     setError(null)
-    apiGet<T>(path, effParams)
+    apiGet<T>(path, effParams, request.signal)
       .then((d) => alive && setData(d))
-      .catch((e) => alive && setError(String(e.message || e)))
+      .catch((e) => alive && e?.name !== 'AbortError' && setError(String(e.message || e)))
       .finally(() => alive && setLoading(false))
-    return () => { alive = false }
+    return () => { alive = false; request.abort() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
 

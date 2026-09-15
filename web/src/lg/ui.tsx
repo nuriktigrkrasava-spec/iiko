@@ -61,6 +61,22 @@ export function Glass({
   )
 }
 
+/* Единое состояние экрана: вместо одинаковых локальных Note-компонентов.
+   На загрузке три спокойных штриха сохраняют геометрию страницы; ошибка и
+   пустое состояние остаются обычным читаемым текстом. */
+export function PageState({ children, loading = false }: { children: ReactNode; loading?: boolean }) {
+  return (
+    <Glass span={12} className="lg-page-state">
+      {loading && <span className="lg-state-mark" aria-hidden><i /><i /><i /></span>}
+      <span role="status" aria-live="polite" aria-busy={loading}>{children}</span>
+    </Glass>
+  )
+}
+
+export function AppFallback({ label = 'Загружаю…' }: { label?: string }) {
+  return <div className="lg-app-loader" role="status"><span className="lg-state-mark" aria-hidden><i /><i /><i /></span>{label}</div>
+}
+
 /* ── SVG-график из строки ── */
 export function Chart({ html, style }: { html: string; style?: React.CSSProperties }) {
   return <div style={{ marginTop: 14, ...style }} dangerouslySetInnerHTML={{ __html: html }} />

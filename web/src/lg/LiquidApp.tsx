@@ -1,7 +1,7 @@
 import { useEffect, useState, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import './lg.css'
-import { container } from './ui'
+import { container, PageState } from './ui'
 import { Icon } from './icons'
 import BranchSwitcher from './Branch'
 import DataBadge from './DataBadge'
@@ -188,7 +188,6 @@ export default function LiquidApp() {
   return (
     <div className="lg-root" style={{ minHeight: '100vh' }}>
       <div className="lg-wallpaper" aria-hidden />
-      <div className="lg-grain" aria-hidden />
 
       {/* Сообщения владельца. Живут на уровне приложения, а не внутри «Горы»:
           управляющий, оставивший сайт на «Главной», не видел их вообще —
@@ -200,10 +199,10 @@ export default function LiquidApp() {
         {(
           <header className="lg-head">
             <div>
-              <div style={{ fontSize: 9.5, letterSpacing: '.14em', textTransform: 'uppercase', color: 'var(--mute)', fontWeight: 600 }}>{sec.group}</div>
-              <motion.h1 key={sec.id} className="display" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} style={{ margin: '2px 0 0', fontSize: 32, lineHeight: 1.04 }}>{sec.label}</motion.h1>
+              <div className="lg-section-label">{sec.group}</div>
+              <motion.h1 key={sec.id} className="display lg-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>{sec.label}</motion.h1>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <div className="lg-head-actions">
               <DataBadge />
               {/* По личной ссылке (?m=…) филиал уже задан токеном — переключатель
                   сети управляющему только мешает и обещает доступ, которого нет. */}
@@ -234,12 +233,12 @@ export default function LiquidApp() {
           </header>
         )}
 
-        <div style={{ padding: '24px 40px 130px', maxWidth: 1360, width: '100%', margin: '0 auto' }}>
+        <div className="lg-content">
           <AnimatePresence mode="wait">
             <motion.div key={active} variants={container} initial="hidden" animate="show" exit={{ opacity: 0, y: -8, transition: { duration: 0.18 } }}
               style={{ display: 'grid', gridTemplateColumns: 'repeat(12,1fr)', gap: 16, alignItems: 'stretch' }} className="lg-bento">
               <DemoHint tab={active} />
-              <Suspense fallback={<div style={{ gridColumn: 'span 12', padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Открываю раздел…</div>}>
+              <Suspense fallback={<PageState loading>Открываю раздел…</PageState>}>
                 <Body />
               </Suspense>
             </motion.div>
