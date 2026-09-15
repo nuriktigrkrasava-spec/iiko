@@ -198,8 +198,11 @@ export default function LiquidApp() {
       <main style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         {(
           <header className="lg-head">
-            <div>
-              <div className="lg-section-label">{sec.group}</div>
+            <div className="lg-head-copy">
+              <div className="lg-product-kicker">
+                <span className="lg-product-mark" aria-hidden>i</span>
+                <span>iiko · {sec.group}</span>
+              </div>
               <motion.h1 key={sec.id} className="display lg-title" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}>{sec.label}</motion.h1>
             </div>
             <div className="lg-head-actions">

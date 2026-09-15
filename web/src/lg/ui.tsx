@@ -34,10 +34,10 @@ export function Trend({ v, invert = false }: { v?: number | null; invert?: boole
 }
 
 /* ── Пружины iOS ── */
-export const spring = { type: 'spring', stiffness: 260, damping: 26 } as const
-export const container = { hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.04 } } }
+export const spring = { type: 'spring', stiffness: 300, damping: 32 } as const
+export const container = { hidden: {}, show: { transition: { staggerChildren: 0.035, delayChildren: 0.02 } } }
 export const item = {
-  hidden: { opacity: 0, y: 16, scale: 0.98 },
+  hidden: { opacity: 0, y: 8, scale: 0.995 },
   show: { opacity: 1, y: 0, scale: 1, transition: spring },
 }
 

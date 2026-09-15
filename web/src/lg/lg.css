@@ -6,16 +6,16 @@
 :root{
   /* чистый светлый матовый фон (без фото) */
   --wp-scrim:
-    radial-gradient(70% 55% at 50% -10%, rgba(45,107,255,.06) 0%, transparent 62%),
-    linear-gradient(180deg, #f7f8fb 0%, #edf0f5 100%);
+    radial-gradient(80% 50% at 50% -20%, rgba(255,255,255,.95) 0%, transparent 72%),
+    linear-gradient(180deg, #f5f5f7 0%, #eeeef1 100%);
 
-  --glass: rgba(255,255,255,.78);
-  --glass-2: rgba(118,118,128,.08);
-  --glass-hi: rgba(255,255,255,.9);
+  --glass: rgba(255,255,255,.82);
+  --glass-2: rgba(120,120,128,.075);
+  --glass-hi: rgba(255,255,255,.96);
   --sheen: rgba(255,255,255,.85);
-  --hair: rgba(60,60,67,.14);
-  --hair-2: rgba(60,60,67,.09);
-  --card:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.03), 0 12px 32px -22px rgba(0,0,0,.22);
+  --hair: rgba(60,60,67,.12);
+  --hair-2: rgba(60,60,67,.075);
+  --card:#ffffff; --shadow:0 1px 2px rgba(0,0,0,.025), 0 10px 30px -24px rgba(0,0,0,.22);
 
   --bevel:
     0 2px 6px rgba(20,30,60,.06),
@@ -25,13 +25,13 @@
     inset 0 0 8px 5px rgba(255,255,255,.10),
     0 14px 44px -16px rgba(30,50,100,.28);
 
-  --hi:#0a0b12; --lo:#43485a; --mute:#8a90a2;
-  /* акцент — монохром + синий */
-  --acc:#2f6bff; --acc-2:#5a8cff; --acc-glow:rgba(47,107,255,.24); --on-acc:#fff;
+  --hi:#1d1d1f; --lo:#515154; --mute:#86868b;
+  /* системный синий: один акцент вместо конкурирующих градиентов */
+  --acc:#0071e3; --acc-2:#1685f8; --acc-glow:rgba(0,113,227,.20); --on-acc:#fff;
   --deep:#1a2233;
   --grn:#1faa53; --amb:#e08600; --red:#ff3b30;
 
-  --r:22px; --blur:20px;
+  --r:24px; --blur:24px;
   /* Системная гарнитура Apple: быстрее внешних шрифтов и спокойнее в цифрах. */
   --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",sans-serif;
   --font-display:var(--font);
@@ -39,23 +39,23 @@
   --font-ui:var(--font);
   --mono:"SFMono-Regular",ui-monospace,Menlo,monospace;
   --card-2:#ffffff;
-  --spring:cubic-bezier(.34,1.4,.5,1);
+  --spring:cubic-bezier(.2,.8,.2,1);
 }
-/* ── ТЁМНАЯ = фото кухни под матовым стеклом (Linear-глубина + сочное стекло) ── */
+/* ── Тёмная тема: системный графит macOS, без декоративного визуального шума ── */
 :root[data-theme="dark"]{
-  /* графитовый кинематографичный фон — глубокий, дорогой, не плоский #000 */
+  /* Графитовый фон сохраняет глубину, но не спорит с данными. */
   --wp-scrim:
     radial-gradient(90% 60% at 50% -10%, rgba(180,190,210,.06) 0%, transparent 60%),
     radial-gradient(60% 50% at 84% 0%, rgba(120,132,156,.05) 0%, transparent 55%),
     linear-gradient(180deg, #16181d 0%, #0d0e11 55%, #0a0b0d 100%);
-  /* стекло сочнее: нейтральная фрост-плёнка + яркая кромка, кухня проступает сквозь блюр */
+  /* Нейтральная фрост-плёнка и тонкая светлая кромка. */
   --glass: linear-gradient(135deg, rgba(255,255,255,.11), rgba(255,255,255,.04));
   --glass-2: rgba(255,255,255,.055);
   --glass-hi: rgba(255,255,255,.24);
   --sheen: rgba(255,255,255,.15);
   --hair: rgba(255,255,255,.10);
   --hair-2: rgba(255,255,255,.055);
-  --card:#111318; --shadow:0 10px 28px -18px rgba(0,0,0,.75);
+  --card:#1c1c1e; --shadow:0 10px 28px -18px rgba(0,0,0,.75);
   /* мягкая стеклянная фаска + глубокая тень */
   --bevel:
     inset 0 1px 0 rgba(255,255,255,.16),
@@ -63,22 +63,22 @@
     inset 0 0 20px 2px rgba(255,255,255,.04),
     0 20px 54px -22px rgba(0,0,0,.72);
   /* контраст приподнят: приглушённый текст читается на navy (WCAG AA) */
-  --hi:#f2f4fa; --lo:#c6cee1; --mute:#98a3c0;
-  /* акцент — яркий индиго-синий, белый текст на нём (референс image 1) */
-  --acc:#4f6ef7; --acc-2:#6b86ff; --acc-glow:rgba(79,110,247,.42); --on-acc:#ffffff;
+  --hi:#f5f5f7; --lo:#c7c7cc; --mute:#8e8e93;
+  /* Системный синий остаётся единственным акцентом. */
+  --acc:#0a84ff; --acc-2:#409cff; --acc-glow:rgba(10,132,255,.34); --on-acc:#ffffff;
   --deep:#101216;
   --grn:#3ecf8e; --amb:#e0b341; --red:#e5484d;
   /* поверхности бенто-карточек — графит */
-  --card:#15171c; --card-2:#1a1d23;
+  --card:#1c1c1e; --card-2:#242426;
 }
 
 *{box-sizing:border-box}
 html,body,#root{height:100%; margin:0}
-body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hidden;
+body{font-family:var(--font); color:var(--hi); background:#f5f5f7; overflow-x:hidden;
   -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility}
-:root[data-theme="dark"] body{background:#0a0b0d}
+:root[data-theme="dark"] body{background:#000}
 
-/* витринная типографика — Inter, чуть плотнее и строже (без «изящности») */
+/* Системная типографика: крупные заголовки плотнее, интерфейс нейтральный. */
 .display{font-family:var(--font-display); font-weight:700; letter-spacing:-.035em}
 .lg-dock-label,.lg-tab span{font-family:var(--font-display)}
 .lg-root p{font-family:var(--font-body)}
@@ -88,15 +88,12 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
   background-image:var(--wp-scrim); background-size:cover; background-position:center; background-repeat:no-repeat}
 /* тёмная тема — графитовый кинематографичный фон с глубиной (свет сверху → тьма внизу) */
 :root[data-theme="dark"] .lg-wallpaper{background:
-  radial-gradient(80% 55% at 50% -8%, rgba(130,142,166,.10), transparent 60%),
-  radial-gradient(60% 50% at 85% 0%, rgba(96,108,132,.06), transparent 55%),
-  linear-gradient(180deg,#15171c 0%,#0d0e11 55%,#0a0b0d 100%); background-image:none}
+  radial-gradient(80% 48% at 50% -16%, rgba(255,255,255,.075), transparent 66%),
+  linear-gradient(180deg,#111113 0%,#050506 58%,#000 100%); background-image:none}
 /* светлая тема — мягкий градиент, чтобы frosted-стекло реально читалось */
 :root[data-theme="light"] .lg-wallpaper{background:
-  radial-gradient(42% 46% at 16% 8%, rgba(120,150,255,.16), transparent 70%),
-  radial-gradient(40% 44% at 86% 18%, rgba(255,175,120,.13), transparent 70%),
-  radial-gradient(46% 50% at 60% 100%, rgba(150,200,255,.12), transparent 72%),
-  #eef1f8; background-image:none}
+  radial-gradient(78% 46% at 50% -18%, rgba(255,255,255,.96), transparent 70%),
+  linear-gradient(180deg,#f5f5f7 0%,#eeeef1 100%); background-image:none}
 
 /* Бенто-карточки (референс image 1): полупрозрачное стекло navy + блюр + тонкая светлая рамка */
 /* Блюра на карточках НЕТ намеренно. За ними лежит статичный градиент-обои —
@@ -105,16 +102,16 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
    чтобы вид остался тем же. Блюр оставлен только там, где под ним реально
    проезжает контент: док, таб-бар, панель ассистента. */
 .glass{position:relative; border-radius:var(--r);
-  background:rgba(28,28,30,.76); border:1px solid rgba(255,255,255,.10);
-  box-shadow:0 1px 0 rgba(255,255,255,.10) inset, 0 18px 48px -30px rgba(0,0,0,.78);
+  background:rgba(28,28,30,.88); border:1px solid rgba(255,255,255,.09);
+  box-shadow:0 1px 0 rgba(255,255,255,.09) inset, 0 14px 40px -30px rgba(0,0,0,.78);
   padding:24px}
 .glass::before{content:''; position:absolute; inset:0; border-radius:inherit;
-  background:linear-gradient(180deg,rgba(255,255,255,.045),transparent 30%); pointer-events:none; z-index:0}
+  background:linear-gradient(180deg,rgba(255,255,255,.025),transparent 26%); pointer-events:none; z-index:0}
 .glass>*{position:relative; z-index:1}
 :root[data-theme="light"] .glass{
-  background:rgba(255,255,255,.86); border:1px solid rgba(255,255,255,.92);
-  box-shadow:0 1px 0 rgba(255,255,255,.95) inset, 0 14px 36px -26px rgba(20,30,60,.30)}
-:root[data-theme="light"] .glass::before{background:linear-gradient(180deg,rgba(255,255,255,.28),transparent 28%)}
+  background:rgba(255,255,255,.92); border:1px solid rgba(255,255,255,.94);
+  box-shadow:0 1px 0 rgba(255,255,255,.98) inset, 0 10px 30px -24px rgba(0,0,0,.24)}
+:root[data-theme="light"] .glass::before{background:linear-gradient(180deg,rgba(255,255,255,.16),transparent 24%)}
 
 /* тонкий матовый скролл-бар вместо системного (та самая «полоса», что бесила) */
 *{scrollbar-width:thin; scrollbar-color:var(--hair) transparent}
@@ -124,7 +121,7 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 *::-webkit-scrollbar-thumb:hover{background:var(--mute)}
 .lg-side nav{overflow-x:hidden}
 
-.eyebrow{font-size:12px; letter-spacing:.055em; text-transform:uppercase; color:var(--mute); font-weight:650;
+.eyebrow{font-size:11px; letter-spacing:.065em; text-transform:uppercase; color:var(--mute); font-weight:650;
   display:flex; justify-content:space-between; gap:10px; align-items:baseline}
 .eyebrow .hint{letter-spacing:0; text-transform:none; color:var(--mute); font-weight:450; font-size:12px}
 .lg-root p{line-height:1.55}
@@ -225,11 +222,16 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 /* flex-wrap — страховка: длинное имя раздела и плашка филиала на узком экране
    переносятся, а не распирают страницу в горизонтальную прокрутку. */
 .lg-head{position:relative; display:flex; align-items:flex-end; justify-content:space-between;
-  flex-wrap:wrap; gap:24px; padding:28px 32px 12px; max-width:1360px; width:100%; margin:0 auto}
-.lg-title{margin:3px 0 0; font-size:34px; line-height:1.08}
+  flex-wrap:wrap; gap:24px; padding:38px 36px 14px; max-width:1400px; width:100%; margin:0 auto}
+.lg-head-copy{min-width:0}
+.lg-product-kicker{display:flex; align-items:center; gap:8px; color:var(--mute); font-size:12px; font-weight:600; letter-spacing:.01em}
+.lg-product-mark{display:grid; place-items:center; width:20px; height:20px; border-radius:6px;
+  color:#fff; background:var(--hi); font-size:12px; font-weight:800; letter-spacing:-.04em}
+:root[data-theme="dark"] .lg-product-mark{color:#111; background:#f5f5f7}
+.lg-title{margin:8px 0 0; font-size:44px; line-height:1.02; font-weight:720; letter-spacing:-.045em}
 .lg-section-label{font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--mute); font-weight:600}
 .lg-head-actions{display:flex; align-items:center; justify-content:flex-end; gap:10px; flex-wrap:wrap}
-.lg-content{padding:20px 32px 128px; max-width:1360px; width:100%; margin:0 auto}
+.lg-content{padding:20px 36px 132px; max-width:1400px; width:100%; margin:0 auto}
 .lg-seg{position:relative; display:flex; gap:2px; background:var(--glass-2); border:1px solid var(--hair);
   border-radius:13px; padding:3px}
 .lg-per{position:relative; font:inherit; font-size:12px; color:var(--lo); background:none; border:0;
@@ -267,22 +269,23 @@ body{font-family:var(--font); color:var(--hi); background:#e9ecf7; overflow-x:hi
 
 /* ── Нижний плавающий док (десктоп) ── */
 /* мини-бар должен быть ЯВНО виден — свой фон по теме (перебивает прозрачный .glass по специфичности) */
-.lg-dock{position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:40;
-  display:flex; align-items:center; gap:3px; padding:7px 9px; border-radius:22px; max-width:calc(100vw - 32px)}
+.lg-dock{position:fixed; left:50%; bottom:20px; transform:translateX(-50%); z-index:40;
+  display:flex; align-items:center; gap:2px; padding:6px 8px; border-radius:20px; max-width:calc(100vw - 32px);
+  -webkit-backdrop-filter:blur(28px) saturate(1.5); backdrop-filter:blur(28px) saturate(1.5)}
 :root[data-theme="light"] .lg-dock{background:rgba(255,255,255,.92);
   border:1px solid rgba(20,26,44,.08); box-shadow:0 18px 48px -22px rgba(20,30,60,.34), 0 1px 0 rgba(255,255,255,.95) inset}
 :root[data-theme="dark"] .lg-dock{background:rgba(22,24,29,.86);
   border:1px solid rgba(255,255,255,.10); box-shadow:0 20px 54px -20px rgba(0,0,0,.7), 0 1px 0 rgba(255,255,255,.14) inset}
-.lg-dock-brand{flex:none; font-weight:700; font-size:12px; color:var(--on-acc); border-radius:11px; padding:8px 9px;
-  line-height:1; background:linear-gradient(135deg,var(--acc),var(--acc-2)); box-shadow:0 5px 16px -5px var(--acc-glow)}
+.lg-dock-brand{flex:none; font-weight:750; font-size:12px; color:var(--hi); border-radius:10px; padding:8px 9px;
+  line-height:1; background:var(--glass-2); border:1px solid var(--hair)}
 .lg-dock-sep{flex:none; width:1px; height:24px; background:var(--hair); margin:0 3px}
-.lg-dock-btn{position:relative; flex:none; width:44px; height:44px; border-radius:14px; border:0; background:none; padding:0;
+.lg-dock-btn{position:relative; flex:none; width:42px; height:42px; border-radius:12px; border:0; background:none; padding:0;
   display:grid; place-items:center; cursor:pointer; color:var(--lo); font:inherit;
   transition:color .2s, transform .18s var(--spring)}
-.lg-dock-btn:hover{color:var(--hi); transform:translateY(-4px)}
+.lg-dock-btn:hover{color:var(--hi); transform:translateY(-2px) scale(1.025)}
 .lg-dock-btn.on{color:var(--on-acc)}
-.lg-dock-pill{position:absolute; inset:0; border-radius:14px; z-index:0;
-  background:linear-gradient(135deg,var(--acc),var(--acc-2)); box-shadow:0 8px 20px -6px var(--acc-glow)}
+.lg-dock-pill{position:absolute; inset:0; border-radius:12px; z-index:0;
+  background:var(--acc); box-shadow:0 6px 18px -8px var(--acc-glow)}
 .lg-dock-badge{position:absolute; top:7px; right:7px; z-index:2; width:6px; height:6px; border-radius:50%; box-shadow:0 0 6px currentColor}
 .lg-dock-label{position:absolute; bottom:calc(100% + 10px); left:50%; transform:translateX(-50%); white-space:nowrap;
   font-size:11px; font-weight:500; padding:5px 9px; border-radius:9px; color:var(--hi);
