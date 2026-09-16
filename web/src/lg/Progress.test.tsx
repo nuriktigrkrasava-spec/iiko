@@ -16,10 +16,10 @@ const row = (id: string, name: string, now: Record<string, number>, prev: Record
   ({ organization_id: id, name, now, prev, wins })
 
 const rows: Row[] = [
-  row('a', 'Астана, ул. Г.Алиева 10', { orders: 100, late_pct: 10, kitchen: 20, road: 30, staff_late_pct: 12 },
-      { orders: 80, late_pct: 20, kitchen: 25, road: 30, staff_late_pct: 40 }, [{ key: 'late_pct', label: 'опоздания' }]),
-  row('b', 'Астана, ул. Бокейхана 25а', { orders: 50, late_pct: 20, kitchen: 30, road: 40, staff_late_pct: 55 },
-      { orders: 60, late_pct: 10, kitchen: 25, road: 40 }),
+  row('a', 'Астана, ул. Г.Алиева 10', { orders: 100, late_pct: 10, late_orders_count: 10, deliveries: 100, kitchen: 20, road: 30, staff_late_pct: 12, staff_late_count: 3, staff_total_count: 25 },
+      { orders: 80, late_pct: 20, late_orders_count: 16, deliveries: 80, kitchen: 25, road: 30, staff_late_pct: 40, staff_late_count: 8, staff_total_count: 20 }, [{ key: 'late_pct', label: 'опоздания' }]),
+  row('b', 'Астана, ул. Бокейхана 25а', { orders: 50, late_pct: 20, late_orders_count: 2, deliveries: 10, kitchen: 30, road: 40, staff_late_pct: 55, staff_late_count: 11, staff_total_count: 20 },
+      { orders: 60, late_pct: 10, late_orders_count: 1, deliveries: 10, kitchen: 25, road: 40 }),
 ]
 rows[0].staff = { total: 25, late: 3, late_pct: 12, late_minutes: 60, configured: true }
 rows[0].late_cause = { key: 'kitchen', label: 'Кухня', count: 7 }
@@ -30,25 +30,31 @@ rows[1].losses = [{ key: 'kitchen', label: 'Время приготовлени�
 const grid = (v: number) => Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((d) => [String(d), { hall: v }]))
 const planWeek: PlanWeek = {
   types: ['hall'], done_days: 3,
-  network: { organization_id: '', name: 'Итого сеть', plan: grid(100), fact: grid(90), prev: grid(80) },
+  network: { organization_id: '', name: 'Итого сеть', plan: grid(100), fact: grid(90), prev: grid(80),
+             fot: { amount: 300000, shifts_priced: 20, shifts_total: 22, complete: false } },
   branches: [
-    { organization_id: 'a', name: 'Астана, ул. Г.Алиева 10', plan: grid(60), fact: grid(66), prev: grid(50) },
-    { organization_id: 'b', name: 'Астана, ул. Бокейхана 25а', plan: grid(40), fact: grid(24), prev: grid(30) },
+    { organization_id: 'a', name: 'Астана, ул. Г.Алиева 10', plan: grid(60), fact: grid(66), prev: grid(50),
+      fot: { amount: 180000, shifts_priced: 12, shifts_total: 12, complete: true } },
+    { organization_id: 'b', name: 'Астана, ул. Бокейхана 25а', plan: grid(40), fact: grid(24), prev: grid(30),
+      fot: { amount: 120000, shifts_priced: 8, shifts_total: 10, complete: false } },
   ],
 }
 const data: MetricsData = { week: '2026-W35', from: '2026-08-24', to: '2026-08-30',
                             done_days: 3, metrics, branches: rows }
 
 describe('арифметика сети', () => {
-  /* Заказы складываются, а минуты и проценты усредняются. Сложить проценты по
-     девяти филиалам — получить «опозданий 340%», то есть показать чепуху на
-     собрании. */
+  /* Проценты по сети считаются из общих счётчиков, а не средним процентов. */
   it('заказы по сети складывает', () => {
     expect(networkValue(rows, 'orders', 'now')).toBe(150)
   })
-  it('проценты и минуты усредняет, а не суммирует', () => {
-    expect(networkValue(rows, 'late_pct', 'now')).toBe(15)
-    expect(networkValue(rows, 'kitchen', 'now')).toBe(25)
+  it('опоздания взвешивает количеством доставок', () => {
+    expect(networkValue(rows, 'late_pct', 'now')).toBeCloseTo(12 / 110 * 100)
+  })
+  it('время взвешивает количеством доставок', () => {
+    expect(networkValue(rows, 'kitchen', 'now')).toBeCloseTo((20 * 100 + 30 * 10) / 110)
+  })
+  it('опоздания сотрудников считает по людям', () => {
+    expect(networkValue(rows, 'staff_late_pct', 'now')).toBeCloseTo(14 / 45 * 100)
   })
   it('без данных не выдумывает ноль', () => {
     expect(networkValue([], 'orders', 'now')).toBeNull()
@@ -111,6 +117,8 @@ describe('экран', () => {
     // три закрытых дня: план 300, факт 270 — 90%
     expect(screen.getByText('90%')).toBeTruthy()
     expect(screen.getByText('270 из 300')).toBeTruthy()
+    expect(screen.getByText(/300.000/)).toBeTruthy()
+    expect(screen.getByText('20 из 22 смен с оплатой')).toBeTruthy()
     expect(screen.getByText('за 3 закрытых дн.')).toBeTruthy()
     expect(screen.getByText('План и факт по дням')).toBeTruthy()
     expect(screen.getByText('Выполнение плана по филиалам')).toBeTruthy()

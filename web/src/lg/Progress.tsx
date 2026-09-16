@@ -55,6 +55,7 @@ type Grid = Record<string, Record<string, number>>
 export type PlanBranch = {
   organization_id: string; name: string
   plan: Grid; fact: Grid; prev: Grid
+  fot?: { amount: number; shifts_priced: number; shifts_total: number; complete: boolean }
 }
 export type PlanWeek = {
   types: string[]; branches: PlanBranch[]; network: PlanBranch; done_days: number
@@ -73,12 +74,27 @@ const fmt = (v: number | null | undefined, unit: string) =>
 const num = (v: number) => v.toLocaleString('ru-RU')
 const dm = (d: string) => `${d.slice(8, 10)}.${d.slice(5, 7)}`
 
-/** Сумма по сети: заказы складываем, минуты и проценты усредняем — иначе
-    «опозданий 340%» по девяти филиалам. */
+/** Сводка сети. Проценты считаем из общего числителя и знаменателя, а время
+    взвешиваем числом доставок. Простое среднее процентов филиалов занижало
+    сеть: маленькая точка влияла так же сильно, как филиал со 125 доставками. */
 export function networkValue(rows: Row[], key: string, side: 'now' | 'prev'): number | null {
+  const weighted = (countKey: string, totalKey: string) => {
+    const pairs = rows.map((r) => [r[side]?.[countKey], r[side]?.[totalKey]] as const)
+      .filter((p): p is readonly [number, number] => typeof p[0] === 'number' && typeof p[1] === 'number')
+    const total = pairs.reduce((s, p) => s + p[1], 0)
+    return total ? pairs.reduce((s, p) => s + p[0], 0) / total * 100 : null
+  }
+  if (key === 'late_pct') return weighted('late_orders_count', 'deliveries')
+  if (key === 'staff_late_pct') return weighted('staff_late_count', 'staff_total_count')
   const vals = rows.map((r) => r[side]?.[key]).filter((v): v is number => typeof v === 'number')
   if (!vals.length) return null
   if (key === 'orders') return vals.reduce((a, b) => a + b, 0)
+  if (['kitchen', 'road', 'idle'].includes(key)) {
+    const pairs = rows.map((r) => [r[side]?.[key], r[side]?.deliveries] as const)
+      .filter((p): p is readonly [number, number] => typeof p[0] === 'number' && typeof p[1] === 'number' && p[1] > 0)
+    const total = pairs.reduce((s, p) => s + p[1], 0)
+    if (total) return pairs.reduce((s, p) => s + p[0] * p[1], 0) / total
+  }
   return vals.reduce((a, b) => a + b, 0) / vals.length
 }
 
@@ -312,7 +328,7 @@ export default function Progress({ data, scores, plan, onClose }: {
     return plan.branches.map((b) => {
       const p = weekSum(b.plan, types, done)
       const f = weekSum(b.fact, types, done)
-      return { id: b.organization_id, name: shortName(b.name), plan: p, fact: f,
+      return { id: b.organization_id, name: shortName(b.name), plan: p, fact: f, fot: b.fot,
                pct: p ? Math.round((f / p) * 100) : null }
     }).filter((b) => b.pct != null).sort((a, b) => (b.pct || 0) - (a.pct || 0))
   }, [plan, types, done])
@@ -471,6 +487,26 @@ export default function Progress({ data, scores, plan, onClose }: {
               </div>
             </motion.div>
           )}
+          {plan?.network?.fot && (
+            <motion.div
+              initial={reduce ? { opacity: 0 } : { opacity: 0, y: 10 }}
+              animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+              transition={{ type: 'spring', bounce: 0, duration: 0.4, delay: 0.04 }}
+              style={panel}>
+              <div style={eyebrow}>ФОТ по графику</div>
+              <div className="tnum" style={{ marginTop: 8, fontSize: 32, fontWeight: 780,
+                                             letterSpacing: '-.03em', lineHeight: 1, color: 'var(--hi)' }}>
+                {num(plan.network.fot.amount)} ₸
+              </div>
+              <div style={{ marginTop: 7, fontSize: 12.5,
+                            color: plan.network.fot.complete ? 'var(--grn)' : 'var(--amb)' }}>
+                {plan.network.fot.shifts_priced} из {plan.network.fot.shifts_total} смен с оплатой
+              </div>
+              {!plan.network.fot.complete && (
+                <div style={{ marginTop: 3, fontSize: 11.5, color: 'var(--mute)' }}>сумма пока неполная</div>
+              )}
+            </motion.div>
+          )}
           {defs.map((m, i) => (
             <Card key={m.key} def={m} rows={rows} i={i + 1} reduce={reduce}
               foot={m.key === 'staff_late_pct' && staffCounted < rows.length ? (
@@ -489,12 +525,17 @@ export default function Progress({ data, scores, plan, onClose }: {
             показатели — за {done} закрытых дн. недели; причина опозданий — за неделю
             {causePeriod ? ` ${dm(causePeriod.from)}–${dm(causePeriod.to)}` : ''}, ту, что заканчивается собранием
           </div>
-          <table style={{ width: '100%', minWidth: 940, borderCollapse: 'collapse', marginTop: 12, fontSize: 12.5 }}>
+          <table style={{ width: '100%', minWidth: 1080, borderCollapse: 'collapse', marginTop: 12, fontSize: 14 }}>
             <thead><tr>
               <th style={{ textAlign: 'left', padding: '0 0 8px', color: 'var(--mute)', fontWeight: 600, borderBottom: '1px solid var(--hair)' }}>Филиал</th>
               {!!byBranchPlan.length && (
                 <th style={{ textAlign: 'right', padding: '0 0 8px 12px', color: 'var(--mute)', fontWeight: 600, borderBottom: '1px solid var(--hair)' }}>
                   План / факт
+                </th>
+              )}
+              {!!byBranchPlan.length && (
+                <th style={{ textAlign: 'right', padding: '0 0 8px 12px', color: 'var(--mute)', fontWeight: 600, borderBottom: '1px solid var(--hair)' }}>
+                  ФОТ
                 </th>
               )}
               {defs.map((m) => (
@@ -524,6 +565,18 @@ export default function Progress({ data, scores, plan, onClose }: {
                                            color: (pl.pct || 0) >= 100 ? 'var(--grn)' : (pl.pct || 0) >= 90 ? 'var(--amb)' : 'var(--red)' }}>
                               {pl.pct}%
                             </span>
+                          </>
+                        ) : '—'}
+                      </td>
+                    )}
+                    {!!byBranchPlan.length && (
+                      <td className="tnum" style={{ padding: '9px 0 9px 12px', textAlign: 'right', borderBottom: '1px solid var(--hair-2)' }}>
+                        {pl?.fot ? (
+                          <>
+                            <span style={{ color: 'var(--hi)', fontWeight: 700 }}>{num(pl.fot.amount)} ₸</span>
+                            <div style={{ fontSize: 11, color: pl.fot.complete ? 'var(--mute)' : 'var(--amb)' }}>
+                              {pl.fot.shifts_priced}/{pl.fot.shifts_total} смен
+                            </div>
                           </>
                         ) : '—'}
                       </td>

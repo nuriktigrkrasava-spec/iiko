@@ -7752,7 +7752,10 @@ PLAN_METRICS = [
     # iiko: лишних запросов на филиал не добавляют, а на собрании это второй
     # вопрос после заказов — «кто приходит вовремя».
     ("staff_late_pct", "Опозданий сотрудников", "%", True, 3.0, False),
-    ("rating", "Рейтинг агрегаторов", "", False, 0.1, False),
+    # Истории рейтинга по неделям пока нет: это снимок на момент открытия.
+    # Подписываем честно, чтобы при просмотре старой недели его не приняли за
+    # историческое значение.
+    ("rating", "Рейтинг сейчас", "", False, 0.1, False),
     ("orders", "Заказов за неделю", "", False, 10.0, True),
 ]
 
@@ -8441,7 +8444,7 @@ async def _orders_cached(real_org: str, d_from: date, d_to: date,
     Сегодняшний день не отдаём вообще: он ещё идёт, и сравнивать его с целым
     днём прошлой недели нельзя.
     """
-    from database import get_plan_day_facts, save_plan_day_facts
+    from database import get_plan_day_facts
     _ensure_plan_facts_version()
     last_closed = local_now().date() - timedelta(days=1)
     if d_to > last_closed:
@@ -8456,18 +8459,29 @@ async def _orders_cached(real_org: str, d_from: date, d_to: date,
         # Одним запросом по всему пробелу: iiko-серверов девять, и дробить
         # добор по дням дороже, чем взять диапазон с запасом.
         a, z = min(missing), max(missing)
-        fetched = _fold_by_dow(await _orders_by_day(real_org, a, z, user))["date"]
-        # Пишем КАЖДЫЙ день диапазона, включая нулевые: иначе день без заказов
-        # навсегда остаётся «отсутствующим» и добирается при каждом открытии.
-        span = {(a + timedelta(days=i)).isoformat(): {t: 0 for t in PLAN_TYPES}
-                for i in range((z - a).days + 1)}
-        for ds, cells in fetched.items():
-            if ds in span:
-                span[ds] = {t: int(cells.get(t) or 0) for t in PLAN_TYPES}
-        save_plan_day_facts(real_org, span)
+        span = await _refresh_plan_facts(real_org, a, z, user)
         have.update(span)
     return {ds: cells for ds, cells in have.items()
             if d_from.isoformat() <= ds <= d_to.isoformat()}
+
+
+async def _refresh_plan_facts(real_org: str, d_from: date, d_to: date,
+                              user: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
+    """Принудительно перечитывает закрытые дни из iiko и обновляет снимок.
+
+    Закрытая смена всё же может измениться задним числом: возврат, перепробитие
+    или позднее закрытие заказа. Раньше существующая строка считалась вечной,
+    из-за чего «Планы» отставали от свежего OLAP.
+    """
+    from database import save_plan_day_facts
+    fetched = _fold_by_dow(await _orders_by_day(real_org, d_from, d_to, user))["date"]
+    span = {(d_from + timedelta(days=i)).isoformat(): {t: 0 for t in PLAN_TYPES}
+            for i in range((d_to - d_from).days + 1)}
+    for ds, cells in fetched.items():
+        if ds in span:
+            span[ds] = {t: int(cells.get(t) or 0) for t in PLAN_TYPES}
+    save_plan_day_facts(real_org, span)
+    return span
 
 
 def _dow_from_days(days: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
@@ -8572,7 +8586,9 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
             plan = {str(i): dict(demo_p) for i in range(1, 8)}
             fact = {str(i): {t: max(0, v - (i % 4) * 2) for t, v in demo_p.items()} for i in range(1, 8)}
             prev = {str(i): {t: max(0, v - (i % 3) * 3) for t, v in demo_p.items()} for i in range(1, 8)}
-            out.append({**b, "plan": plan, "fact": fact, "base": plan, "prev": prev})
+            out.append({**b, "plan": plan, "fact": fact, "base": plan, "prev": prev,
+                        "fot": {"amount": 420000, "shifts_priced": 14,
+                                "shifts_total": 14, "complete": True}})
         return _plan_response(wk, d_from, d_to, out, demo=True)
 
     base_from = d_from - timedelta(weeks=PLAN_BASE_WEEKS)
@@ -8628,8 +8644,10 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
             auto = True
         plan = {str(i): {t: int(saved.get(i, {}).get(t, 0)) for t in PLAN_TYPES}
                 for i in range(1, 8)}
+        from database import branch_fot_summary
+        fot = branch_fot_summary(org, d_from.isoformat(), d_to.isoformat())
         return {**b, "plan": plan, "fact": _dow_from_days(cur_days),
-                "base": avg, "prev": prev, "plan_auto": auto}
+                "base": avg, "prev": prev, "plan_auto": auto, "fot": fot}
 
     rows = await asyncio.gather(*(one(b) for b in branches))
     return _plan_response(wk, d_from, d_to, list(rows), demo=False,
@@ -8695,6 +8713,15 @@ def _plan_response(wk: str, d_from: date, d_to: date,
                    "plan": net_plan, "fact": net_fact, "base": net_base, "prev": net_prev,
                    "total_plan": _totals(net_plan), "total_fact": _totals(net_fact),
                    "total_base": _totals(net_base), "total_prev": _totals(net_prev)}
+    fot_rows = [r.get("fot") or {} for r in rows]
+    network_row["fot"] = {
+        "amount": round(sum(float(x.get("amount") or 0) for x in fot_rows)),
+        "shifts_priced": sum(int(x.get("shifts_priced") or 0) for x in fot_rows),
+        "shifts_total": sum(int(x.get("shifts_total") or 0) for x in fot_rows),
+    }
+    network_row["fot"]["complete"] = (
+        network_row["fot"]["shifts_total"] > 0
+        and network_row["fot"]["shifts_priced"] == network_row["fot"]["shifts_total"])
     # Сколько дней недели уже ЗАКРЫТО. Считаем на сервере: сравнение с прошлой
     # неделей идёт день в день, и если фронт и бэк разойдутся в этом числе хоть
     # на день, динамика во вторник соврёт. Сегодняшний день не закрыт.
@@ -8769,6 +8796,7 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
                     if ld.get("late_pct") is not None:
                         m["late_pct"] = ld["late_pct"]
                     m["deliveries"] = ld.get("delivered")
+                    m["late_orders_count"] = ld.get("late")
                     # Главный вывод по опозданиям — не «сколько», а «из-за чего».
                     # Считается тем же запросом, вторым походом в iiko не платим.
                     meta["late_cause"] = ld.get("top_cause")
@@ -8814,8 +8842,12 @@ async def plan_week_metrics(org_id: str, week: Optional[str] = None, network: in
         if ref["configured"]:
             if org in sl_now:
                 now["staff_late_pct"] = sl_now[org]["late_pct"]
+                now["staff_late_count"] = sl_now[org]["late"]
+                now["staff_total_count"] = sl_now[org]["total"]
             if org in sl_prev:
                 prev["staff_late_pct"] = sl_prev[org]["late_pct"]
+                prev["staff_late_count"] = sl_prev[org]["late"]
+                prev["staff_total_count"] = sl_prev[org]["total"]
         staff = dict(sl_now.get(org) or {})
         staff.update({"configured": ref["configured"], "starts": ref["starts"]})
         return {**b, "now": now, "prev": prev,
@@ -9937,9 +9969,11 @@ async def _send_weekly_scores() -> bool:
 
 
 async def _close_plan_day() -> int:
-    """Закрываем вчерашний день: снимаем факт заказов по каждому филиалу и
-    кладём в базу. После этого вкладка «План» открывается из своей базы, а не
-    из девяти iiko-серверов.
+    """Обновляем последние семь закрытых дней по каждому филиалу.
+
+    Одного вчерашнего дня недостаточно: iiko допускает возвраты, перепробитие
+    и позднее закрытие заказа задним числом. Недельное окно исправляет такие
+    изменения, но вкладка по-прежнему открывается из быстрой локальной базы.
 
     Строго говоря, это оптимизация: чего в снимке нет, `_orders_cached` доберёт
     на лету. Ночной проход нужен, чтобы утром никто этого добора не ждал.
@@ -9950,6 +9984,7 @@ async def _close_plan_day() -> int:
         "SELECT DISTINCT organization_id FROM restaurants WHERE organization_id IS NOT NULL").fetchall()]
     conn.close()
     day = local_now().date() - timedelta(days=1)
+    day_from = day - timedelta(days=6)
     done = 0
     for org in orgs:
         owner = _owner_user_of(org)
@@ -9958,7 +9993,7 @@ async def _close_plan_day() -> int:
         try:
             # Один филиал не должен ронять проход: у части клиентов iiko-сервер
             # может лежать, а остальные восемь закрыться обязаны.
-            if await _orders_cached(org, day, day, owner):
+            if await _refresh_plan_facts(org, day_from, day, owner):
                 done += 1
         except Exception as e:
             logger.warning(f"[plan] не закрыл день {day} по {org}: {e!r}")
@@ -9980,10 +10015,10 @@ async def _daily_scores_scheduler():
                 logger.info(f"[scores] пересчитано филиалов: {n}")
             # Снимок факта заказов — своим ключом состояния: упади он, оценки
             # всё равно должны посчитаться, и наоборот.
-            if now.hour >= 3 and get_app_state("plan_day_closed") != today:
+            if now.hour >= 3 and get_app_state("plan_days_refreshed_v2") != today:
                 closed = await _close_plan_day()
-                set_app_state("plan_day_closed", today)
-                logger.info(f"[plan] закрыт вчерашний день по филиалам: {closed}")
+                set_app_state("plan_days_refreshed_v2", today)
+                logger.info(f"[plan] обновлены последние 7 дней по филиалам: {closed}")
             # вторник = weekday 1
             if now.weekday() == 1 and now.hour >= 10 and get_app_state("weekly_scores_last") != today:
                 if await _send_weekly_scores():

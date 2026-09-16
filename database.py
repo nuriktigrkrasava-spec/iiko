@@ -1350,6 +1350,27 @@ def get_staff_schedule(org_id: str, day_from: str, day_to: str) -> List[Dict[str
     return [dict(r) for r in rows]
 
 
+def branch_fot_summary(org_id: str, day_from: str, day_to: str) -> Dict[str, Any]:
+    """ФОТ филиала за период из оплаты смен.
+
+    NULL у смены означает «оплату ещё не заполнили», а не ноль. Поэтому рядом
+    с суммой всегда отдаём покрытие: сколько смен имеют сумму из общего числа.
+    """
+    conn = get_db()
+    _ensure_staff_shifts(conn)
+    row = conn.execute(
+        "SELECT COUNT(*) AS shifts_total, COUNT(pay) AS shifts_priced, "
+        "COALESCE(SUM(pay), 0) AS amount FROM staff_schedule "
+        "WHERE organization_id = ? AND day BETWEEN ? AND ?",
+        (org_id, day_from, day_to)).fetchone()
+    conn.close()
+    total = int(row["shifts_total"] or 0)
+    priced = int(row["shifts_priced"] or 0)
+    return {"amount": round(float(row["amount"] or 0)),
+            "shifts_priced": priced, "shifts_total": total,
+            "complete": total > 0 and priced == total}
+
+
 def set_staff_shift(org_id: str, employee_id: str, day: str, start: str, end: str = "",
                     pay: Optional[float] = None):
     conn = get_db()

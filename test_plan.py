@@ -173,6 +173,8 @@ def test_totals_and_network_row():
     net = r["network"]
     assert net["name"] == "Итого сеть"
     assert net["plan"]["1"]["hall"] == 15 and net["total_fact"]["hall"] == 105, net
+    assert net["fot"] == {"amount": 0, "shifts_priced": 0,
+                          "shifts_total": 0, "complete": False}, net["fot"]
     print("  [OK] итог филиала 70 план / 56 факт, сеть по понедельнику 15")
 
 
@@ -322,6 +324,42 @@ def test_day_without_orders_is_not_refetched_forever():
     print("  [OK] день без заказов закрывается нулями, повторно не тянется")
 
 
+def test_forced_refresh_corrects_a_closed_day():
+    """Возврат или поздно закрытый заказ меняет уже закрытый день. Ночной
+    проход обязан заменить снимок, а не решить, что существующая строка вечная."""
+    import api as A
+    import asyncio as aio
+    from database import get_plan_day_facts, save_plan_day_facts
+    real_orders = A._orders_by_day
+    day = date(2026, 9, 14)
+    save_plan_day_facts("org-refresh", {day.isoformat(): {
+        "hall": 323, "pickup": 7, "delivery": 19, "agg": 10}})
+
+    async def fresh(_org, _a, _z, _user):
+        return [olap(day.isoformat(), "Обычный заказ", 325),
+                olap(day.isoformat(), "Самовывоз", 7),
+                olap(day.isoformat(), "Доставка", 19),
+                olap(day.isoformat(), "Агрегаторы", 10)]
+    try:
+        A._orders_by_day = fresh
+        aio.run(A._refresh_plan_facts("org-refresh", day, day, {"id": 1}))
+        got = get_plan_day_facts("org-refresh", day.isoformat(), day.isoformat())
+        assert got[day.isoformat()]["hall"] == 325, got
+    finally:
+        A._orders_by_day = real_orders
+    print("  [OK] ночная сверка исправляет закрытый день 323→325")
+
+
+def test_branch_fot_reports_amount_and_missing_shift_pay():
+    from database import set_staff_shift, branch_fot_summary
+    set_staff_shift("org-fot", "e1", "2026-09-14", "09:00", "18:00", 15000)
+    set_staff_shift("org-fot", "e2", "2026-09-14", "10:00", "19:00", None)
+    got = branch_fot_summary("org-fot", "2026-09-14", "2026-09-20")
+    assert got == {"amount": 15000, "shifts_priced": 1,
+                   "shifts_total": 2, "complete": False}, got
+    print("  [OK] ФОТ 15 000 и явно показывает 1 незаполненную смену")
+
+
 def test_future_week_asks_iiko_for_nothing():
     """Неделя, которая ещё не наступила: закрытых дней нет, запросов тоже."""
     import api as A
@@ -398,6 +436,8 @@ if __name__ == "__main__":
               test_closed_days_are_read_from_the_snapshot_not_from_iiko,
               test_today_is_never_returned_or_cached,
               test_day_without_orders_is_not_refetched_forever,
+              test_forced_refresh_corrects_a_closed_day,
+              test_branch_fot_reports_amount_and_missing_shift_pay,
               test_future_week_asks_iiko_for_nothing,
               test_losses_name_what_got_worse_by_the_same_rule, test_tiny_wobble_is_not_a_loss,
               test_staff_lateness_is_a_week_metric,

@@ -25,12 +25,14 @@ import type { ScoreRow } from './Progress'
    месте. Сегодняшний день не закрыт и в сравнение не входит. */
 
 type Grid = Record<string, Record<string, number>>
+type Fot = { amount: number; shifts_priced: number; shifts_total: number; complete: boolean }
 type Branch = {
   organization_id: string; name: string
   plan: Grid; fact: Grid; base: Grid; prev: Grid
   total_plan: Record<string, number>; total_fact: Record<string, number>
   total_base: Record<string, number>; total_prev: Record<string, number>
   plan_auto?: boolean          // план поставлен сам по средней, руками не ставили
+  fot?: Fot
 }
 type Cell = { org: string; dow: number; ch_type: string; planned: number }
 type Win = { key: string; label: string; unit: string; from: number; to: number; better: number; pct: number | null }
@@ -637,6 +639,10 @@ export default function Plan() {
   const factOf = (b: Branch, t: string) => daySum(b.fact, t)
   const prevOf = (b: Branch, t: string) => daySum(b.prev, t)
   const sumTypes = (fn: (t: string) => number) => TYPES.reduce((s, t) => s + fn(t), 0)
+  const netFact = sumTypes((t) => factOf(data.network!, t))
+  const netPrev = sumTypes((t) => prevOf(data.network!, t))
+  const netPlanDone = sumTypes((t) => netPlanTotal(t, doneDays))
+  const networkFot = data.network!.fot
 
   function openProgress() {
     setShowProgress(true)
@@ -674,6 +680,34 @@ export default function Plan() {
           </div>
         </div>
 
+        {/* Три ответа, с которых начинается собрание: план, динамика и люди. */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(220px,1fr))', gap: 12, marginTop: 18 }}>
+          <div style={heroStat}>
+            <div style={heroLabel}>Выполнение плана</div>
+            <div className="tnum" style={heroValue}>{netPlanDone ? `${pct(netFact, netPlanDone)}%` : '—'}</div>
+            <div style={{ fontSize: 13.5, color: 'var(--mute)', marginTop: 7 }}>
+              <b style={{ color: 'var(--hi)' }}>{nfmt(netFact)}</b> из {netPlanDone ? nfmt(netPlanDone) : '—'} заказов
+            </div>
+          </div>
+          <div style={heroStat}>
+            <div style={heroLabel}>К прошлой неделе</div>
+            <div className="tnum" style={heroValue}><Delta now={netFact} was={netPrev} /></div>
+            <div style={{ fontSize: 13.5, color: 'var(--mute)', marginTop: 7 }}>
+              было {nfmt(netPrev)} · те же {doneDays || 0} закрытых дн.
+            </div>
+          </div>
+          <div style={heroStat}>
+            <div style={heroLabel}>ФОТ по графику</div>
+            <div className="tnum" style={heroValue}>{networkFot ? `${nfmt(networkFot.amount)} ₸` : '—'}</div>
+            <div style={{ fontSize: 13.5, marginTop: 7,
+                          color: networkFot?.complete ? 'var(--grn)' : 'var(--amb)' }}>
+              {networkFot ? `${networkFot.shifts_priced} из ${networkFot.shifts_total} смен с оплатой` : 'нет данных по сменам'}
+            </div>
+          </div>
+        </div>
+
+        {/* Каналы вторым уровнем: сначала итог сети, потом разбор состава. */}
+        <div style={{ marginTop: 18, fontSize: 13, fontWeight: 700, color: 'var(--hi)' }}>Заказы по каналам</div>
         {/* Сводка недели по каналам — как строка «Факт май, %» в таблице.
             Жёсткие три колонки на телефоне давали карточки по ~90 px: крупное
             число переносилось по слогам. auto-fit — три в ряд на широком, одна
@@ -686,12 +720,12 @@ export default function Plan() {
             const was = prevOf(data.network!, t)
             return (
               <div key={t} style={{ padding: 14, borderRadius: 14, background: 'var(--glass-2)', border: '1px solid var(--hair)' }}>
-                <div style={{ fontSize: 12, color: 'var(--mute)' }}>{TYPE_LABEL[t]}</div>
+                <div style={{ fontSize: 13.5, color: 'var(--mute)', fontWeight: 650 }}>{TYPE_LABEL[t]}</div>
                 <div className="tnum" style={{
                   fontSize: 'clamp(26px, 3.4vw, 34px)', fontWeight: 720, marginTop: 6,
                   lineHeight: 1.05, letterSpacing: '-0.025em', color: 'var(--hi)',
                 }}>
-                  {nfmt(f)} <span style={{ fontSize: 12, fontWeight: 500, letterSpacing: 0, color: 'var(--mute)' }}>
+                  {nfmt(f)} <span style={{ fontSize: 13, fontWeight: 500, letterSpacing: 0, color: 'var(--mute)' }}>
                     {running ? 'заказов за закрытые дни' : 'заказов за неделю'}
                   </span>
                 </div>
@@ -765,8 +799,8 @@ export default function Plan() {
         <Glass span={12}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 700, color: 'var(--hi)' }}>Прогресс и динамика</div>
-              <div style={{ marginTop: 2, fontSize: 12, color: 'var(--mute)' }}>
+              <div style={{ fontSize: 16, fontWeight: 750, color: 'var(--hi)' }}>Прогресс и динамика</div>
+              <div style={{ marginTop: 4, fontSize: 13.5, lineHeight: 1.45, color: 'var(--mute)' }}>
                 План и факт по филиалам, графики недели, что улучшилось и что просело.
                 Во весь экран — для собрания.
               </div>
@@ -776,7 +810,7 @@ export default function Plan() {
                        background: 'linear-gradient(135deg,var(--acc),var(--acc-2))',
                        color: 'var(--on-acc)', fontSize: 13.5, fontWeight: 700,
                        fontFamily: 'inherit', cursor: 'pointer' }}>
-              Показать
+              Открыть отчёт
             </button>
           </div>
         </Glass>
@@ -813,13 +847,14 @@ export default function Plan() {
             </span>
           </div>
           <div style={{ overflowX: 'auto', marginTop: 12 }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 940, tableLayout: 'fixed' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: 1080, tableLayout: 'fixed' }}>
               <colgroup>
-                <col style={{ width: '22%' }} />
-                {TYPES.map((t) => <col key={t} style={{ width: '11%' }} />)}
-                <col style={{ width: '12%' }} />
+                <col style={{ width: '19%' }} />
+                {TYPES.map((t) => <col key={t} style={{ width: '9%' }} />)}
                 <col style={{ width: '11%' }} />
-                <col style={{ width: '11%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '10%' }} />
+                <col style={{ width: '14%' }} />
               </colgroup>
               <thead><tr>
                 <th style={thL}>Филиал</th>
@@ -827,6 +862,7 @@ export default function Plan() {
                 <th style={thC}>Всего</th>
                 <th style={thC}>Нед. {weekNo - 1}</th>
                 <th style={thC}>Динамика</th>
+                <th style={thC}>ФОТ</th>
               </tr></thead>
               <tbody>
                 {/* Сортируем по проценту выполнения: на собрании первый вопрос —
@@ -871,6 +907,16 @@ export default function Plan() {
                       </td>
                       <td style={{ ...td, textAlign: 'center', fontSize: 12.5 }}>
                         <Delta now={tf} was={tw} />
+                      </td>
+                      <td style={{ ...td, textAlign: 'right' }}>
+                        <span className="tnum" style={{ color: 'var(--hi)', fontWeight: 750 }}>
+                          {b.fot ? `${nfmt(b.fot.amount)} ₸` : '—'}
+                        </span>
+                        {b.fot && !b.fot.complete && (
+                          <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--amb)' }}>
+                            {b.fot.shifts_priced}/{b.fot.shifts_total} смен
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )
@@ -1026,5 +1072,8 @@ const td: CSSProperties = {
 }
 const lbl: CSSProperties = { fontSize: 9, letterSpacing: '.08em', textTransform: 'uppercase', color: 'var(--mute)', marginBottom: 3 }
 const inp: CSSProperties = { width: '100%', maxWidth: 92, fontSize: 15, fontWeight: 650, textAlign: 'center', padding: '6px 8px', borderRadius: 10, border: '1px solid var(--hair)', background: 'var(--glass-2)', color: 'var(--hi)', fontVariantNumeric: 'tabular-nums', fontFamily: 'inherit' }
+const heroStat: CSSProperties = { padding: '18px 19px', borderRadius: 17, background: 'var(--glass-2)', border: '1px solid var(--hair)', minWidth: 0 }
+const heroLabel: CSSProperties = { fontSize: 13, color: 'var(--mute)', fontWeight: 650 }
+const heroValue: CSSProperties = { marginTop: 8, fontSize: 'clamp(28px,3.5vw,38px)', fontWeight: 780, letterSpacing: '-.035em', lineHeight: 1, color: 'var(--hi)' }
 const actBtn: CSSProperties = { fontSize: 12, fontWeight: 650, color: 'var(--hi)', background: 'var(--glass-2)', border: '1px solid var(--hair)', borderRadius: 9, padding: '6px 11px', cursor: 'pointer', fontFamily: 'inherit' }
 const baseBtn: CSSProperties = { fontSize: 12, fontWeight: 650, color: 'var(--acc)', background: 'transparent', border: '1px solid var(--hair)', borderRadius: 9, padding: '5px 10px', cursor: 'pointer', fontFamily: 'inherit' }
