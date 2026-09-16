@@ -38,6 +38,7 @@ export default function Signup({ onClose }: { onClose: () => void }) {
   const [org, setOrg] = useState<Org | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [done, setDone] = useState<{ url: string; claim: string } | null>(null)
 
   async function check() {
     setBusy(true); setErr('')
@@ -54,12 +55,15 @@ export default function Signup({ onClose }: { onClose: () => void }) {
     if (!org) return
     setBusy(true); setErr('')
     try {
-      const r = await post<{ url: string }>('/api/signup', {
+      const r = await post<{ url: string; claim_url: string }>('/api/signup', {
         api_login: login, iiko_server: server, api_password: pass,
         organization_id: org.id, organization_name: org.name, tg_username: tg,
       })
-      // Личная ссылка — сразу свои данные, без ещё одного шага.
-      window.location.href = r.url
+      // Телеграм подтверждается переходом по ссылке бота, а не введённым именем:
+      // имя публично, и привязка по нему отдала бы аккаунт тому, кто это имя
+      // занял. Данные при этом доступны сразу — подтверждение только для пушей.
+      setDone({ url: r.url, claim: r.claim_url })
+      setBusy(false)
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); setBusy(false) }
   }
 
@@ -82,7 +86,28 @@ export default function Signup({ onClose }: { onClose: () => void }) {
           Доступы читаются только на чтение.
         </div>
 
-        {!orgs ? (
+        {done ? (
+          <>
+            <div style={{ marginTop: 16, fontSize: 13.5, color: 'var(--mute)', lineHeight: 1.5 }}>
+              Ресторан подключён. Данные уже можно смотреть. Чтобы получать
+              уведомления, подтвердите телеграм — одно нажатие.
+            </div>
+            <a href={done.claim} target="_blank" rel="noreferrer"
+               style={{ display: 'block', marginTop: 16, padding: '12px 16px', borderRadius: 13,
+                        textAlign: 'center', textDecoration: 'none',
+                        background: 'linear-gradient(135deg,var(--acc),var(--acc-2))',
+                        color: 'var(--on-acc)', fontSize: 14, fontWeight: 700 }}>
+              Подтвердить телеграм
+            </a>
+            <button onClick={() => { window.location.href = done.url }}
+                    style={{ marginTop: 10, width: '100%', padding: '11px 16px', borderRadius: 12,
+                             border: '1px solid var(--hair)', background: 'transparent',
+                             color: 'var(--hi)', font: 'inherit', fontSize: 13.5, fontWeight: 650,
+                             cursor: 'pointer' }}>
+              Открыть мои данные
+            </button>
+          </>
+        ) : !orgs ? (
           <>
             <div style={{ marginTop: 16 }}>
               <label style={lab}>Адрес iiko-сервера</label>
@@ -127,12 +152,12 @@ export default function Signup({ onClose }: { onClose: () => void }) {
             {err}
           </div>
         )}
-        <button onClick={onClose}
+        {!done && <button onClick={onClose}
                 style={{ marginTop: 14, width: '100%', padding: '10px 14px', borderRadius: 12,
                          border: '1px solid var(--hair)', background: 'transparent',
                          color: 'var(--mute)', font: 'inherit', fontSize: 13, cursor: 'pointer' }}>
           Сначала посмотрю демо
-        </button>
+        </button>}
       </div>
     </div>
   )

@@ -1174,7 +1174,7 @@ async def site_signup(request: Request, payload: SiteSignup):
         raise HTTPException(status_code=400, detail="iiko не принял эти доступы")
     if payload.organization_id not in {o["id"] for o in orgs}:
         raise HTTPException(status_code=400, detail="Этой организации нет у ваших доступов")
-    uid = web_signup(uname, payload.organization_name)
+    uid, code = web_signup(uname, payload.organization_name)
     add_restaurant(uid, payload.api_login, payload.organization_id, payload.organization_name,
                    payload.iiko_server, payload.api_password, payload.cloud_api_login)
     import mountain_routes as _mr
@@ -1185,7 +1185,11 @@ async def site_signup(request: Request, payload: SiteSignup):
                        f"{html.escape(payload.organization_name)}")
     except Exception as e:
         logger.warning(f"[signup] owner notify: {e!r}")
-    return {"success": True, "token": token, "url": f"/?m={token}"}
+    # Телеграм подтверждается ОДНОРАЗОВЫМ кодом по ссылке бота, а не введённым
+    # @username: имя публично, и привязка по нему означала бы, что любой заводит
+    # аккаунт на чужое имя, а владелец этого имени забирает его первым /start.
+    return {"success": True, "token": token, "url": f"/?m={token}",
+            "claim_url": f"https://t.me/{BOT_USERNAME}?start=link_{code}"}
 
 
 @app.post("/api/setup/save")
@@ -7352,14 +7356,17 @@ async def telegram_webhook(request: Request):
                         logger.warning(f"[invite] notify owner: {e!r}")
                 return {"ok": True}
             # Человек мог зарегистрироваться на сайте раньше, чем написал боту.
-            # Это один человек: переносим его рестораны на настоящий id, иначе
-            # уведомления придут в пустой аккаунт.
-            try:
-                from database import claim_web_signup
-                if claim_web_signup(username, telegram_id):
-                    logger.info(f"[signup] аккаунт с сайта забран: @{username} -> {telegram_id}")
-            except Exception as e:
-                logger.warning(f"[signup] claim {telegram_id}: {e!r}")
+            # Привязываем ТОЛЬКО по одноразовому коду из ссылки: он и есть
+            # доказательство, что телеграм принадлежит тому, кто регистрировался.
+            if raw_source.startswith("link_"):
+                try:
+                    from database import claim_web_signup_by_code
+                    if claim_web_signup_by_code(raw_source[5:], telegram_id):
+                        logger.info(f"[signup] телеграм подтверждён: {telegram_id}")
+                        await _tg_send(chat_id, "✅ Телеграм подключён — уведомления "
+                                                "по вашему ресторану будут приходить сюда.")
+                except Exception as e:
+                    logger.warning(f"[signup] claim {telegram_id}: {e!r}")
             if DEMO_ONLY:
                 try:
                     is_new = record_acquisition(telegram_id, username, source)

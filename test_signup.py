@@ -15,40 +15,81 @@ def test_web_signup_gets_an_identity_that_cannot_collide_with_telegram():
     """Человек с сайта регистрируется ДО того, как написал боту: телеграм-id у
     него ещё нет. Выдаём свой, заведомо отрицательный — телеграм таких не
     выдаёт, значит перепутать два аккаунта невозможно."""
-    uid1 = D.web_signup("kolya", "Коля")
-    uid2 = D.web_signup("masha", "Маша")
+    uid1, code1 = D.web_signup("kolya", "Коля")
+    uid2, code2 = D.web_signup("masha", "Маша")
     assert uid1 < 0 and uid2 < 0, (uid1, uid2)
-    assert uid1 != uid2
+    assert uid1 != uid2 and code1 != code2
     assert D.get_user(uid1)["username"] == "kolya"
     print("  [OK] веб-аккаунты получают свои отрицательные id")
 
 
+def test_an_id_is_never_handed_out_twice():
+    """ГЛАВНОЕ. Ссылка `?m=...` — это подпись id, без срока годности. Верни id
+    в оборот — и старая закладка первого человека откроет кабинет второго со
+    всеми его данными. Раньше id считался как MIN(telegram_id)-1 и после
+    привязки освобождался; счётчик обязан быть монотонным."""
+    seen = set()
+    for i in range(6):
+        uid, code = D.web_signup(f"user{i}", "")
+        assert uid not in seen, f"id {uid} выдан повторно"
+        seen.add(uid)
+        D.claim_web_signup_by_code(code, 700000 + i)   # аккаунт уехал на телеграм
+    after, _ = D.web_signup("последний", "")
+    assert after not in seen, f"id {after} выдан повторно после привязок"
+    print("  [OK] id не выдаётся повторно даже после переезда аккаунтов")
+
+
+def test_the_old_link_of_a_moved_account_leads_nowhere():
+    """Ссылка, выданная до привязки, продолжает действовать — подпись вечная.
+    Она обязана вести в ПУСТОЙ аккаунт, а не в чужой."""
+    uid, code = D.web_signup("ushel", "")
+    D.add_restaurant(uid, "l", "org-old", "Мой", "https://s", "p")
+    assert D.claim_web_signup_by_code(code, 700100) is True
+    nxt, _ = D.web_signup("prishel", "")
+    D.add_restaurant(nxt, "l", "org-new", "Чужой", "https://s", "p")
+    assert [r["organization_id"] for r in D.get_restaurants(uid)] == [], D.get_restaurants(uid)
+    print("  [OK] старая ссылка ведёт в пустой аккаунт, а не в чужой")
+
+
 def test_username_is_stored_without_the_at_sign():
-    """@kolya и kolya — один человек. Иначе бот не нашёл бы его при /start."""
-    uid = D.web_signup("@Petya", "Петя")
+    """@kolya и kolya — один человек."""
+    uid, _ = D.web_signup("@Petya", "Петя")
     assert D.get_user(uid)["username"] == "petya", D.get_user(uid)
     print("  [OK] @ и регистр не мешают найти человека")
 
 
-def test_bot_start_claims_the_account_registered_on_the_site():
-    """Человек подключил iiko на сайте, потом написал боту. Это ОДИН человек:
-    его рестораны обязаны переехать на настоящий телеграм-id, иначе уведомления
-    придут в пустой аккаунт, а данные останутся в другом."""
-    uid = D.web_signup("vasya", "Вася")
+def test_bot_claims_the_account_only_with_the_one_time_code():
+    """Привязка по @username означала бы, что любой заводит аккаунт на чужое
+    публичное имя, а владелец имени забирает его первым же /start и получает
+    чужой «филиал» среди своих. Доказательство — одноразовый код из ссылки."""
+    uid, code = D.web_signup("vasya", "Вася")
     D.add_restaurant(uid, "login", "org-1", "Мой ресторан", "https://s", "pwd")
-    moved = D.claim_web_signup("vasya", 555001)
-    assert moved is True
+    assert D.claim_web_signup_by_code(code, 555001) is True
     assert [r["organization_id"] for r in D.get_restaurants(555001)] == ["org-1"]
     assert D.get_restaurants(uid) == []
-    print("  [OK] ресторан переехал на настоящий телеграм-id")
+    print("  [OK] ресторан переезжает только по коду из ссылки")
 
 
-def test_claim_is_idempotent_and_ignores_strangers():
-    """Второй /start не должен ничего переносить снова, а чужой username —
-    вообще ничего трогать."""
-    assert D.claim_web_signup("vasya", 555001) is False
-    assert D.claim_web_signup("кто-то-ещё", 555002) is False
-    print("  [OK] повторный вход и чужой username безвредны")
+def test_the_code_works_once_and_a_wrong_one_never():
+    """Код погашается: ссылка могла осесть в чужой истории."""
+    uid, code = D.web_signup("odin", "")
+    assert D.claim_web_signup_by_code(code, 555010) is True
+    assert D.claim_web_signup_by_code(code, 555011) is False, "код сработал дважды"
+    assert D.claim_web_signup_by_code("подобранный", 555012) is False
+    assert D.claim_web_signup_by_code("", 555013) is False
+    print("  [OK] код одноразовый, подобранный не работает")
+
+
+def test_an_old_code_expires():
+    """Непривязанный аккаунт не должен ждать вечно."""
+    import time
+    uid, code = D.web_signup("staryi", "")
+    conn = D.get_db()
+    conn.execute("UPDATE web_signup SET created_ts = ? WHERE uid = ?",
+                 (int(time.time()) - D.WEB_CLAIM_TTL - 60, uid))
+    conn.commit(); conn.close()
+    assert D.claim_web_signup_by_code(code, 555020) is False
+    print("  [OK] просроченный код не привязывает")
 
 
 def test_counter_separates_arrived_connected_and_active():
@@ -84,9 +125,12 @@ def test_a_visit_updates_activity_but_not_the_arrival_date():
 if __name__ == "__main__":
     failed = 0
     for t in (test_web_signup_gets_an_identity_that_cannot_collide_with_telegram,
+              test_an_id_is_never_handed_out_twice,
+              test_the_old_link_of_a_moved_account_leads_nowhere,
               test_username_is_stored_without_the_at_sign,
-              test_bot_start_claims_the_account_registered_on_the_site,
-              test_claim_is_idempotent_and_ignores_strangers,
+              test_bot_claims_the_account_only_with_the_one_time_code,
+              test_the_code_works_once_and_a_wrong_one_never,
+              test_an_old_code_expires,
               test_counter_separates_arrived_connected_and_active,
               test_a_visit_updates_activity_but_not_the_arrival_date):
         print(f"\n>>> {t.__name__}")

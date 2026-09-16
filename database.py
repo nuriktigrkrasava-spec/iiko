@@ -2,7 +2,8 @@ import sqlite3
 import os
 import json
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Dict, Any
+import secrets
+from typing import Optional, List, Dict, Any, Tuple
 from cryptography.fernet import Fernet
 
 # На Render persistent disk обычно монтируется в /data. Если он есть и DB_PATH
@@ -311,58 +312,118 @@ def touch_acquisition(telegram_id: int, ts: Optional[int] = None):
 
 # Телеграм выдаёт только положительные id, поэтому веб-аккаунтам раздаём
 # отрицательные: перепутать «человека с сайта» и «человека из бота» нельзя даже
-# случайно, а когда он напишет боту — аккаунт переезжает на настоящий id.
+# случайно, а когда он подтвердит телеграм — аккаунт переезжает на настоящий id.
 WEB_UID_BASE = -1000
 
 
-def web_signup(username: str, first_name: str = "") -> int:
-    """Заводит аккаунт человеку, который регистрируется на сайте до бота."""
+def _ensure_web_signup(conn):
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS web_signup (
+        uid         INTEGER PRIMARY KEY,
+        username    TEXT,
+        claim_code  TEXT UNIQUE,
+        created_ts  INTEGER,
+        claimed_ts  INTEGER,
+        claimed_tid INTEGER
+    );
+    """)
+
+
+def _next_web_uid(conn) -> int:
+    """Выдаёт СЛЕДУЮЩИЙ веб-id и никогда не выдаёт его повторно.
+
+    Раньше id считался как MIN(telegram_id) - 1, то есть выводился из текущего
+    содержимого таблицы. Стоило аккаунту уехать на настоящий телеграм-id — и
+    освободившийся id доставался следующему зарегистрировавшемуся. А ссылка
+    `?m=...` — это HMAC от id, без срока и без привязки к строке в базе: старая
+    закладка первого человека открывала кабинет второго, со всеми его данными и
+    правом записи. Поэтому счётчик монотонный и назад не откатывается.
+    """
+    _ensure_app_state(conn)
+    row = conn.execute("SELECT value FROM app_state WHERE key = 'web_uid_seq'").fetchone()
+    seq = int(row["value"]) if row and str(row["value"]).lstrip("-").isdigit() else 0
+    # Подстраховка на случай базы, заведённой до появления счётчика.
+    low = conn.execute("SELECT MIN(telegram_id) m FROM users").fetchone()["m"]
+    seq = min(seq, int(low or 0), WEB_UID_BASE) - 1
+    conn.execute("INSERT OR REPLACE INTO app_state (key, value) VALUES ('web_uid_seq', ?)",
+                 (str(seq),))
+    return seq
+
+
+def normalize_username(username: Optional[str]) -> str:
+    """@Kolya, Kolya и kolya — один человек."""
+    return (username or "").strip().lstrip("@").lower()
+
+
+def web_signup(username: str, first_name: str = "") -> Tuple[int, str]:
+    """Заводит аккаунт человеку, который регистрируется на сайте до бота.
+
+    Возвращает (uid, код подтверждения). Код одноразовый и случайный: телеграм
+    привязывается по нему, а НЕ по @username. Имя пользователя публично — его
+    печатают на меню и в инстаграме, — и привязка по нему означала бы, что любой
+    может завести аккаунт на чужое имя, а жертва заберёт его себе первым же
+    /start и увидит чужой «филиал» среди своих.
+    """
     conn = get_db()
-    row = conn.execute("SELECT MIN(telegram_id) m FROM users").fetchone()
-    uid = min(int(row["m"] or 0), WEB_UID_BASE) - 1
+    _ensure_web_signup(conn)
+    uid = _next_web_uid(conn)
+    code = secrets.token_urlsafe(18)
     conn.execute("INSERT INTO users (telegram_id, username, first_name, created_at) "
                  "VALUES (?,?,?,?)",
                  (uid, normalize_username(username), first_name or "",
                   datetime.now().isoformat()))
+    conn.execute("INSERT INTO web_signup (uid, username, claim_code, created_ts) "
+                 "VALUES (?,?,?,?)",
+                 (uid, normalize_username(username), code,
+                  int(datetime.now().timestamp())))
     conn.commit()
     conn.close()
     record_acquisition(uid, normalize_username(username), "site")
-    return uid
+    return uid, code
 
 
-def claim_web_signup(username: str, telegram_id: int) -> bool:
-    """Человек с сайта написал боту — это ОДИН человек.
+# Сколько живёт код подтверждения. Непривязанный аккаунт вечно ждать не должен:
+# код уходит по ссылке и может осесть в чужой истории.
+WEB_CLAIM_TTL = 7 * 86400
 
-    Переносим его рестораны на настоящий телеграм-id: иначе уведомления пришли
-    бы в пустой аккаунт, а подключённый iiko остался бы в другом. True — что-то
-    перенесли; повторный /start и чужой username безвредны.
+
+def claim_web_signup_by_code(code: str, telegram_id: int) -> bool:
+    """Телеграм подтверждён кодом — переносим рестораны на настоящий id.
+
+    Строку веб-аккаунта НЕ удаляем: удаление вернуло бы его id в оборот, а
+    выданная по нему ссылка продолжает действовать. Оставляем её пустой меткой —
+    старая ссылка ведёт в аккаунт без единого ресторана.
     """
-    uname = normalize_username(username)
-    if not uname or telegram_id <= 0:
+    code = (code or "").strip()
+    if not code or telegram_id <= 0:
         return False
     conn = get_db()
+    _ensure_web_signup(conn)
     _ensure_acquisition(conn)
-    row = conn.execute("SELECT telegram_id FROM users WHERE username = ? AND telegram_id < 0 "
-                       "ORDER BY telegram_id DESC LIMIT 1", (uname,)).fetchone()
-    if not row:
+    row = conn.execute(
+        "SELECT uid, username, created_ts FROM web_signup "
+        "WHERE claim_code = ? AND claimed_ts IS NULL", (code,)).fetchone()
+    now = int(datetime.now().timestamp())
+    if not row or now - int(row["created_ts"] or 0) > WEB_CLAIM_TTL:
         conn.close()
         return False
-    web_uid = int(row["telegram_id"])
+    web_uid, uname = int(row["uid"]), row["username"] or ""
     conn.execute("INSERT OR IGNORE INTO users (telegram_id, username, first_name, created_at) "
                  "VALUES (?,?,?,?)", (telegram_id, uname, "", datetime.now().isoformat()))
     conn.execute("UPDATE restaurants SET telegram_id = ? WHERE telegram_id = ?",
                  (telegram_id, web_uid))
-    # Атрибуцию переносим вместе с человеком: он пришёл с сайта, а не из бота.
     src = conn.execute("SELECT source, first_seen_ts FROM user_acquisition WHERE telegram_id = ?",
                        (web_uid,)).fetchone()
     if src:
         conn.execute("INSERT OR IGNORE INTO user_acquisition "
                      "(telegram_id, username, source, first_seen_ts, last_seen_ts) "
                      "VALUES (?,?,?,?,?)",
-                     (telegram_id, uname, src["source"], src["first_seen_ts"],
-                      int(datetime.now().timestamp())))
+                     (telegram_id, uname, src["source"], src["first_seen_ts"], now))
         conn.execute("DELETE FROM user_acquisition WHERE telegram_id = ?", (web_uid,))
-    conn.execute("DELETE FROM users WHERE telegram_id = ?", (web_uid,))
+    # Метка: код погашен, имя снято — второй раз по нему не привяжешься.
+    conn.execute("UPDATE web_signup SET claimed_ts = ?, claimed_tid = ?, claim_code = NULL, "
+                 "username = NULL WHERE uid = ?", (now, telegram_id, web_uid))
+    conn.execute("UPDATE users SET username = NULL WHERE telegram_id = ?", (web_uid,))
     conn.commit()
     conn.close()
     return True
