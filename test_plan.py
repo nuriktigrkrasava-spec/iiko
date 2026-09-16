@@ -553,6 +553,31 @@ def test_fot_of_a_broken_iiko_does_not_break_the_week():
     print("  [OK] упавший iiko не роняет вкладку, ФОТ падает на график")
 
 
+def test_fot_window_matches_the_closed_days_of_the_orders():
+    """ФОТ стоит на карточке рядом с выполнением плана и динамикой, а те
+    считаются по ЗАКРЫТЫМ дням. Взять ФОТ за всю неделю — поставить рядом два
+    числа за разные периоды: в среду деньги были бы за три дня, а заказы за два.
+    """
+    assert api._done_days(date(2026, 9, 14), date(2026, 9, 20),
+                          today=date(2026, 9, 16)) == 2
+    assert api._fot_window(date(2026, 9, 14), date(2026, 9, 20),
+                           today=date(2026, 9, 16)) == (date(2026, 9, 14), date(2026, 9, 15))
+    # закрытая неделя — целиком
+    assert api._fot_window(date(2026, 9, 7), date(2026, 9, 13),
+                           today=date(2026, 9, 16)) == (date(2026, 9, 7), date(2026, 9, 13))
+    print("  [OK] ФОТ считается по тем же закрытым дням, что и заказы")
+
+
+def test_fot_of_a_week_without_closed_days_asks_iiko_for_nothing():
+    """Понедельник и будущая неделя: закрытых дней нет. Спрашивать явки не о
+    чем, а сумма за «ноль дней» — это «нет данных», а не 0 ₸."""
+    assert api._fot_window(date(2026, 9, 14), date(2026, 9, 20),
+                           today=date(2026, 9, 14)) is None
+    assert api._fot_window(date(2026, 9, 21), date(2026, 9, 27),
+                           today=date(2026, 9, 16)) is None
+    print("  [OK] без закрытых дней ФОТ в iiko не ходит")
+
+
 def test_future_week_asks_iiko_for_nothing():
     """Неделя, которая ещё не наступила: закрытых дней нет, запросов тоже."""
     import api as A
@@ -642,6 +667,8 @@ if __name__ == "__main__":
               test_fot_falls_back_to_the_schedule_when_iiko_has_no_attendance,
               test_fot_without_any_source_is_not_reported_as_zero,
               test_fot_of_a_broken_iiko_does_not_break_the_week,
+              test_fot_window_matches_the_closed_days_of_the_orders,
+              test_fot_of_a_week_without_closed_days_asks_iiko_for_nothing,
               test_future_week_asks_iiko_for_nothing,
               test_losses_name_what_got_worse_by_the_same_rule, test_tiny_wobble_is_not_a_loss,
               test_staff_lateness_is_a_week_metric,

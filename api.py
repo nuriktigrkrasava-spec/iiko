@@ -8651,6 +8651,37 @@ def _fot_of_segments(segments: List[Dict[str, Any]], roles: Dict[str, Dict[str, 
                      for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
 
 
+def _done_days(d_from: date, d_to: date, today: Optional[date] = None) -> int:
+    """Сколько дней недели уже ЗАКРЫТО. Сегодняшний день не закрыт.
+
+    Считаем на сервере и ровно в одном месте: сравнение с прошлой неделей идёт
+    день в день, и если хоть один потребитель разойдётся в этом числе на день,
+    динамика во вторник соврёт.
+    """
+    today = today or local_now().date()
+    if d_to < today:
+        return 7
+    if d_from > today:
+        return 0
+    return (today - d_from).days
+
+
+def _fot_window(d_from: date, d_to: date,
+                today: Optional[date] = None) -> Optional[Tuple[date, date]]:
+    """Период, за который считаем ФОТ, — ТЕ ЖЕ закрытые дни, что и у заказов.
+
+    ФОТ стоит на карточке рядом с выполнением плана и динамикой к прошлой
+    неделе, а обе считаются по закрытым дням. Возьми ФОТ за всю неделю — и в
+    среду рядом окажутся деньги за три дня и заказы за два. None значит
+    «закрытых дней нет»: в iiko идти незачем, а «ноль часов» и «нет данных» —
+    разные вещи.
+    """
+    done = _done_days(d_from, d_to, today)
+    if not done:
+        return None
+    return d_from, d_from + timedelta(days=done - 1)
+
+
 async def _fot_by_branch(branches: List[Dict[str, str]], d_from: date, d_to: date,
                          user: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     """ФОТ филиалов за период — из iiko, без ручного ввода в нашем приложении.
@@ -8812,9 +8843,13 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
     # ФОТ тянем ПАРАЛЛЕЛЬНО с заказами: это отдельный поход в iiko, и ставить
     # его в очередь за девятью OLAP-запросами значило бы удлинить открытие
     # вкладки на время самого медленного сервера.
+    fot_win = _fot_window(d_from, d_to)
+
     async def fot_safe():
+        if fot_win is None:
+            return {}
         try:
-            return await _fot_by_branch(branches, d_from, d_to, user)
+            return await _fot_by_branch(branches, fot_win[0], fot_win[1], user)
         except Exception as e:
             logger.warning(f"[plan] ФОТ {wk}: {e!r}")
             return {}
@@ -8904,11 +8939,8 @@ def _plan_response(wk: str, d_from: date, d_to: date,
         "complete": total > 0 and priced == total,
         "gaps": [{"role": n, "hours": round(h)}
                  for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
-    # Сколько дней недели уже ЗАКРЫТО. Считаем на сервере: сравнение с прошлой
-    # неделей идёт день в день, и если фронт и бэк разойдутся в этом числе хоть
-    # на день, динамика во вторник соврёт. Сегодняшний день не закрыт.
     today = local_now().date()
-    done_days = 7 if d_to < today else (0 if d_from > today else (today - d_from).days)
+    done_days = _done_days(d_from, d_to, today)
     return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),
             "types": PLAN_TYPES, "branches": rows, "network": network_row,
             "base_weeks": PLAN_BASE_WEEKS, "done_days": done_days,

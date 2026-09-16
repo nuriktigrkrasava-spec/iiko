@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, type CSSProperties } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
-import { fotCoverage, isoWeekOf, shiftWeek } from './planWeek'
+import { fotCoverage, isoWeekOf, planPct, shiftWeek } from './planWeek'
 import type { Fot } from './planWeek'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 // Экран собрания открывают редко — незачем тянуть его в общий кусок вкладки
@@ -80,7 +80,7 @@ const DOW_SHORT = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
 
 const dm = (iso: string) => iso.slice(8, 10) + '.' + iso.slice(5, 7)
 const pctColor = (p: number) => (p >= 100 ? 'var(--grn)' : p >= 85 ? 'var(--amb)' : 'var(--red)')
-const pct = (f: number, p: number) => (p ? Math.round((f / p) * 100) : 0)
+const pct = planPct
 const nfmt = (n: number) => n.toLocaleString('ru-RU')
 
 

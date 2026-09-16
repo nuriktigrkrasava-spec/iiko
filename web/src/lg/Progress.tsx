@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { fotCoverage } from './planWeek'
+import { fotCoverage, planPct } from './planWeek'
 import type { Fot } from './planWeek'
 import {
   Bar, BarChart, CartesianGrid, Cell as RCell, ComposedChart, Line,
@@ -308,7 +308,7 @@ export default function Progress({ data, scores, plan, onClose }: {
     if (!plan || !done) return null
     const p = weekSum(plan.network?.plan, types, done)
     const f = weekSum(plan.network?.fact, types, done)
-    return { plan: p, fact: f, pct: p ? Math.round((f / p) * 100) : null }
+    return { plan: p, fact: f, pct: p ? planPct(f, p) : null }
   }, [plan, types, done])
 
   /* График «план и факт по дням»: факт только по закрытым дням — рисовать ноль
@@ -334,7 +334,7 @@ export default function Progress({ data, scores, plan, onClose }: {
       const p = weekSum(b.plan, types, done)
       const f = weekSum(b.fact, types, done)
       return { id: b.organization_id, name: shortName(b.name), plan: p, fact: f, fot: b.fot,
-               pct: p ? Math.round((f / p) * 100) : null }
+               pct: p ? planPct(f, p) : null }
     }).filter((b) => b.pct != null).sort((a, b) => (b.pct || 0) - (a.pct || 0))
   }, [plan, types, done])
 
