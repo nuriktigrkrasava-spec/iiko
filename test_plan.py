@@ -553,6 +553,55 @@ def test_fot_of_a_broken_iiko_does_not_break_the_week():
     print("  [OK] упавший iiko не роняет вкладку, ФОТ падает на график")
 
 
+def test_named_gaps_account_for_every_unpriced_hour():
+    """«2158 из 6181 ч со ставкой» значит 4023 непокрытых часа. Если список
+    должностей под этой строкой их не объясняет, числа на собрании не сходятся.
+    Отдаём ВСЕ дыры; сколько показать — решает экран, но сумма обязана биться."""
+    # Идентификаторы свои: в соседних тестах у e1/e2 заведены наши ставки, и на
+    # общей тестовой базе они бы сюда протекли.
+    rows = [att("gap-paid", "2026-09-14", "09:00", "19:00", "Алиева", "r-sushi", "t-day")]
+    # пять должностей без ставки, чтобы обрезка «до трёх» была заметна
+    for i, h in enumerate([("10:00", "20:00"), ("10:00", "19:00"), ("10:00", "18:00"),
+                           ("10:00", "17:00"), ("10:00", "16:00")]):
+        rows.append(att(f"gap-{i}", "2026-09-14", h[0], h[1], "Алиева", f"r-x{i}", "t-day"))
+    roles = dict(ROLES)
+    for i in range(5):
+        roles[f"r-x{i}"] = {"name": f"Должность {i}", "payment_per_hour": 0.0}
+    got = _fot(rows, roles=roles)
+    assert got["total"] - got["priced"] == sum(g["hours"] for g in got["gaps"]), got
+    assert len(got["gaps"]) == 5, got["gaps"]
+    print("  [OK] все непокрытые часы объяснены должностями, ничего не срезано")
+
+
+def test_rounding_of_gaps_still_adds_up_to_the_whole():
+    """Округли каждую дыру саму по себе — и список перестанет сходиться с
+    «столько-то из стольких часов». Части обязаны складываться в целое."""
+    # три части по 1/3 часа: каждая округлилась бы в 0, а в сумме это 1 час
+    got = api._round_parts({"А": 10.4, "Б": 10.3, "В": 10.3}, 31)
+    assert sum(g["hours"] for g in got) == 31, got
+    assert api._round_parts({}, 0) == []
+    # остаток вниз тоже разносится, а не оставляет хвост
+    got2 = api._round_parts({"А": 10.6, "Б": 10.6, "В": 10.6}, 31)
+    assert sum(g["hours"] for g in got2) == 31, got2
+    print("  [OK] округление дыр всегда складывается в целое")
+
+
+def test_network_gaps_also_account_for_every_unpriced_hour():
+    """То же по сети: свод дыр обязан объяснять непокрытые часы целиком."""
+    def fot(gaps):
+        return {"amount": 0, "priced": 0, "total": sum(g["hours"] for g in gaps),
+                "unit": "hour", "complete": False, "gaps": gaps}
+    rows = [{"organization_id": "a", "name": "А", "plan": _grid(1), "fact": _grid(1),
+             "base": _grid(1), "fot": fot([{"role": f"Р{i}", "hours": 10 * (i + 1)}
+                                           for i in range(5)])},
+            {"organization_id": "b", "name": "Б", "plan": _grid(1), "fact": _grid(1),
+             "base": _grid(1), "fot": fot([{"role": f"Р{i}", "hours": 5} for i in range(5)])}]
+    r = api._plan_response("2026-W38", date(2026, 9, 14), date(2026, 9, 20), rows, demo=False)
+    f = r["network"]["fot"]
+    assert f["total"] - f["priced"] == sum(g["hours"] for g in f["gaps"]), f
+    print("  [OK] свод дыр по сети сходится с непокрытыми часами")
+
+
 def test_a_rate_of_one_branch_does_not_leak_into_another():
     """Ставки лежали в таблице БЕЗ organization_id — общие на всю базу. Владелец
     org A, узнавший employee_id из org B (это iiko-UUID), мог перебить чужую
@@ -718,6 +767,9 @@ if __name__ == "__main__":
               test_fot_falls_back_to_the_schedule_when_iiko_has_no_attendance,
               test_fot_without_any_source_is_not_reported_as_zero,
               test_fot_of_a_broken_iiko_does_not_break_the_week,
+              test_named_gaps_account_for_every_unpriced_hour,
+              test_rounding_of_gaps_still_adds_up_to_the_whole,
+              test_network_gaps_also_account_for_every_unpriced_hour,
               test_a_rate_of_one_branch_does_not_leak_into_another,
               test_fot_uses_only_the_rates_of_its_own_branch,
               test_manual_correction_covers_all_hours_of_that_employee,

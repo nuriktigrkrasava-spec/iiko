@@ -1,4 +1,5 @@
-import { isoWeekOf, mondayOfWeek, planPct, shiftWeek } from './planWeek'
+import { fotGapsLine, isoWeekOf, mondayOfWeek, planPct, shiftWeek } from './planWeek'
+import type { Fot } from './planWeek'
 
 const iso = (d: Date) => d.toISOString().slice(0, 10)
 
@@ -54,5 +55,35 @@ describe('процент выполнения плана', () => {
 
   it('без плана процента нет, а не деление на ноль', () => {
     expect(planPct(500, 0)).toBe(0)
+  })
+})
+
+describe('строка «кого не хватает» в ФОТ', () => {
+  const fot = (gaps: { role: string; hours: number }[]): Fot =>
+    ({ amount: 0, priced: 0, total: 0, unit: 'hour', complete: false, gaps })
+
+  // toLocaleString разделяет разряды неразрывным пробелом — сравниваем по смыслу,
+  // а не по коду пробела.
+  const plain = (s: string) => s.replace(/[\u00a0\u202f]/g, ' ')
+
+  it('до трёх должностей перечисляет поимённо', () => {
+    expect(plain(fotGapsLine(fot([{ role: 'Кассир', hours: 2595 }, { role: 'Курьер', hours: 1537 }]))))
+      .toBe('нет ставки в iiko: Кассир (2 595 ч), Курьер (1 537 ч)')
+  })
+
+  it('остаток договаривает, а не молчит о нём', () => {
+    // Иначе под «2158 из 6181 ч со ставкой» стоял бы список, объясняющий
+    // только часть разницы, и числа на собрании не сошлись бы.
+    const line = fotGapsLine(fot([
+      { role: 'Кассир', hours: 2595 }, { role: 'Курьер', hours: 1537 },
+      { role: 'Тех персонал', hours: 1298 }, { role: 'Официант', hours: 660 },
+      { role: 'Повар', hours: 332 },
+    ]))
+    expect(plain(line)).toContain('и ещё 992 ч по 2 должн.')
+  })
+
+  it('без дыр строки нет', () => {
+    expect(fotGapsLine(fot([]))).toBe('')
+    expect(fotGapsLine(undefined)).toBe('')
   })
 })

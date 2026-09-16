@@ -2375,8 +2375,13 @@ def get_social_growth(org_id: str, platform: str, days: int = 30):
 LEGACY_RATE_ORG = ""   # строки из той версии: чей это филиал, уже не узнать
 
 
-def init_salary_db():
-    conn = get_db()
+def _ensure_salary(conn):
+    """Схема ставок. Вызывается из КАЖДОГО обращения, а не только из startup.
+
+    ФОТ во вкладке «Планы» обёрнут в try/except: упади здесь запрос — исключение
+    проглотится, и вместо суммы молча встанет «нет данных». Такую потерю никто
+    не заметит, поэтому на порядок инициализации не закладываемся.
+    """
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS salary_rates (
         employee_id TEXT PRIMARY KEY,
@@ -2401,6 +2406,12 @@ def init_salary_db():
                      "SELECT ?, employee_id, rate FROM salary_rates", (LEGACY_RATE_ORG,))
         conn.execute("DROP TABLE salary_rates")
         conn.execute("ALTER TABLE salary_rates_v2 RENAME TO salary_rates")
+        conn.commit()
+
+
+def init_salary_db():
+    conn = get_db()
+    _ensure_salary(conn)
     conn.commit()
     conn.close()
 
@@ -2413,6 +2424,7 @@ def get_salary_rates(org_id: str) -> dict:
     работать, а как только завели — перебивает её.
     """
     conn = get_db()
+    _ensure_salary(conn)
     rows = conn.execute(
         "SELECT organization_id, employee_id, rate FROM salary_rates "
         "WHERE organization_id IN (?, ?)", (org_id, LEGACY_RATE_ORG)).fetchall()
@@ -2426,14 +2438,14 @@ def get_salary_rates(org_id: str) -> dict:
 
 def set_salary_rate(org_id: str, employee_id: str, rate: float):
     conn = get_db()
+    _ensure_salary(conn)
     conn.execute("INSERT OR REPLACE INTO salary_rates(organization_id, employee_id, rate) "
                  "VALUES(?,?,?)", (org_id, employee_id, rate))
     conn.commit()
     conn.close()
 
 
-def init_salary_overrides_db():
-    conn = get_db()
+def _ensure_salary_overrides(conn):
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS salary_overrides (
         employee_id TEXT NOT NULL,
@@ -2442,12 +2454,18 @@ def init_salary_overrides_db():
         PRIMARY KEY(employee_id, period_key)
     );
     """)
+
+
+def init_salary_overrides_db():
+    conn = get_db()
+    _ensure_salary_overrides(conn)
     conn.commit()
     conn.close()
 
 
 def get_salary_overrides(period_key: str) -> dict:
     conn = get_db()
+    _ensure_salary_overrides(conn)
     rows = conn.execute("SELECT employee_id, amount FROM salary_overrides WHERE period_key=?",
                         (period_key,)).fetchall()
     conn.close()
@@ -2456,6 +2474,7 @@ def get_salary_overrides(period_key: str) -> dict:
 
 def set_salary_override(employee_id: str, period_key: str, amount):
     conn = get_db()
+    _ensure_salary_overrides(conn)
     if amount is None:
         conn.execute("DELETE FROM salary_overrides WHERE employee_id=? AND period_key=?",
                      (employee_id, period_key))

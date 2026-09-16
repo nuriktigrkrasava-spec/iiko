@@ -52,6 +52,22 @@ export type Fot = {
   unit: 'hour' | 'shift' | 'mixed' | null; complete: boolean; gaps?: FotGap[]
 }
 
+/** Строка «кого не хватает». Показываем три верхних должности, но остаток
+    ДОГОВАРИВАЕМ: под суммой стоит «столько-то из стольких часов со ставкой», и
+    если список объясняет только часть разницы, числа на экране не сходятся. */
+export function fotGapsLine(f?: Fot): string {
+  const gaps = f?.gaps || []
+  if (!f || !gaps.length) return ''
+  const n = (v: number) => v.toLocaleString('ru-RU')
+  const top = gaps.slice(0, 3)
+  const rest = gaps.slice(3)
+  const restHours = rest.reduce((s, g) => s + g.hours, 0)
+  const head = top.map((g) => `${g.role} (${n(g.hours)} ч)`).join(', ')
+  return rest.length
+    ? `нет ставки в iiko: ${head} и ещё ${n(restHours)} ч по ${rest.length} должн.`
+    : `нет ставки в iiko: ${head}`
+}
+
 /** Подпись под суммой ФОТ. Главное — не выдать неполную сумму за полную: часы
     без ставки должности в iiko в неё не попали, и владелец должен это видеть. */
 export function fotCoverage(f?: Fot): string {

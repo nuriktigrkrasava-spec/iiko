@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { fotCoverage, planPct } from './planWeek'
+import { fotCoverage, fotGapsLine, planPct } from './planWeek'
 import type { Fot } from './planWeek'
 import {
   Bar, BarChart, CartesianGrid, Cell as RCell, ComposedChart, Line,
@@ -512,9 +512,7 @@ export default function Progress({ data, scores, plan, onClose }: {
                   действие, которое превращает эту цифру в настоящую. */}
               {!plan.network.fot.complete && (
                 <div style={{ marginTop: 3, fontSize: 11.5, color: 'var(--mute)', lineHeight: 1.4 }}>
-                  {plan.network.fot.gaps?.length
-                    ? `нет ставки в iiko: ${plan.network.fot.gaps.map((g) => `${g.role} (${num(g.hours)} ч)`).join(', ')}`
-                    : 'сумма пока неполная'}
+                  {fotGapsLine(plan.network.fot) || 'сумма пока неполная'}
                 </div>
               )}
             </motion.div>

@@ -8606,6 +8606,36 @@ def _fot_from_schedule(org: str, d_from: str, d_to: str) -> Dict[str, Any]:
             "complete": s["complete"]}
 
 
+def _round_parts(parts: Dict[str, float], target: int) -> List[Dict[str, Any]]:
+    """Округляет части так, чтобы их сумма В ТОЧНОСТИ равнялась целому.
+
+    Округли каждую саму по себе — и на экране под «1235 непокрытых часов»
+    встанет список на 1237: остаток расходится, а на собрании числа обязаны
+    складываться. Метод наибольшего остатка: сначала всем целую часть, потом
+    оставшиеся единицы тем, у кого дробная часть больше.
+    """
+    items = sorted(parts.items(), key=lambda kv: -kv[1])
+    if not items:
+        return []
+    vals = [int(v // 1) for _, v in items]
+    left = target - sum(vals)
+    by_frac = sorted(range(len(items)), key=lambda i: -(items[i][1] % 1))
+    i = 0
+    while left > 0:
+        vals[by_frac[i % len(vals)]] += 1
+        left -= 1
+        i += 1
+    # Отрицательный остаток снимаем с самых крупных: там единица менее заметна.
+    i = 0
+    while left < 0 and any(v > 0 for v in vals):
+        j = i % len(vals)
+        if vals[j] > 0:
+            vals[j] -= 1
+            left += 1
+        i += 1
+    return [{"role": n, "hours": v} for (n, _), v in zip(items, vals) if v > 0]
+
+
 def _fot_of_segments(segments: List[Dict[str, Any]], roles: Dict[str, Dict[str, Any]],
                      coef: Dict[str, float], rates: Dict[str, float],
                      overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -8645,11 +8675,13 @@ def _fot_of_segments(segments: List[Dict[str, Any]], roles: Dict[str, Dict[str, 
             else:
                 name = role.get("name") or "без должности"
                 gaps[name] = gaps.get(name, 0.0) + s_["hours"]
-    return {"amount": round(amount), "priced": round(hours_priced),
-            "total": round(hours_total), "unit": "hour",
-            "complete": hours_total > 0 and round(hours_priced) >= round(hours_total),
-            "gaps": [{"role": n, "hours": round(h)}
-                     for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
+    # Дыры отдаём ВСЕ, а не три верхних: под суммой стоит «столько-то из стольких
+    # часов со ставкой», и если список должностей не объясняет разницу целиком,
+    # числа на собрании не сходятся. Сколько показать — решает экран.
+    priced, total = round(hours_priced), round(hours_total)
+    return {"amount": round(amount), "priced": priced, "total": total, "unit": "hour",
+            "complete": total > 0 and priced >= total,
+            "gaps": _round_parts(gaps, total - priced)}
 
 
 def _done_days(d_from: date, d_to: date, today: Optional[date] = None) -> int:
@@ -8940,7 +8972,7 @@ def _plan_response(wk: str, d_from: date, d_to: date,
         "unit": units.pop() if len(units) == 1 else ("mixed" if units else None),
         "complete": total > 0 and priced == total,
         "gaps": [{"role": n, "hours": round(h)}
-                 for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
+                 for n, h in sorted(gaps.items(), key=lambda x: -x[1])]}
     today = local_now().date()
     done_days = _done_days(d_from, d_to, today)
     return {"week": wk, "from": d_from.isoformat(), "to": d_to.isoformat(),

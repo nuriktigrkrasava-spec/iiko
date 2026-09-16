@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, type CSSProperties } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
-import { fotCoverage, isoWeekOf, planPct, shiftWeek } from './planWeek'
+import { fotCoverage, fotGapsLine, isoWeekOf, planPct, shiftWeek } from './planWeek'
 import type { Fot } from './planWeek'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 // Экран собрания открывают редко — незачем тянуть его в общий кусок вкладки
@@ -711,7 +711,7 @@ export default function Plan() {
                 которое превращает эту цифру в настоящую. */}
             {!!fotGaps.length && (
               <div style={{ fontSize: 12.5, marginTop: 5, color: 'var(--mute)', lineHeight: 1.4 }}>
-                нет ставки в iiko: {fotGaps.map((g) => `${g.role} (${nfmt(g.hours)} ч)`).join(', ')}
+                {fotGapsLine(networkFot)}
               </div>
             )}
           </div>
