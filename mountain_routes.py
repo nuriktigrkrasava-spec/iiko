@@ -172,6 +172,23 @@ def _is_branch(name: str) -> bool:
     return not any(sk in words or (len(sk) > 4 and sk in n) for sk in SKIP)
 
 
+def visible_branches(rows, name_of):
+    """Отсев служебных организаций — но НИКОГДА не до пустоты.
+
+    MOUNTAIN_ONLY=астана заведён под одну сеть: у неё двадцать три записи, и
+    «КЦ»/«ЦЕХ»/«ОФИС» из списка убирать надо. Тот же фильтр молча выбрасывал ВСЕ
+    филиалы любого, кто зарегистрировался не в Астане: сайт открывался пустым,
+    а понять почему было нельзя — ни ошибки, ни подсказки, просто ничего.
+
+    Правило простое: если после отсева не осталось ничего, отсев не применяем.
+    Показать лишнюю строку — мелкая неприятность, показать пустой продукт —
+    потерянный клиент.
+    """
+    rows = list(rows or [])
+    kept = [r for r in rows if _is_branch(name_of(r) or "")]
+    return kept if kept else rows
+
+
 def scope_of_token(token: str) -> Dict[str, Any]:
     """Что открывает эта ссылка. Единственная точка разбора доступа на сайте.
 
@@ -236,8 +253,8 @@ def _scope(uid: int) -> Dict[str, Any]:
     if own:
         return {"role": "owner", "branches": [
             {"organization_id": r["organization_id"],
-             "name": r.get("organization_name") or "Филиал"} for r in own
-            if _is_branch(r.get("organization_name") or "")]}
+             "name": r.get("organization_name") or "Филиал"}
+            for r in visible_branches(own, lambda r: r.get("organization_name"))]}
     mine = [m for m in get_branch_managers() if int(m.get("telegram_id") or 0) == uid]
     if not mine:
         return {"role": None, "branches": []}

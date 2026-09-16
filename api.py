@@ -7391,8 +7391,20 @@ async def telegram_webhook(request: Request):
                     from database import claim_web_signup_by_code
                     if claim_web_signup_by_code(raw_source[5:], telegram_id):
                         logger.info(f"[signup] телеграм подтверждён: {telegram_id}")
-                        await _tg_send(chat_id, "✅ Телеграм подключён — уведомления "
-                                                "по вашему ресторану будут приходить сюда.")
+                        # Ресторан переехал на этот телеграм-id, а ссылка, по
+                        # которой человек смотрел данные до подтверждения, теперь
+                        # ведёт в пустой аккаунт. Не сказать об этом — значит
+                        # оставить его перед сайтом без данных и без объяснения.
+                        import mountain_routes as _mr2
+                        link = f"{MINIAPP_URL}/m/{_mr2.token_for(telegram_id)}"
+                        await _tg_send(
+                            chat_id,
+                            "✅ Телеграм подключён — уведомления по вашему ресторану "
+                            "будут приходить сюда.\n\n"
+                            "Дальше открывайте кабинет по <b>этой</b> ссылке, она теперь "
+                            f"ваша постоянная:\n{link}\n\n"
+                            "Прежняя ссылка со страницы регистрации больше не работает — "
+                            "так сделано нарочно, чтобы по ней не попал кто-то ещё.")
                 except Exception as e:
                     logger.warning(f"[signup] claim {telegram_id}: {e!r}")
             if DEMO_ONLY:
@@ -8661,9 +8673,13 @@ def _plan_branches(org_id: str, network: bool, user: Dict[str, Any],
     seen: Dict[str, str] = {}
     for r in get_restaurants(user.get("id", 0)) or []:
         org, name = r.get("organization_id"), r.get("organization_name") or "Филиал"
-        if org and org not in seen and _mr._is_branch(name):
+        if org and org not in seen:
             seen[org] = name
-    return [{"organization_id": o, "name": n} for o, n in seen.items()]
+    # Отсев служебных организаций — но не до пустоты: у зарегистрировавшегося не
+    # в Астане иначе не осталось бы ни одного филиала, и вкладка «Планы»
+    # открывалась бы пустой без всякого объяснения.
+    rows = [{"organization_id": o, "name": n} for o, n in seen.items()]
+    return _mr.visible_branches(rows, lambda r: r["name"])
 
 
 def _attendance_segments(attendance: List[Dict[str, Any]],
