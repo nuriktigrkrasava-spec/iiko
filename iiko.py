@@ -61,6 +61,14 @@ def parse_containers(p: dict) -> list:
     return out
 
 
+def _num(raw: Optional[str], default: float = 0.0) -> float:
+    """iiko отдаёт числа строкой вида '1230.770000000'."""
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 def get_client(api_login: str, iiko_server: str = None, api_password: str = None):
     if iiko_server:
         iiko_server = _normalize_iiko_url(iiko_server)
@@ -1202,7 +1210,12 @@ class IikoWebClient:
         return out
 
     async def get_attendance(self, date_from: str, date_to: str) -> List[Dict[str, Any]]:
-        """Явки сотрудников за период (XML), для расчёта часов и зарплаты."""
+        """Явки сотрудников за период (XML), для расчёта часов и зарплаты.
+
+        Денег в явке нет: iiko хранит ставку на ДОЛЖНОСТИ (`get_employee_roles`),
+        а надбавку за ночь/праздник — в типе явки (`get_attendance_types`).
+        Поэтому roleId и attendanceTypeId тащим рядом с часами.
+        """
         import xml.etree.ElementTree as ET
         token = await self._ensure_token()
         async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
@@ -1216,8 +1229,65 @@ class IikoWebClient:
                 "employeeId": a.findtext("employeeId"),
                 "dateFrom": a.findtext("dateFrom"),
                 "dateTo": a.findtext("dateTo"),
+                "roleId": a.findtext("roleId"),
+                "attendanceTypeId": a.findtext("attendanceTypeId"),
                 "departmentName": a.findtext("departmentName") or "",
             })
+        return out
+
+    # Должности и типы явок — справочники: меняются раз в месяц, а спрашивают
+    # их на каждое открытие вкладки «Планы» по каждому филиалу сервера.
+    _roles_cache: Optional[Tuple[datetime, Dict[str, Dict[str, Any]]]] = None
+    _att_types_cache: Optional[Tuple[datetime, Dict[str, float]]] = None
+    REF_TTL = timedelta(hours=6)
+
+    async def get_employee_roles(self) -> Dict[str, Dict[str, Any]]:
+        """Должности со ставками: {id: {name, payment_per_hour, steady_salary}}.
+
+        `paymentPerHour` — то, из чего единственно и складывается ФОТ по часам.
+        Ноль значит «ставку не завели», а не «работа бесплатная»: такие часы
+        считаем непокрытыми и показываем отдельно.
+        """
+        import xml.etree.ElementTree as ET
+        if self._roles_cache and datetime.now() - self._roles_cache[0] < self.REF_TTL:
+            return self._roles_cache[1]
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/employees/roles",
+                                    params={"key": token})
+            resp.raise_for_status()
+        out: Dict[str, Dict[str, Any]] = {}
+        for e in ET.fromstring(resp.text).findall("role"):
+            rid = e.findtext("id")
+            if not rid or e.findtext("deleted") == "true":
+                continue
+            out[rid] = {"name": e.findtext("name") or "",
+                        "payment_per_hour": _num(e.findtext("paymentPerHour")),
+                        "steady_salary": _num(e.findtext("steadySalary")),
+                        "schedule_type": e.findtext("scheduleType") or ""}
+        self._roles_cache = (datetime.now(), out)
+        return out
+
+    async def get_attendance_types(self) -> Dict[str, float]:
+        """Типы явок → множитель к ставке: {id: payRate}.
+
+        Ночной у сети — 1.2, праздничный — 2.0. Без этого ночные смены
+        считались бы по дневной ставке, и ФОТ выходил бы заниженным.
+        """
+        import xml.etree.ElementTree as ET
+        if self._att_types_cache and datetime.now() - self._att_types_cache[0] < self.REF_TTL:
+            return self._att_types_cache[1]
+        token = await self._ensure_token()
+        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            resp = await client.get(f"{self.base_url}/api/employees/attendance/types",
+                                    params={"key": token})
+            resp.raise_for_status()
+        out: Dict[str, float] = {}
+        for e in ET.fromstring(resp.text).findall("attendanceType"):
+            tid = e.findtext("id")
+            if tid:
+                out[tid] = _num(e.findtext("payRate"), default=1.0)
+        self._att_types_cache = (datetime.now(), out)
         return out
 
     @staticmethod

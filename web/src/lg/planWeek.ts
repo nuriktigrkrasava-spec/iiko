@@ -27,3 +27,28 @@ export function shiftWeek(week: string, delta: number): string {
   mon.setUTCDate(mon.getUTCDate() + delta * 7)
   return isoWeekOf(new Date(mon.getUTCFullYear(), mon.getUTCMonth(), mon.getUTCDate()))
 }
+
+
+/* ---- ФОТ недели. Один контракт на вкладку «Планы» и на отчёт «Прогресс»:
+   разойдись они — на собрании висели бы две разные зарплаты. ---- */
+
+export type FotGap = { role: string; hours: number }
+
+/** priced/total — ПОКРЫТИЕ: часы, посчитанные по ставке должности из iiko, из
+    всех отработанных (unit 'hour'); либо смены с оплатой из графика ('shift').
+    unit=null — данных нет вовсе, и это не то же самое, что ноль. */
+export type Fot = {
+  amount: number; priced: number; total: number
+  unit: 'hour' | 'shift' | 'mixed' | null; complete: boolean; gaps?: FotGap[]
+}
+
+/** Подпись под суммой ФОТ. Главное — не выдать неполную сумму за полную: часы
+    без ставки должности в iiko в неё не попали, и владелец должен это видеть. */
+export function fotCoverage(f?: Fot): string {
+  const n = (v: number) => v.toLocaleString('ru-RU')
+  if (!f || f.unit === null) return 'нет данных о явках'
+  if (f.unit === 'shift') return `${n(f.priced)} из ${n(f.total)} смен с оплатой`
+  if (f.complete) return `${n(f.total)} ч по ставкам iiko`
+  const share = f.total ? Math.round((100 * f.priced) / f.total) : 0
+  return `${n(f.priced)} из ${n(f.total)} ч со ставкой · ${share}%`
+}

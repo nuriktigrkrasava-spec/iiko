@@ -8546,6 +8546,168 @@ def _plan_branches(org_id: str, network: bool, user: Dict[str, Any],
     return [{"organization_id": o, "name": n} for o, n in seen.items()]
 
 
+def _attendance_segments(attendance: List[Dict[str, Any]],
+                         org_name: str) -> List[Dict[str, Any]]:
+    """Явки филиала → НЕпересекающиеся отрезки работы.
+
+    Два подвоха. Первый: на одном iiko-сервере живут все филиалы сети, поэтому
+    отбор по departmentName обязателен. Второй: явки задваиваются, когда
+    сотрудник числится в двух ролях одновременно. Отрезок при этом не
+    выбрасывается целиком, а обрезается по уже занятому времени — так и часы не
+    удваиваются, и у каждого куска остаётся своя должность и свой тип явки
+    (по ним и считается ставка с ночной или праздничной надбавкой).
+    """
+    by_emp: Dict[str, list] = {}
+    for a in attendance or []:
+        if org_name and a.get("departmentName") != org_name:
+            continue
+        try:
+            df = datetime.fromisoformat(a["dateFrom"])
+            dt_ = datetime.fromisoformat(a["dateTo"])
+        except Exception:
+            continue
+        if dt_ > df:
+            by_emp.setdefault(a["employeeId"], []).append(
+                (df, dt_, a.get("roleId"), a.get("attendanceTypeId")))
+    out: List[Dict[str, Any]] = []
+    for eid, ivs in by_emp.items():
+        ivs.sort(key=lambda x: (x[0], x[1]))
+        covered = None
+        for df, dt_, rid, tid in ivs:
+            start = df if covered is None or df > covered else covered
+            if dt_ <= start:
+                continue
+            out.append({"employee_id": eid, "role_id": rid, "type_id": tid,
+                        "hours": (dt_ - start).total_seconds() / 3600,
+                        "day": start.date()})
+            covered = dt_ if covered is None or dt_ > covered else covered
+    return out
+
+
+def _merge_attendance_hours(attendance: List[Dict[str, Any]],
+                            org_name: str) -> Dict[str, Dict[str, float]]:
+    """Часы и дни каждого сотрудника филиала: {сотрудник: {hours, days}}."""
+    out: Dict[str, Dict[str, float]] = {}
+    for seg in _attendance_segments(attendance, org_name):
+        w = out.setdefault(seg["employee_id"], {"hours": 0.0, "_days": set()})
+        w["hours"] += seg["hours"]
+        w["_days"].add(seg["day"])
+    return {eid: {"hours": w["hours"], "days": float(len(w["_days"]))}
+            for eid, w in out.items()}
+
+
+def _fot_from_schedule(org: str, d_from: str, d_to: str) -> Dict[str, Any]:
+    """Запасной ФОТ — из оплат, проставленных руками в графике смен."""
+    from database import branch_fot_summary
+    s = branch_fot_summary(org, d_from, d_to)
+    return {"amount": s["amount"], "priced": s["shifts_priced"],
+            "total": s["shifts_total"],
+            "unit": "shift" if s["shifts_total"] else None,
+            "complete": s["complete"]}
+
+
+def _fot_of_segments(segments: List[Dict[str, Any]], roles: Dict[str, Dict[str, Any]],
+                     coef: Dict[str, float], rates: Dict[str, float],
+                     overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Часы × ставка = ФОТ филиала, с честным покрытием в часах.
+
+    Ставку берём в таком порядке: ручная правка суммы за период → наша ставка
+    сотрудника → `paymentPerHour` его должности в iiko. Нулевая ставка должности
+    означает «её не завели» (у сети так у Кассира, Курьера и Тех персонала) —
+    такие часы в сумму не идут, но и молчать о них нельзя: иначе неполный ФОТ
+    выдавался бы за полный. Покрытие считаем в ЧАСАХ, а не в людях: кассир со
+    106 часами и бухгалтер с двумя — разного веса дыры.
+    """
+    hours_total = hours_priced = 0.0
+    amount = 0.0
+    by_emp: Dict[str, float] = {}
+    gaps: Dict[str, float] = {}
+    for seg in segments:
+        h = seg["hours"]
+        hours_total += h
+        eid = seg["employee_id"]
+        role = roles.get(seg["role_id"] or "") or {}
+        rate = rates.get(eid) or role.get("payment_per_hour") or 0.0
+        if rate:
+            hours_priced += h
+            by_emp[eid] = by_emp.get(eid, 0.0) + h * float(rate) * coef.get(seg["type_id"] or "", 1.0)
+        else:
+            name = role.get("name") or "без должности"
+            gaps[name] = gaps.get(name, 0.0) + h
+    for eid, sum_ in by_emp.items():
+        amount += float(overrides[eid] or 0) if eid in overrides else sum_
+    # Правка за период на того, у кого часы есть, а ставки нет: сумма теперь
+    # известна, значит и часы покрыты.
+    for eid in overrides:
+        if eid not in by_emp:
+            extra = sum(s["hours"] for s in segments if s["employee_id"] == eid)
+            if extra:
+                amount += float(overrides[eid] or 0)
+                hours_priced += extra
+    return {"amount": round(amount), "priced": round(hours_priced),
+            "total": round(hours_total), "unit": "hour",
+            "complete": hours_total > 0 and round(hours_priced) >= round(hours_total),
+            "gaps": [{"role": n, "hours": round(h)}
+                     for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
+
+
+async def _fot_by_branch(branches: List[Dict[str, str]], d_from: date, d_to: date,
+                         user: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """ФОТ филиалов за период — из iiko, без ручного ввода в нашем приложении.
+
+    Денег в явке iiko не отдаёт, но отдаёт всё, из чего она складывается:
+    часы (`/api/employees/attendance`), ставку должности
+    (`/api/employees/roles` → paymentPerHour) и надбавку за ночь или праздник
+    (`/api/employees/attendance/types` → payRate). Раньше вкладка читала ТОЛЬКО
+    оплату смены, проставленную руками в графике, — её никто не проставлял, и
+    ФОТ честно показывал 0.
+
+    Запросы — по одному на СЕРВЕР, а не на филиал: явки приезжают по всем
+    департаментам сразу, а девять филиалов сети живут на одном сервере.
+    """
+    from database import get_salary_overrides, get_salary_rates
+    d1, d2 = d_from.isoformat(), d_to.isoformat()
+    infos: Dict[str, Dict[str, Any]] = {}
+    by_server: Dict[Tuple[Any, Any], List[str]] = {}
+    for b in branches:
+        org = b["organization_id"]
+        infos[org] = info = _get_restaurant_info(org, user)
+        by_server.setdefault((info["api_login"], info.get("iiko_server")), []).append(org)
+
+    async def pull(key: Tuple[Any, Any], org: str):
+        info = infos[org]
+        client = get_client(info["api_login"], info.get("iiko_server"),
+                            info.get("api_password"))
+        # Облачный iiko явок не отдаёт вовсе — там остаётся только график смен.
+        if not hasattr(client, "get_attendance"):
+            return key, None
+        try:
+            att, roles, coef = await asyncio.gather(
+                client.get_attendance(d1, d2),
+                client.get_employee_roles(),
+                client.get_attendance_types())
+            return key, (att, roles, coef)
+        except Exception as e:
+            # Лежащий iiko-сервер не должен ронять план и факт заказов: ФОТ
+            # тогда просто падает на график смен.
+            logger.warning(f"[plan] явки {info.get('iiko_server')}: {e!r}")
+            return key, None
+
+    pulled = dict(await asyncio.gather(*(pull(k, orgs[0]) for k, orgs in by_server.items())))
+    rates = get_salary_rates()
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, orgs in by_server.items():
+        got = pulled.get(key)
+        for org in orgs:
+            segments = _attendance_segments(got[0], infos[org]["org_name"]) if got else []
+            if not segments:
+                out[org] = _fot_from_schedule(org, d1, d2)
+                continue
+            out[org] = _fot_of_segments(segments, got[1], got[2], rates,
+                                        get_salary_overrides(f"{org}:{d1}:{d2}"))
+    return out
+
+
 def _branch_name(real_org: str, user: Dict[str, Any]) -> str:
     for r in get_restaurants(user.get("id", 0)) or []:
         if r.get("organization_id") == real_org:
@@ -8587,8 +8749,8 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
             fact = {str(i): {t: max(0, v - (i % 4) * 2) for t, v in demo_p.items()} for i in range(1, 8)}
             prev = {str(i): {t: max(0, v - (i % 3) * 3) for t, v in demo_p.items()} for i in range(1, 8)}
             out.append({**b, "plan": plan, "fact": fact, "base": plan, "prev": prev,
-                        "fot": {"amount": 420000, "shifts_priced": 14,
-                                "shifts_total": 14, "complete": True}})
+                        "fot": {"amount": 420000, "priced": 430, "total": 430,
+                                "unit": "hour", "complete": True, "gaps": []}})
         return _plan_response(wk, d_from, d_to, out, demo=True)
 
     base_from = d_from - timedelta(weeks=PLAN_BASE_WEEKS)
@@ -8644,12 +8806,22 @@ async def plan_week(org_id: str, week: Optional[str] = None, network: int = 0,
             auto = True
         plan = {str(i): {t: int(saved.get(i, {}).get(t, 0)) for t in PLAN_TYPES}
                 for i in range(1, 8)}
-        from database import branch_fot_summary
-        fot = branch_fot_summary(org, d_from.isoformat(), d_to.isoformat())
         return {**b, "plan": plan, "fact": _dow_from_days(cur_days),
-                "base": avg, "prev": prev, "plan_auto": auto, "fot": fot}
+                "base": avg, "prev": prev, "plan_auto": auto}
 
-    rows = await asyncio.gather(*(one(b) for b in branches))
+    # ФОТ тянем ПАРАЛЛЕЛЬНО с заказами: это отдельный поход в iiko, и ставить
+    # его в очередь за девятью OLAP-запросами значило бы удлинить открытие
+    # вкладки на время самого медленного сервера.
+    async def fot_safe():
+        try:
+            return await _fot_by_branch(branches, d_from, d_to, user)
+        except Exception as e:
+            logger.warning(f"[plan] ФОТ {wk}: {e!r}")
+            return {}
+
+    rows, fots = await asyncio.gather(asyncio.gather(*(one(b) for b in branches)),
+                                      fot_safe())
+    rows = [{**r, "fot": fots.get(r["organization_id"])} for r in rows]
     return _plan_response(wk, d_from, d_to, list(rows), demo=False,
                           live_today=solo and d_from <= today_d <= d_to)
 
@@ -8714,14 +8886,24 @@ def _plan_response(wk: str, d_from: date, d_to: date,
                    "total_plan": _totals(net_plan), "total_fact": _totals(net_fact),
                    "total_base": _totals(net_base), "total_prev": _totals(net_prev)}
     fot_rows = [r.get("fot") or {} for r in rows]
+    # Единицу покрытия складываем, только если она у всех одна: сотрудники со
+    # ставкой и смены с оплатой — разные вещи, и «5 из 7» из их смеси соврало бы.
+    units = {x.get("unit") for x in fot_rows if x.get("unit")}
+    total = sum(int(x.get("total") or 0) for x in fot_rows)
+    priced = sum(int(x.get("priced") or 0) for x in fot_rows)
+    # Дыры в ставках по сети: у девяти филиалов не заведён один и тот же
+    # Кассир, и владельцу нужна одна строка «вот кого заполнить», а не девять.
+    gaps: Dict[str, float] = {}
+    for x in fot_rows:
+        for g in x.get("gaps") or []:
+            gaps[g["role"]] = gaps.get(g["role"], 0) + float(g.get("hours") or 0)
     network_row["fot"] = {
         "amount": round(sum(float(x.get("amount") or 0) for x in fot_rows)),
-        "shifts_priced": sum(int(x.get("shifts_priced") or 0) for x in fot_rows),
-        "shifts_total": sum(int(x.get("shifts_total") or 0) for x in fot_rows),
-    }
-    network_row["fot"]["complete"] = (
-        network_row["fot"]["shifts_total"] > 0
-        and network_row["fot"]["shifts_priced"] == network_row["fot"]["shifts_total"])
+        "priced": priced, "total": total,
+        "unit": units.pop() if len(units) == 1 else ("mixed" if units else None),
+        "complete": total > 0 and priced == total,
+        "gaps": [{"role": n, "hours": round(h)}
+                 for n, h in sorted(gaps.items(), key=lambda x: -x[1])[:3]]}
     # Сколько дней недели уже ЗАКРЫТО. Считаем на сервере: сравнение с прошлой
     # неделей идёт день в день, и если фронт и бэк разойдутся в этом числе хоть
     # на день, динамика во вторник соврёт. Сегодняшний день не закрыт.
@@ -10059,35 +10241,16 @@ async def salary(org_id: str, response: Response,
         client.get_attendance(from_, to),
         client.get_employees_map(),
     )
-    org_name = info.get("org_name", "")
-    # Явки в iiko бывают задвоены (несколько ролей одновременно) — объединяем
-    # пересекающиеся интервалы каждого сотрудника, чтобы часы не удваивались.
-    intervals: Dict[str, list] = {}
-    for a in attendance:
-        if org_name and a["departmentName"] != org_name:
-            continue
-        try:
-            df = datetime.fromisoformat(a["dateFrom"])
-            dt_ = datetime.fromisoformat(a["dateTo"])
-            if dt_ > df:
-                intervals.setdefault(a["employeeId"], []).append((df, dt_))
-        except Exception:
-            continue
+    # Тот же расчёт часов, что и у ФОТ во вкладке «Планы»: разойдись эти два
+    # места — на собрании сравнивали бы две разные зарплаты.
+    worked = _merge_attendance_hours(attendance, info.get("org_name", ""))
     from database import get_salary_overrides
     period_key = f"{real_org}:{from_}:{to}"
     overrides = get_salary_overrides(period_key)
     rates = get_salary_rates()
     rows = []
-    for eid, ivs in intervals.items():
-        ivs.sort()
-        merged = [list(ivs[0])]
-        for df, dt_ in ivs[1:]:
-            if df <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], dt_)
-            else:
-                merged.append([df, dt_])
-        h = sum((b - a).total_seconds() for a, b in merged) / 3600
-        days = len({a.date() for a, b in merged})
+    for eid, w in worked.items():
+        h, days = w["hours"], int(w["days"])
         rate = rates.get(eid, 0)
         ov = overrides.get(eid)
         rows.append({"employee_id": eid, "name": employees.get(eid, eid[:8]),

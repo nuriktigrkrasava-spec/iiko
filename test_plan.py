@@ -2,16 +2,68 @@
 
 Запуск:  python3 test_plan.py
 """
+import contextlib
 import os
 import tempfile
 from datetime import date, datetime
 
 os.environ.setdefault("DB_PATH", tempfile.mktemp(suffix=".db"))
 import api  # noqa: E402
+from database import init_salary_db, init_salary_overrides_db  # noqa: E402
+
+# Таблицы ставок в проде создаёт startup приложения; в тестах его нет.
+init_salary_db()
+init_salary_overrides_db()
 
 
 def olap(day: str, order_type: str, n: int):
     return {"OpenDate.Typed": day + " 00:00:00", "OrderType.Name": order_type, "OrdersCount": n}
+
+
+@contextlib.contextmanager
+def _iiko_attendance(rows, org_names: dict, roles=None, coef=None,
+                     server: str = "https://s1:443"):
+    """Подменяет iiko-сервер филиалов на заданные явки, должности и типы явок.
+
+    rows=None — сервер, у которого явок нет вовсе (облачный iiko);
+    rows=Exception — сервер лежит. Считает обращения, чтобы было видно, сколько
+    раз мы реально сходили в iiko.
+    """
+    calls = {"attendance": 0, "roles": 0}
+
+    class _Cloud:            # облачный клиент: метода get_attendance у него нет
+        pass
+
+    class _Web:
+        async def get_attendance(self, d_from, d_to):
+            calls["attendance"] += 1
+            if isinstance(rows, Exception):
+                raise rows
+            return rows
+
+        async def get_employee_roles(self):
+            calls["roles"] += 1
+            return roles or {}
+
+        async def get_attendance_types(self):
+            return coef or {}
+
+    client = _Cloud() if rows is None else _Web()
+    real_info, real_client = api._get_restaurant_info, api.get_client
+    api._get_restaurant_info = lambda org, user: {
+        "api_login": "login", "iiko_server": server, "api_password": "pwd",
+        "org_name": org_names.get(org, "")}
+    api.get_client = lambda login, srv=None, pwd=None: client
+    try:
+        yield calls
+    finally:
+        api._get_restaurant_info, api.get_client = real_info, real_client
+
+
+def att(eid, day, start, end, dept, role=None, kind=None):
+    return {"employeeId": eid, "dateFrom": f"{day}T{start}:00",
+            "dateTo": f"{day}T{end}:00", "departmentName": dept,
+            "roleId": role, "attendanceTypeId": kind}
 
 
 def test_iso_week_matches_the_owners_numbering():
@@ -173,9 +225,23 @@ def test_totals_and_network_row():
     net = r["network"]
     assert net["name"] == "Итого сеть"
     assert net["plan"]["1"]["hall"] == 15 and net["total_fact"]["hall"] == 105, net
-    assert net["fot"] == {"amount": 0, "shifts_priced": 0,
-                          "shifts_total": 0, "complete": False}, net["fot"]
+    assert net["fot"] == {"amount": 0, "priced": 0, "total": 0, "unit": None,
+                          "complete": False, "gaps": []}, net["fot"]
     print("  [OK] итог филиала 70 план / 56 факт, сеть по понедельнику 15")
+
+
+def test_network_row_sums_the_same_missing_role_across_branches():
+    """Один и тот же Кассир не заведён у всех филиалов. Владельцу нужна одна
+    строка «вот кого заполнить», а не девять одинаковых."""
+    fot = lambda h: {"amount": 0, "priced": 0, "total": h, "unit": "hour",
+                     "complete": False, "gaps": [{"role": "Кассир", "hours": h}]}
+    rows = [{"organization_id": "a", "name": "Алиева", "plan": _grid(1), "fact": _grid(1),
+             "base": _grid(1), "fot": fot(93)},
+            {"organization_id": "b", "name": "Достык", "plan": _grid(1), "fact": _grid(1),
+             "base": _grid(1), "fot": fot(70)}]
+    r = api._plan_response("2026-W38", date(2026, 9, 14), date(2026, 9, 20), rows, demo=False)
+    assert r["network"]["fot"]["gaps"] == [{"role": "Кассир", "hours": 163}], r["network"]["fot"]
+    print("  [OK] Кассир по сети одной строкой: 163 ч без ставки")
 
 
 def test_network_row_is_not_double_counted_into_branches():
@@ -360,6 +426,133 @@ def test_branch_fot_reports_amount_and_missing_shift_pay():
     print("  [OK] ФОТ 15 000 и явно показывает 1 незаполненную смену")
 
 
+ROLES = {"r-cashier": {"name": "Кассир", "payment_per_hour": 0.0},
+         "r-sushi": {"name": "Сушист", "payment_per_hour": 900.0},
+         "r-chef": {"name": "Су-шеф", "payment_per_hour": 1230.77}}
+COEF = {"t-day": 1.0, "t-night": 1.2, "t-holiday": 2.0}
+
+
+def _fot(rows, org="org-a", name="Алиева", roles=None, coef=None, calls=None):
+    import asyncio as aio
+    with _iiko_attendance(rows, {org: name}, roles or ROLES, coef or COEF) as c:
+        got = aio.run(api._fot_by_branch([{"organization_id": org, "name": name}],
+                                         date(2026, 9, 14), date(2026, 9, 20), {"id": 1}))
+    if calls is not None:
+        calls.update(c)
+    return got[org]
+
+
+def test_fot_comes_from_the_role_rate_in_iiko():
+    """Ставка в iiko лежит на ДОЛЖНОСТИ (`/api/employees/roles` →
+    paymentPerHour), а не на человеке, и денег в самой явке нет. Именно поэтому
+    виджет, читавший только ручную оплату смены, показывал 0."""
+    got = _fot([att("e1", "2026-09-14", "09:00", "19:00", "Алиева", "r-sushi", "t-day"),
+                att("e2", "2026-09-15", "10:00", "18:00", "Алиева", "r-chef", "t-day"),
+                att("e3", "2026-09-16", "09:00", "14:00", "Достык", "r-sushi", "t-day")])
+    # 10 ч × 900 + 8 ч × 1230.77 = 18 846. Явка чужого филиала не считается.
+    assert got["amount"] == 18846, got
+    assert got["unit"] == "hour" and got["total"] == 18, got
+    assert got["complete"] is True, got
+    print("  [OK] ФОТ 18 846 ₸ по ставкам должностей, чужой филиал не приплюсован")
+
+
+def test_night_and_holiday_raise_the_rate_as_iiko_says():
+    """Тип явки — это множитель к ставке: у сети ночной 1.2, праздничный 2.0.
+    Без него ночные смены считались бы по дневной ставке и ФОТ был бы занижен."""
+    got = _fot([att("e1", "2026-09-14", "20:00", "23:00", "Алиева", "r-sushi", "t-night"),
+                att("e2", "2026-09-15", "10:00", "13:00", "Алиева", "r-sushi", "t-holiday")])
+    # 3 ч × 900 × 1.2 + 3 ч × 900 × 2.0 = 3 240 + 5 400
+    assert got["amount"] == 8640, got
+    print("  [OK] ночная ×1.2 и праздничная ×2.0 учтены")
+
+
+def test_role_without_a_rate_is_a_hole_not_a_zero():
+    """У сети ставка заведена у 7 должностей из 21: Кассир, Курьер и Тех
+    персонал работают «бесплатно». Это незаполненная ставка, а не бесплатный
+    труд — часы обязаны попасть в непокрытые, а сумма помечена неполной."""
+    got = _fot([att("e1", "2026-09-14", "09:00", "19:00", "Алиева", "r-sushi", "t-day"),
+                att("e2", "2026-09-14", "09:00", "19:00", "Алиева", "r-cashier", "t-day")])
+    assert got["amount"] == 9000, got
+    assert got["priced"] == 10 and got["total"] == 20, got
+    assert got["complete"] is False, got
+    assert got["gaps"] == [{"role": "Кассир", "hours": 10}], got["gaps"]
+    print("  [OK] 10 из 20 часов со ставкой, дыра названа: Кассир")
+
+
+def test_our_own_rate_beats_the_one_from_iiko():
+    """Пока должность в iiko без ставки, её можно закрыть у себя — и наша
+    ставка должна побеждать, иначе исправить чужой ноль было бы нечем."""
+    from database import set_salary_rate
+    set_salary_rate("e2", 700)
+    got = _fot([att("e2", "2026-09-14", "09:00", "19:00", "Алиева", "r-cashier", "t-day")])
+    assert got["amount"] == 7000, got
+    assert got["complete"] is True, got
+    print("  [OK] своя ставка закрывает должность без ставки в iiko")
+
+
+def test_double_attendance_does_not_double_the_hours():
+    """Явки задваиваются, когда сотрудник числится в двух ролях. Пересечение
+    обрезается — иначе ФОТ вырос бы вдвое на ровном месте."""
+    got = _fot([att("e1", "2026-09-14", "09:00", "19:00", "Алиева", "r-sushi", "t-day"),
+                att("e1", "2026-09-14", "12:00", "19:00", "Алиева", "r-sushi", "t-day")])
+    assert got["total"] == 10 and got["amount"] == 9000, got
+    print("  [OK] задвоенная явка даёт 10 часов, а не 17")
+
+
+def test_the_overlapping_part_keeps_the_rate_of_its_own_role():
+    """Обрезаем пересечение, а не выбрасываем явку целиком: у второй роли своя
+    ставка, и остаток после пересечения обязан считаться по ней."""
+    got = _fot([att("e1", "2026-09-14", "09:00", "13:00", "Алиева", "r-sushi", "t-day"),
+                att("e1", "2026-09-14", "11:00", "15:00", "Алиева", "r-chef", "t-day")])
+    # 4 ч сушистом (900) + оставшиеся 2 ч су-шефом (1230.77) = 3 600 + 2 462
+    assert got["total"] == 6 and got["amount"] == 6062, got
+    print("  [OK] хвост после пересечения посчитан по своей должности")
+
+
+def test_fot_asks_each_iiko_server_once_not_once_per_branch():
+    """Девять филиалов сети живут на одном сервере, а /employees/attendance
+    отдаёт явки всех департаментов сразу. Запрос на филиал — это девять
+    одинаковых ответов и полминуты на открытие вкладки."""
+    import asyncio as aio
+    rows = [att("e1", "2026-09-14", "09:00", "19:00", "Алиева", "r-sushi", "t-day"),
+            att("e1", "2026-09-14", "09:00", "19:00", "Достык", "r-sushi", "t-day")]
+    with _iiko_attendance(rows, {"org-a": "Алиева", "org-b": "Достык"}, ROLES, COEF) as calls:
+        aio.run(api._fot_by_branch([{"organization_id": "org-a", "name": "Алиева"},
+                                    {"organization_id": "org-b", "name": "Достык"}],
+                                   date(2026, 9, 14), date(2026, 9, 20), {"id": 1}))
+    assert calls["attendance"] == 1 and calls["roles"] == 1, calls
+    print("  [OK] один запрос явок и должностей на сервер, а не на каждый филиал")
+
+
+def test_fot_falls_back_to_the_schedule_when_iiko_has_no_attendance():
+    """Облачный iiko явок не отдаёт вовсе. Там ФОТ остаётся тем, что проставили
+    руками в графике смен, — но нулём мы это подменять не имеем права."""
+    from database import set_staff_shift
+    set_staff_shift("org-cloud", "e9", "2026-09-14", "09:00", "18:00", 12000)
+    got = _fot(None, org="org-cloud", name="Облако")
+    assert got == {"amount": 12000, "priced": 1, "total": 1,
+                   "unit": "shift", "complete": True}, got
+    print("  [OK] без явок ФОТ берётся из графика смен, а не обнуляется")
+
+
+def test_fot_without_any_source_is_not_reported_as_zero():
+    """Ни явок, ни графика — «нет данных». Ноль на собрании читается как
+    «людям не платили», и это прямое враньё."""
+    got = _fot(None, org="org-empty", name="Пусто")
+    assert got["unit"] is None and got["total"] == 0, got
+    print("  [OK] без источника ФОТ помечен «нет данных», а не нулём")
+
+
+def test_fot_of_a_broken_iiko_does_not_break_the_week():
+    """iiko-сервер филиала может лежать. Вкладка «Планы» — это план и факт
+    заказов; ронять её из-за явок нельзя."""
+    from database import set_staff_shift
+    set_staff_shift("org-down", "e9", "2026-09-14", "09:00", "18:00", 5000)
+    got = _fot(RuntimeError("iiko лежит"), org="org-down", name="Лежит")
+    assert got["amount"] == 5000 and got["unit"] == "shift", got
+    print("  [OK] упавший iiko не роняет вкладку, ФОТ падает на график")
+
+
 def test_future_week_asks_iiko_for_nothing():
     """Неделя, которая ещё не наступила: закрытых дней нет, запросов тоже."""
     import api as A
@@ -428,7 +621,8 @@ if __name__ == "__main__":
               test_iso_week_matches_the_owners_numbering, test_fact_folds_into_days_and_channels,
               test_pickup_is_its_own_channel, test_site_pickup_is_pickup_not_delivery,
               test_broken_dates_do_not_crash_the_week,
-              test_totals_and_network_row, test_network_row_is_not_double_counted_into_branches,
+              test_totals_and_network_row, test_network_row_sums_the_same_missing_role_across_branches,
+              test_network_row_is_not_double_counted_into_branches,
               test_empty_week_has_full_grid, test_day_plan_survives_a_round_trip,
               test_done_days_counts_only_closed_days,
               test_previous_week_is_taken_from_the_base_window,
@@ -438,6 +632,16 @@ if __name__ == "__main__":
               test_day_without_orders_is_not_refetched_forever,
               test_forced_refresh_corrects_a_closed_day,
               test_branch_fot_reports_amount_and_missing_shift_pay,
+              test_fot_comes_from_the_role_rate_in_iiko,
+              test_night_and_holiday_raise_the_rate_as_iiko_says,
+              test_role_without_a_rate_is_a_hole_not_a_zero,
+              test_our_own_rate_beats_the_one_from_iiko,
+              test_double_attendance_does_not_double_the_hours,
+              test_the_overlapping_part_keeps_the_rate_of_its_own_role,
+              test_fot_asks_each_iiko_server_once_not_once_per_branch,
+              test_fot_falls_back_to_the_schedule_when_iiko_has_no_attendance,
+              test_fot_without_any_source_is_not_reported_as_zero,
+              test_fot_of_a_broken_iiko_does_not_break_the_week,
               test_future_week_asks_iiko_for_nothing,
               test_losses_name_what_got_worse_by_the_same_rule, test_tiny_wobble_is_not_a_loss,
               test_staff_lateness_is_a_week_metric,

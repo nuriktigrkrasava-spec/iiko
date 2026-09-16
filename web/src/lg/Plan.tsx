@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense, type CSSProperties } from 'react'
 import { Glass } from './ui'
 import { useOrg } from '../lib/useApi'
-import { isoWeekOf, shiftWeek } from './planWeek'
+import { fotCoverage, isoWeekOf, shiftWeek } from './planWeek'
+import type { Fot } from './planWeek'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 // Экран собрания открывают редко — незачем тянуть его в общий кусок вкладки
 const Progress = lazy(() => import('./Progress'))
@@ -25,7 +26,6 @@ import type { ScoreRow } from './Progress'
    месте. Сегодняшний день не закрыт и в сравнение не входит. */
 
 type Grid = Record<string, Record<string, number>>
-type Fot = { amount: number; shifts_priced: number; shifts_total: number; complete: boolean }
 type Branch = {
   organization_id: string; name: string
   plan: Grid; fact: Grid; base: Grid; prev: Grid
@@ -82,6 +82,7 @@ const dm = (iso: string) => iso.slice(8, 10) + '.' + iso.slice(5, 7)
 const pctColor = (p: number) => (p >= 100 ? 'var(--grn)' : p >= 85 ? 'var(--amb)' : 'var(--red)')
 const pct = (f: number, p: number) => (p ? Math.round((f / p) * 100) : 0)
 const nfmt = (n: number) => n.toLocaleString('ru-RU')
+
 
 /* Динамика к прошлой неделе. Без базы процента нет — рисуем прочерк, а не
    «+100%»: рост с нуля не рост, а первая неделя работы. Колебание меньше
@@ -643,6 +644,8 @@ export default function Plan() {
   const netPrev = sumTypes((t) => prevOf(data.network!, t))
   const netPlanDone = sumTypes((t) => netPlanTotal(t, doneDays))
   const networkFot = data.network!.fot
+  const hasFot = !!networkFot && networkFot.unit !== null
+  const fotGaps = networkFot?.gaps || []
 
   function openProgress() {
     setShowProgress(true)
@@ -697,12 +700,20 @@ export default function Plan() {
             </div>
           </div>
           <div style={heroStat}>
-            <div style={heroLabel}>ФОТ по графику</div>
-            <div className="tnum" style={heroValue}>{networkFot ? `${nfmt(networkFot.amount)} ₸` : '—'}</div>
+            <div style={heroLabel}>{networkFot?.unit === 'shift' ? 'ФОТ по графику' : 'ФОТ по явкам'}</div>
+            <div className="tnum" style={heroValue}>{hasFot ? `${nfmt(networkFot!.amount)} ₸` : '—'}</div>
             <div style={{ fontSize: 13.5, marginTop: 7,
-                          color: networkFot?.complete ? 'var(--grn)' : 'var(--amb)' }}>
-              {networkFot ? `${networkFot.shifts_priced} из ${networkFot.shifts_total} смен с оплатой` : 'нет данных по сменам'}
+                          color: !hasFot ? 'var(--mute)' : networkFot!.complete ? 'var(--grn)' : 'var(--amb)' }}>
+              {fotCoverage(networkFot)}
             </div>
+            {/* Неполный ФОТ бесполезен, если не сказать, ЧЕГО в нём не хватает:
+                ставка должности заводится в iiko, и это единственное действие,
+                которое превращает эту цифру в настоящую. */}
+            {!!fotGaps.length && (
+              <div style={{ fontSize: 12.5, marginTop: 5, color: 'var(--mute)', lineHeight: 1.4 }}>
+                нет ставки в iiko: {fotGaps.map((g) => `${g.role} (${nfmt(g.hours)} ч)`).join(', ')}
+              </div>
+            )}
           </div>
         </div>
 
@@ -910,11 +921,11 @@ export default function Plan() {
                       </td>
                       <td style={{ ...td, textAlign: 'right' }}>
                         <span className="tnum" style={{ color: 'var(--hi)', fontWeight: 750 }}>
-                          {b.fot ? `${nfmt(b.fot.amount)} ₸` : '—'}
+                          {b.fot && b.fot.unit ? `${nfmt(b.fot.amount)} ₸` : '—'}
                         </span>
-                        {b.fot && !b.fot.complete && (
-                          <div style={{ marginTop: 2, fontSize: 11.5, color: 'var(--amb)' }}>
-                            {b.fot.shifts_priced}/{b.fot.shifts_total} смен
+                        {b.fot && b.fot.unit && !b.fot.complete && (
+                          <div className="tnum" style={{ marginTop: 2, fontSize: 11.5, color: 'var(--amb)' }}>
+                            {nfmt(b.fot.priced)}/{nfmt(b.fot.total)} {b.fot.unit === 'shift' ? 'смен' : 'ч'}
                           </div>
                         )}
                       </td>

@@ -31,12 +31,13 @@ const grid = (v: number) => Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((d) => 
 const planWeek: PlanWeek = {
   types: ['hall'], done_days: 3,
   network: { organization_id: '', name: 'Итого сеть', plan: grid(100), fact: grid(90), prev: grid(80),
-             fot: { amount: 300000, shifts_priced: 20, shifts_total: 22, complete: false } },
+             fot: { amount: 300000, priced: 740, total: 1100, unit: 'hour', complete: false,
+                    gaps: [{ role: 'Кассир', hours: 260 }] } },
   branches: [
     { organization_id: 'a', name: 'Астана, ул. Г.Алиева 10', plan: grid(60), fact: grid(66), prev: grid(50),
-      fot: { amount: 180000, shifts_priced: 12, shifts_total: 12, complete: true } },
+      fot: { amount: 180000, priced: 500, total: 500, unit: 'hour', complete: true } },
     { organization_id: 'b', name: 'Астана, ул. Бокейхана 25а', plan: grid(40), fact: grid(24), prev: grid(30),
-      fot: { amount: 120000, shifts_priced: 8, shifts_total: 10, complete: false } },
+      fot: { amount: 120000, priced: 240, total: 600, unit: 'hour', complete: false } },
   ],
 }
 const data: MetricsData = { week: '2026-W35', from: '2026-08-24', to: '2026-08-30',
@@ -118,7 +119,11 @@ describe('экран', () => {
     expect(screen.getByText('90%')).toBeTruthy()
     expect(screen.getByText('270 из 300')).toBeTruthy()
     expect(screen.getByText(/300.000/)).toBeTruthy()
-    expect(screen.getByText('20 из 22 смен с оплатой')).toBeTruthy()
+    // ФОТ считается по явкам iiko, покрытие — в ЧАСАХ: кассир со 260 ч без
+    // ставки весит иначе, чем бухгалтер с двумя.
+    expect(screen.getByText('740 из 1 100 ч со ставкой · 67%')).toBeTruthy()
+    // и неполная сумма обязана назвать, кого именно не хватает
+    expect(screen.getByText('нет ставки в iiko: Кассир (260 ч)')).toBeTruthy()
     expect(screen.getByText('за 3 закрытых дн.')).toBeTruthy()
     expect(screen.getByText('План и факт по дням')).toBeTruthy()
     expect(screen.getByText('Выполнение плана по филиалам')).toBeTruthy()

@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
+import { fotCoverage } from './planWeek'
+import type { Fot } from './planWeek'
 import {
   Bar, BarChart, CartesianGrid, Cell as RCell, ComposedChart, Line,
   ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -55,7 +57,7 @@ type Grid = Record<string, Record<string, number>>
 export type PlanBranch = {
   organization_id: string; name: string
   plan: Grid; fact: Grid; prev: Grid
-  fot?: { amount: number; shifts_priced: number; shifts_total: number; complete: boolean }
+  fot?: Fot
 }
 export type PlanWeek = {
   types: string[]; branches: PlanBranch[]; network: PlanBranch; done_days: number
@@ -72,6 +74,9 @@ const shortName = (n: string) => n.replace(/^Астана,?\s*(ул\.?)?\s*/i, '
 const fmt = (v: number | null | undefined, unit: string) =>
   v == null ? '—' : `${Math.round(v * 10) / 10}${unit ? ` ${unit}` : ''}`
 const num = (v: number) => v.toLocaleString('ru-RU')
+
+export type { Fot, FotGap } from './planWeek'
+
 const dm = (d: string) => `${d.slice(8, 10)}.${d.slice(5, 7)}`
 
 /** Сводка сети. Проценты считаем из общего числителя и знаменателя, а время
@@ -493,17 +498,24 @@ export default function Progress({ data, scores, plan, onClose }: {
               animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
               transition={{ type: 'spring', bounce: 0, duration: 0.4, delay: 0.04 }}
               style={panel}>
-              <div style={eyebrow}>ФОТ по графику</div>
+              <div style={eyebrow}>{plan.network.fot.unit === 'shift' ? 'ФОТ по графику' : 'ФОТ по явкам'}</div>
               <div className="tnum" style={{ marginTop: 8, fontSize: 32, fontWeight: 780,
                                              letterSpacing: '-.03em', lineHeight: 1, color: 'var(--hi)' }}>
                 {num(plan.network.fot.amount)} ₸
               </div>
               <div style={{ marginTop: 7, fontSize: 12.5,
                             color: plan.network.fot.complete ? 'var(--grn)' : 'var(--amb)' }}>
-                {plan.network.fot.shifts_priced} из {plan.network.fot.shifts_total} смен с оплатой
+                {fotCoverage(plan.network.fot)}
               </div>
+              {/* На собрании неполную сумму надо не просто пометить, а назвать
+                  причину: ставка должности заводится в iiko, и это единственное
+                  действие, которое превращает эту цифру в настоящую. */}
               {!plan.network.fot.complete && (
-                <div style={{ marginTop: 3, fontSize: 11.5, color: 'var(--mute)' }}>сумма пока неполная</div>
+                <div style={{ marginTop: 3, fontSize: 11.5, color: 'var(--mute)', lineHeight: 1.4 }}>
+                  {plan.network.fot.gaps?.length
+                    ? `нет ставки в iiko: ${plan.network.fot.gaps.map((g) => `${g.role} (${num(g.hours)} ч)`).join(', ')}`
+                    : 'сумма пока неполная'}
+                </div>
               )}
             </motion.div>
           )}
@@ -571,11 +583,11 @@ export default function Progress({ data, scores, plan, onClose }: {
                     )}
                     {!!byBranchPlan.length && (
                       <td className="tnum" style={{ padding: '9px 0 9px 12px', textAlign: 'right', borderBottom: '1px solid var(--hair-2)' }}>
-                        {pl?.fot ? (
+                        {pl?.fot && pl.fot.unit ? (
                           <>
                             <span style={{ color: 'var(--hi)', fontWeight: 700 }}>{num(pl.fot.amount)} ₸</span>
                             <div style={{ fontSize: 11, color: pl.fot.complete ? 'var(--mute)' : 'var(--amb)' }}>
-                              {pl.fot.shifts_priced}/{pl.fot.shifts_total} смен
+                              {num(pl.fot.priced)}/{num(pl.fot.total)} {pl.fot.unit === 'shift' ? 'смен' : 'ч'}
                             </div>
                           </>
                         ) : '—'}
