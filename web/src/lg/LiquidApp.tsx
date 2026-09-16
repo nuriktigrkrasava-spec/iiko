@@ -13,6 +13,7 @@ import NoticeCenter from './Notices'
 const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key: keyof M) =>
   lazy(() => load().then((m) => ({ default: m[key] as React.ComponentType })))
 
+const Signup = lazy(() => import('./Signup'))
 const Dash = lazyFrom(() => import('./screens'), 'Dash')
 const Staff = lazyFrom(() => import('./screens'), 'Staff')
 const Plan = lazy(() => import('./Plan'))
@@ -23,7 +24,7 @@ const Schedule = lazy(() => import('./Schedule'))
 const Shifts = lazy(() => import('./Shifts'))
 const Mountain = lazy(() => import('./Mountain'))
 import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref,
-         getOrg, setOrg, getBranches, pickOrg, type Period } from '../lib/api'
+         getOrg, setOrg, getBranches, pickOrg, type Period, isDemoLink } from '../lib/api'
 
 // render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
 type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
@@ -116,6 +117,9 @@ export default function LiquidApp() {
   const setPeriod = (p: Period) => { setPeriodLocal(p); setGlobalPeriod(p) }
   const [dark, setDark] = useState(() => loadPref('theme') === 'dark') // светлый — главная тема (референс Truck&Co)
   const [moreOpen, setMoreOpen] = useState(false) // лист «Ещё» на узких экранах
+  // Рамка регистрации — только на демо-ссылке и только до первого закрытия:
+  // человек, решивший сначала посмотреть, не должен видеть её на каждом разделе.
+  const [showSignup, setShowSignup] = useState(() => isDemoLink())
   // Переключатель филиалов нужен ВЛАДЕЛЬЦУ — он смотрит сеть. Прячем его только
   // у управляющего: его филиал задан ссылкой, а список чужих точек обещал бы
   // доступ, которого нет. Роль спрашиваем лёгким запросом, не всей доской.
@@ -193,6 +197,15 @@ export default function LiquidApp() {
           управляющий, оставивший сайт на «Главной», не видел их вообще —
           раздел не смонтирован, опрашивать некому. */}
       <NoticeCenter />
+
+      {/* Демо-ссылка ведёт на выдуманную сеть. Рамку показываем сразу: человек
+          пришёл смотреть, и вход «подключить своё» должен быть виден, а не
+          спрятан. Закрыть можно — тогда остаётся обычное демо. */}
+      {showSignup && (
+        <Suspense fallback={null}>
+          <Signup onClose={() => setShowSignup(false)} />
+        </Suspense>
+      )}
 
       {/* Основная (на всю ширину — меню ушло в нижний док) */}
       <main style={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>

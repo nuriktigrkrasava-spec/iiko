@@ -59,6 +59,20 @@ function authHeaders(): Record<string, string> {
   return h
 }
 
+/** Открыто по ДЕМО-ссылке: токен показа начинается с «d».
+
+    По ней человек видит выдуманную сеть, поэтому именно здесь и предлагаем
+    подключить свой iiko — на личной ссылке владельца это было бы навязчиво. */
+export function isDemoLink(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    const m = new URLSearchParams(window.location.search).get('m') || ''
+    return m.startsWith('d') && m.includes('.')
+  } catch {
+    return false
+  }
+}
+
 /** Ссылка подключения (QR филиала). Пусто — открыли не по ней. */
 export function getJoinToken(): string {
   if (typeof window === 'undefined') return ''

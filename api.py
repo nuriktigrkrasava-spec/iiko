@@ -276,6 +276,27 @@ def validate_telegram_init_data(init_data: str) -> Dict[str, Any]:
         raise HTTPException(status_code=403, detail="Invalid Telegram init data")
 
 
+# Когда последний раз отмечали заход каждого. Экран открывает десятки запросов
+# подряд, и писать в базу на каждый — впустую: для «активен за 7 дней» хватает
+# точности в полчаса.
+_SEEN_EVERY = 1800
+_seen_at: Dict[int, float] = {}
+
+
+def _mark_seen(uid: int):
+    if not uid:
+        return
+    now = time.time()
+    if now - _seen_at.get(uid, 0) < _SEEN_EVERY:
+        return
+    _seen_at[uid] = now
+    try:
+        from database import touch_acquisition
+        touch_acquisition(uid)
+    except Exception as e:
+        logger.warning(f"[acq] touch {uid}: {e!r}")
+
+
 async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
                            x_site_token: Optional[str] = Header(None, alias="X-Site-Token")):
     """Кто спрашивает. Три пути входа, по убыванию строгости.
@@ -289,11 +310,14 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, al
     3. dev-режим без бота: DEV_TID. Только когда BOT_TOKEN пуст.
     """
     if x_telegram_init_data:
-        return validate_telegram_init_data(x_telegram_init_data)
+        u = validate_telegram_init_data(x_telegram_init_data)
+        _mark_seen(int(u.get("id") or 0))
+        return u
     if x_site_token:
         import mountain_routes
         sc = mountain_routes.scope_of_token(x_site_token)
         if sc.get("role") == "owner":
+            _mark_seen(int(sc["uid"]))
             return {"id": sc["uid"], "username": "site", "first_name": "Site"}
         if sc.get("role") and sc.get("org"):
             # Ссылка ФИЛИАЛА. В iiko ходим от имени владельца — своих кредов у
@@ -632,9 +656,15 @@ def _build_stats_text() -> str:
         a = acquisition_stats()
         # escape — на случай старых source, записанных до санитизации
         src = " · ".join(f"{html.escape(s)} {c}" for s, c in a["by_source"]) or "—"
+        # «Пришло» и «пользуется» — разные числа, и без второго первое ничего
+        # не говорит: тысяча открывших ссылку и ноль подключивших iiko — провал,
+        # а выглядело бы победой.
+        conv = round(100 * a["connected"] / a["total"]) if a["total"] else 0
         return (
-            f"👥 Юзеры демо-бота\n"
-            f"Всего: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
+            f"👥 Юзеры\n"
+            f"Пришло: {a['total']} · сегодня: {a['today']} · за неделю: {a['week']}\n"
+            f"Подключили iiko: {a['connected']} ({conv}%)\n"
+            f"Активных за 7 дней: {a['active']}\n"
             f"Источники: {src}"
         )
     q = quota_stats()
@@ -942,6 +972,11 @@ class SetupSave(BaseModel):
     cloud_api_login: Optional[str] = None  # ключ iiko Cloud для живого зала/стоп-листов
 
 
+class SiteSignup(SetupSave):
+    """Регистрация с сайта: те же поля подключения плюс телеграм для уведомлений."""
+    tg_username: str
+
+
 class AIAnalyze(BaseModel):
     question: str
     context: Dict[str, Any]
@@ -1110,6 +1145,47 @@ async def setup_validate(request: Request, payload: SetupValidate, user: Dict = 
         }
     except Exception as e:
         return {"valid": False, "error": str(e)}
+
+
+@app.post("/api/signup")
+@limiter.limit("5/15 minutes")
+async def site_signup(request: Request, payload: SiteSignup):
+    """Регистрация прямо с сайта, без Telegram.
+
+    Человек приходит по ссылке, вводит доступы к своему iiko и телеграм для
+    уведомлений — и сразу видит СВОИ цифры. Телеграм-id у него на этот момент
+    ещё нет, поэтому аккаунт заводится со своим (отрицательным) и переезжает на
+    настоящий, когда человек напишет боту: `claim_web_signup` в /start.
+
+    Единственный эндпоинт без `get_current_user`: личности у пришедшего ещё нет,
+    он её здесь и получает. Поэтому лимит по адресу обязателен — иначе это
+    открытая ручка, создающая аккаунты, — а доступы проверяются в iiko ДО
+    записи: не подошли, значит и аккаунта заводить незачем.
+    """
+    from database import normalize_username, web_signup
+    uname = normalize_username(payload.tg_username)
+    if not uname or not re.fullmatch(r"[A-Za-z0-9_]{4,32}", uname):
+        raise HTTPException(status_code=400, detail="Укажите телеграм вида @username")
+    try:
+        client = get_client(payload.api_login, payload.iiko_server, payload.api_password)
+        orgs = await client.get_organizations()
+    except Exception as e:
+        logger.warning(f"[signup] проверка доступов: {e!r}")
+        raise HTTPException(status_code=400, detail="iiko не принял эти доступы")
+    if payload.organization_id not in {o["id"] for o in orgs}:
+        raise HTTPException(status_code=400, detail="Этой организации нет у ваших доступов")
+    uid = web_signup(uname, payload.organization_name)
+    add_restaurant(uid, payload.api_login, payload.organization_id, payload.organization_name,
+                   payload.iiko_server, payload.api_password, payload.cloud_api_login)
+    import mountain_routes as _mr
+    token = _mr.token_for(uid)
+    try:
+        await _tg_send(OWNER_CHAT_ID,
+                       f"🆕 Регистрация с сайта: @{html.escape(uname)}\n"
+                       f"{html.escape(payload.organization_name)}")
+    except Exception as e:
+        logger.warning(f"[signup] owner notify: {e!r}")
+    return {"success": True, "token": token, "url": f"/?m={token}"}
 
 
 @app.post("/api/setup/save")
@@ -7275,6 +7351,15 @@ async def telegram_webhook(request: Request):
                     except Exception as e:
                         logger.warning(f"[invite] notify owner: {e!r}")
                 return {"ok": True}
+            # Человек мог зарегистрироваться на сайте раньше, чем написал боту.
+            # Это один человек: переносим его рестораны на настоящий id, иначе
+            # уведомления придут в пустой аккаунт.
+            try:
+                from database import claim_web_signup
+                if claim_web_signup(username, telegram_id):
+                    logger.info(f"[signup] аккаунт с сайта забран: @{username} -> {telegram_id}")
+            except Exception as e:
+                logger.warning(f"[signup] claim {telegram_id}: {e!r}")
             if DEMO_ONLY:
                 try:
                     is_new = record_acquisition(telegram_id, username, source)

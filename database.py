@@ -280,13 +280,103 @@ def inc_demo_invoice_count(telegram_id: int) -> int:
 
 # === Атрибуция юзеров демо-бота ===
 
+def _ensure_acquisition(conn):
+    """`last_seen_ts` добавлен позже: сначала считали только приход. «Пришёл» и
+    «пользуется» — разные вещи, и по одному приходу воронку не построить."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(user_acquisition)")}
+    if "last_seen_ts" not in cols:
+        conn.execute("ALTER TABLE user_acquisition ADD COLUMN last_seen_ts INTEGER")
+        # У пришедших до этой правки за последний заход считаем приход: другого
+        # свидетельства нет, а обнулять их активность — врать в другую сторону.
+        conn.execute("UPDATE user_acquisition SET last_seen_ts = first_seen_ts "
+                     "WHERE last_seen_ts IS NULL")
+
+
+def normalize_username(username: Optional[str]) -> str:
+    """@Kolya, Kolya и kolya — один человек. Иначе бот не найдёт того, кто
+    зарегистрировался на сайте."""
+    return (username or "").strip().lstrip("@").lower()
+
+
+def touch_acquisition(telegram_id: int, ts: Optional[int] = None):
+    """Отмечает заход. Дату прихода и источник НЕ трогает: это атрибуция, по ней
+    считают, откуда пришли люди, и переписать её значит потерять её навсегда."""
+    conn = get_db()
+    _ensure_acquisition(conn)
+    conn.execute("UPDATE user_acquisition SET last_seen_ts = ? WHERE telegram_id = ?",
+                 (int(ts if ts is not None else datetime.now().timestamp()), telegram_id))
+    conn.commit()
+    conn.close()
+
+
+# Телеграм выдаёт только положительные id, поэтому веб-аккаунтам раздаём
+# отрицательные: перепутать «человека с сайта» и «человека из бота» нельзя даже
+# случайно, а когда он напишет боту — аккаунт переезжает на настоящий id.
+WEB_UID_BASE = -1000
+
+
+def web_signup(username: str, first_name: str = "") -> int:
+    """Заводит аккаунт человеку, который регистрируется на сайте до бота."""
+    conn = get_db()
+    row = conn.execute("SELECT MIN(telegram_id) m FROM users").fetchone()
+    uid = min(int(row["m"] or 0), WEB_UID_BASE) - 1
+    conn.execute("INSERT INTO users (telegram_id, username, first_name, created_at) "
+                 "VALUES (?,?,?,?)",
+                 (uid, normalize_username(username), first_name or "",
+                  datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    record_acquisition(uid, normalize_username(username), "site")
+    return uid
+
+
+def claim_web_signup(username: str, telegram_id: int) -> bool:
+    """Человек с сайта написал боту — это ОДИН человек.
+
+    Переносим его рестораны на настоящий телеграм-id: иначе уведомления пришли
+    бы в пустой аккаунт, а подключённый iiko остался бы в другом. True — что-то
+    перенесли; повторный /start и чужой username безвредны.
+    """
+    uname = normalize_username(username)
+    if not uname or telegram_id <= 0:
+        return False
+    conn = get_db()
+    _ensure_acquisition(conn)
+    row = conn.execute("SELECT telegram_id FROM users WHERE username = ? AND telegram_id < 0 "
+                       "ORDER BY telegram_id DESC LIMIT 1", (uname,)).fetchone()
+    if not row:
+        conn.close()
+        return False
+    web_uid = int(row["telegram_id"])
+    conn.execute("INSERT OR IGNORE INTO users (telegram_id, username, first_name, created_at) "
+                 "VALUES (?,?,?,?)", (telegram_id, uname, "", datetime.now().isoformat()))
+    conn.execute("UPDATE restaurants SET telegram_id = ? WHERE telegram_id = ?",
+                 (telegram_id, web_uid))
+    # Атрибуцию переносим вместе с человеком: он пришёл с сайта, а не из бота.
+    src = conn.execute("SELECT source, first_seen_ts FROM user_acquisition WHERE telegram_id = ?",
+                       (web_uid,)).fetchone()
+    if src:
+        conn.execute("INSERT OR IGNORE INTO user_acquisition "
+                     "(telegram_id, username, source, first_seen_ts, last_seen_ts) "
+                     "VALUES (?,?,?,?,?)",
+                     (telegram_id, uname, src["source"], src["first_seen_ts"],
+                      int(datetime.now().timestamp())))
+        conn.execute("DELETE FROM user_acquisition WHERE telegram_id = ?", (web_uid,))
+    conn.execute("DELETE FROM users WHERE telegram_id = ?", (web_uid,))
+    conn.commit()
+    conn.close()
+    return True
+
+
 def record_acquisition(telegram_id: int, username: str, source: str) -> bool:
     """Фиксирует первый контакт юзера с демо-ботом. True, если строка создана (новый юзер)."""
     conn = get_db()
+    _ensure_acquisition(conn)
+    ts = int(datetime.now().timestamp())
     cur = conn.execute(
-        "INSERT OR IGNORE INTO user_acquisition (telegram_id, username, source, first_seen_ts) "
-        "VALUES (?, ?, ?, ?)",
-        (telegram_id, username, source, int(datetime.now().timestamp()))
+        "INSERT OR IGNORE INTO user_acquisition "
+        "(telegram_id, username, source, first_seen_ts, last_seen_ts) VALUES (?, ?, ?, ?, ?)",
+        (telegram_id, username, source, ts, ts)
     )
     conn.commit()
     created = cur.rowcount > 0
@@ -296,6 +386,7 @@ def record_acquisition(telegram_id: int, username: str, source: str) -> bool:
 
 def acquisition_stats() -> dict:
     conn = get_db()
+    _ensure_acquisition(conn)
     now = int(datetime.now().timestamp())
     total = conn.execute("SELECT COUNT(*) c FROM user_acquisition").fetchone()["c"]
     today = conn.execute("SELECT COUNT(*) c FROM user_acquisition WHERE first_seen_ts >= ?",
@@ -305,8 +396,17 @@ def acquisition_stats() -> dict:
     rows = conn.execute(
         "SELECT source, COUNT(*) c FROM user_acquisition GROUP BY source ORDER BY c DESC"
     ).fetchall()
+    # Три РАЗНЫХ числа, мешать их нельзя: «пришёл» — открыл ссылку, «подключил» —
+    # дошёл до конца и завёл ресторан, «активный» — заходил за последние 7 дней.
+    # По одному приходу воронка врёт в обе стороны.
+    active = conn.execute("SELECT COUNT(*) c FROM user_acquisition WHERE last_seen_ts >= ?",
+                          (now - 7 * 86400,)).fetchone()["c"]
+    connected = conn.execute(
+        "SELECT COUNT(*) c FROM user_acquisition a WHERE EXISTS "
+        "(SELECT 1 FROM restaurants r WHERE r.telegram_id = a.telegram_id)").fetchone()["c"]
     conn.close()
     return {"total": int(total), "today": int(today), "week": int(week),
+            "active": int(active), "connected": int(connected),
             "by_source": [(r["source"] or "direct", int(r["c"])) for r in rows]}
 
 
