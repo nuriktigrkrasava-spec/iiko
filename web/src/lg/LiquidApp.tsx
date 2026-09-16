@@ -14,6 +14,7 @@ const lazyFrom = <M extends Record<string, unknown>>(load: () => Promise<M>, key
   lazy(() => load().then((m) => ({ default: m[key] as React.ComponentType })))
 
 const Signup = lazy(() => import('./Signup'))
+const Onboarding = lazy(() => import('./Onboarding'))
 const Dash = lazyFrom(() => import('./screens'), 'Dash')
 const Staff = lazyFrom(() => import('./screens'), 'Staff')
 const Plan = lazy(() => import('./Plan'))
@@ -27,7 +28,9 @@ import { getPeriod, setPeriod as setGlobalPeriod, loadPref, savePref,
          getOrg, setOrg, getBranches, pickOrg, type Period, isDemoLink } from '../lib/api'
 
 // render — компонент экрана: обычный или обёрнутый в React.lazy (ленивая загрузка)
-type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; render: React.ComponentType }
+/* hidden — раздел есть, но в доке его нет: в него попадают только по кнопке
+   «Подключить ресторан» из переключателя филиалов. */
+type Sec = { id: string; group: string; label: string; icon: string; badge?: string; periodic: boolean; hidden?: boolean; render: React.ComponentType }
 
 const SECTIONS: Sec[] = [
   { id: 'dash', group: 'Сводка', label: 'Главная', icon: 'dash', periodic: true, render: Dash },
@@ -39,14 +42,29 @@ const SECTIONS: Sec[] = [
   { id: 'plan', group: 'Операции', label: 'План', icon: 'feed', periodic: false, render: Plan },
   { id: 'mountain', group: 'Сводка', label: 'Гора · задачи', icon: 'anom', periodic: false, render: Mountain },
   { id: 'rep', group: 'Гости', label: 'Соцсети', icon: 'rep', periodic: false, render: Reputation },
+  // Кнопка «Подключить ресторан» слала сюда событие, а раздела не было:
+  // SECTIONS.find возвращал undefined, «!» прятал это от типов, и обращение
+  // к sec.render роняло всё дерево — пользователь видел белый экран.
+  { id: 'connect', group: 'Сводка', label: 'Подключить ресторан', icon: 'dash',
+    periodic: false, hidden: true, render: Onboarding },
 ]
 const TABS = ['mountain', 'dash', 'supply']
 // разделы, сгруппированные как в доке — для листа «Ещё» на узких экранах
-const GROUPS: [string, Sec[]][] = SECTIONS.reduce((acc, s) => {
+const GROUPS: [string, Sec[]][] = SECTIONS.filter((s) => !s.hidden).reduce((acc, s) => {
   const g = acc.find((x) => x[0] === s.group)
   if (g) g[1].push(s); else acc.push([s.group, [s]])
   return acc
 }, [] as [string, Sec[]][])
+/** Раздел по id. Без запасного варианта любой неизвестный id — белый экран на
+    всё приложение: SECTIONS.find возвращает undefined, «!» прячет это от типов,
+    и обращение к .render роняет дерево. Такая цена за опечатку слишком высока. */
+export function resolveSection(id: string): Sec {
+  return SECTIONS.find((s) => s.id === id) || SECTIONS[0]
+}
+
+/** Куда разрешено слать событие lg:go. */
+export const SECTION_IDS = SECTIONS.map((s) => s.id)
+
 const PERIODS = [['today', 'Сегодня'], ['yesterday', 'Вчера'], ['week', 'Неделя'], ['month', 'Месяц']] as const
 
 /* Подсказка появляется ПРИ ОТКРЫТИИ вкладки и объясняет то, что человек прямо
@@ -169,11 +187,17 @@ export default function LiquidApp() {
 
   // другие экраны просят переключить вкладку событием
   useEffect(() => {
-    const go = (e: Event) => setActive((e as CustomEvent<string>).detail)
+    const go = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail
+      // Демо-ссылка — это не чей-то кабинет: добавлять ресторан некуда, аккаунта
+      // ещё нет. Отправляем в регистрацию, а не в онбординг.
+      if (id === 'connect' && isDemoLink()) { setShowSignup(true); return }
+      setActive(id)
+    }
     window.addEventListener('lg:go', go)
     return () => window.removeEventListener('lg:go', go)
   }, [])
-  const sec = SECTIONS.find((s) => s.id === active)!
+  const sec = resolveSection(active)
   const Body = sec.render
 
   function toggleTheme() {
@@ -266,7 +290,7 @@ export default function LiquidApp() {
       <nav className="lg-dock glass warp" aria-label="Разделы">
         <span className="lg-dock-brand">iiko</span>
         <span className="lg-dock-sep" />
-        {SECTIONS.map(dockBtn)}
+        {SECTIONS.filter((s) => !s.hidden).map(dockBtn)}
         <span className="lg-dock-sep" />
         <button onClick={toggleTheme} className="lg-dock-btn" aria-label="Сменить тему">
           <span style={{ position: 'relative', zIndex: 1, fontSize: 17 }}>{dark ? '◐' : '◑'}</span>
