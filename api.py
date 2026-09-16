@@ -147,6 +147,8 @@ QUOTA_ENFORCE = os.getenv("QUOTA_ENFORCE", "0").strip().lower() in ("1", "true",
 # Прокси /api/chaspik держит ключ на бэке и шлёт его в заголовке X-API-Key.
 ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 CHASPIK_ORG_ID = os.getenv("CHASPIK_ORG_ID", "")
+# Одна формулировка на все ручки КДС, чтобы экран и бот говорили одно и то же.
+KDS_ONLY_DETAIL = "Раздел для пользователей нашего КДС"
 CHASPIK_BASE_URL = os.getenv("CHASPIK_BASE_URL", "https://saya-kds-irlg.onrender.com")
 CHASPIK_TG_IDS = {355897224, 8727082281}
 
@@ -2705,8 +2707,11 @@ async def chaspik_export(
 ) -> dict:
     """Прокси к saya-kds /admin/analytics/export. Виден только CHASPIK_TG_IDS.
     Ключ X-API-Key держим на бэке и не отдаём во фронт."""
+    # Карточки считаются по данным НАШЕГО КДС (saya-kds) и остаются закрытыми
+    # для всех остальных. Текст человеческий: «forbidden» на экране выглядит
+    # поломкой продукта, хотя это не поломка, а другой продукт.
     if int(user.get("id", 0)) not in CHASPIK_TG_IDS:
-        raise HTTPException(status_code=403, detail="forbidden")
+        raise HTTPException(status_code=403, detail=KDS_ONLY_DETAIL)
     if not ANALYTICS_API_KEY or not CHASPIK_ORG_ID:
         raise HTTPException(
             status_code=503,

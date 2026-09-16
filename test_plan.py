@@ -615,6 +615,20 @@ def test_a_rate_of_one_branch_does_not_leak_into_another():
     print("  [OK] ставка живёт в своём филиале и в чужой не течёт")
 
 
+def test_a_rate_from_the_old_schema_is_not_counted_for_anyone():
+    """Ставки старой схемы лежат без филиала. Подмешивать их всем нельзя: у двух
+    сетей на одном iiko-сервере employee_id общий, и чужая ставка попала бы в
+    ФОТ. Лучше не посчитать, чем посчитать по чужой цене."""
+    from database import LEGACY_RATE_ORG, get_db, get_salary_rates
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO salary_rates (organization_id, employee_id, rate) "
+                 "VALUES (?,?,?)", (LEGACY_RATE_ORG, "legacy-eid", 999))
+    conn.commit()
+    conn.close()
+    assert "legacy-eid" not in get_salary_rates("org-any"), get_salary_rates("org-any")
+    print("  [OK] ставка без филиала не считается ни одному филиалу")
+
+
 def test_fot_uses_only_the_rates_of_its_own_branch():
     """Тот же сотрудник на двух филиалах может стоить по-разному. ФОТ обязан
     брать ставку своего филиала, а не первую попавшуюся."""
@@ -771,6 +785,7 @@ if __name__ == "__main__":
               test_rounding_of_gaps_still_adds_up_to_the_whole,
               test_network_gaps_also_account_for_every_unpriced_hour,
               test_a_rate_of_one_branch_does_not_leak_into_another,
+              test_a_rate_from_the_old_schema_is_not_counted_for_anyone,
               test_fot_uses_only_the_rates_of_its_own_branch,
               test_manual_correction_covers_all_hours_of_that_employee,
               test_fot_window_matches_the_closed_days_of_the_orders,

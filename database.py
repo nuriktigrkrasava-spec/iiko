@@ -2533,7 +2533,9 @@ def get_social_growth(org_id: str, platform: str, days: int = 30):
 # employee_id, то есть была общей на всю базу: владелец org A, узнавший
 # employee_id из org B (это iiko-UUID), мог перебить чужую ставку, а у двух
 # сетей на одном iiko-сервере ставки просто смешивались.
-LEGACY_RATE_ORG = ""   # строки из той версии: чей это филиал, уже не узнать
+# Строки из той версии складываем сюда: чей это филиал, узнать уже нельзя.
+# В расчёт они НЕ идут (см. get_salary_rates) — лежат как след, а не как данные.
+LEGACY_RATE_ORG = ""
 
 
 def _ensure_salary(conn):
@@ -2578,23 +2580,21 @@ def init_salary_db():
 
 
 def get_salary_rates(org_id: str) -> dict:
-    """Ставки филиала: {employee_id: rate}.
+    """Ставки ТОЛЬКО своего филиала: {employee_id: rate}.
 
-    Строки без филиала (LEGACY_RATE_ORG) подмешиваются запасным вариантом и
-    проигрывают своей: пока ставку филиала не завели, старая продолжает
-    работать, а как только завели — перебивает её.
+    Строки старой схемы (LEGACY_RATE_ORG) раньше подмешивались сюда запасным
+    вариантом, чтобы уже заведённые ставки не пропали. Мостик убран по решению
+    владельца: у двух сетей на одном iiko-сервере employee_id общий, и такая
+    строка считалась бы в ФОТ чужого филиала. Изоляция важнее переносимости —
+    непереехавшая ставка просто заводится заново в своём филиале.
     """
     conn = get_db()
     _ensure_salary(conn)
     rows = conn.execute(
-        "SELECT organization_id, employee_id, rate FROM salary_rates "
-        "WHERE organization_id IN (?, ?)", (org_id, LEGACY_RATE_ORG)).fetchall()
+        "SELECT employee_id, rate FROM salary_rates WHERE organization_id = ?",
+        (org_id,)).fetchall()
     conn.close()
-    out = {r["employee_id"]: r["rate"] for r in rows
-           if r["organization_id"] == LEGACY_RATE_ORG}
-    out.update({r["employee_id"]: r["rate"] for r in rows
-                if r["organization_id"] != LEGACY_RATE_ORG})
-    return out
+    return {r["employee_id"]: r["rate"] for r in rows}
 
 
 def set_salary_rate(org_id: str, employee_id: str, rate: float):

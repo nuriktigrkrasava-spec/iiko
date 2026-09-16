@@ -40,6 +40,7 @@ function Eyebrow({ t, hint }: { t: string; hint?: string }) {
 export default function Kds() {
   const [data, setData] = useState<Chaspik | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [locked, setLocked] = useState(false)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -47,7 +48,10 @@ export default function Kds() {
     fetch('/api/chaspik', { headers: { Accept: 'application/json' } })
       .then(async (r) => {
         const body = await r.json().catch(() => null)
-        // ошибки прокси приходят как {detail: "..."} — показываем причину, а не «HTTP 503»
+        // 403 — это не поломка, а другой продукт: карточки считаются по данным
+        // нашего КДС и закрыты для тех, у кого его нет. Отделяем от настоящих
+        // сбоев, чтобы не показывать человеку «forbidden» и переменные окружения.
+        if (r.status === 403) { setLocked(true); return null }
         if (!r.ok) throw new Error(body?.detail || `HTTP ${r.status}`)
         return body as Chaspik
       })
@@ -58,6 +62,21 @@ export default function Kds() {
   }, [])
 
   if (loading) return <Glass span={12}><div style={{ padding: '10px 2px', fontSize: 13.5, color: 'var(--mute)' }}>Тяну данные КДС…</div></Glass>
+  if (locked) {
+    return (
+      <Glass span={12}>
+        <Eyebrow t="Кухня и доставка · КДС" hint="для пользователей нашего КДС" />
+        <div style={{ marginTop: 10, fontSize: 13.5, color: 'var(--lo)', lineHeight: 1.55 }}>
+          Эти карточки считаются по данным <b>нашего КДС</b>: загрузка зон кухни по
+          часам, зоны доставки и путь заказа по этапам — от готовки до передачи курьеру.
+          <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--mute)' }}>
+            iiko таких данных не отдаёт — их даёт кухонный экран. Раздел откроется,
+            когда на кухне будет наш КДС.
+          </div>
+        </div>
+      </Glass>
+    )
+  }
   if (err) {
     return (
       <Glass span={12}>
