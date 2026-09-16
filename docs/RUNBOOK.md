@@ -4,20 +4,30 @@
 > Обновлено: 2026-06-12.
 
 ## 1. Где код и как устроено
-- **Локальный путь (актуальный):** `/Users/kiluazoldik/Desktop/Work/iiiko`
+- **Локальный путь (актуальный):** `/Users/kiluazoldik/Documents/Work/iiiko`
   (раньше был `Desktop/iiiko` — переехал в `Work/`. Старый клон `~/PycharmProjects/iiko` — МЁРТВЫЙ, от 3 мая, не использовать.)
-- **GitHub:** `https://github.com/nurtirek/iiko` (репозиторий переименован из `Nurtirek/iiko`).
+- **GitHub (прод):** `https://github.com/nuriktigrkrasava-spec/iiko` — именно отсюда собирается Render.
+  `nurtirek/iiko` — СТАРЫЙ адрес, на него по-прежнему смотрит локальный `origin`, и пуш туда прод не обновляет.
+  Локальный `gh` залогинен как `nurtirek`, доступа к прод-репозиторию у него НЕТ: обычный `git push` падает с
+  `Repository not found`, что выглядит как проблема сети. Пушить токеном владельца, разово и не сохраняя:
+  `git push "https://<TOKEN>@github.com/nuriktigrkrasava-spec/iiko.git" HEAD:deploy-cashshifts`
+  (токен именно в URL: `credential.helper=osxkeychain` молча подставляет `nurtirek`). После пуша токен отозвать.
 - **Рабочая ветка:** `deploy-cashshifts` (НЕ `main`).
 - **Стек:** FastAPI (`api.py` ~4000 строк), `iiko.py` (клиент iikoServer/iikoWeb), `database.py` (SQLite, сырой sqlite3), `claude_api.py` (Anthropic Vision/чат). Фронт — единый `index.html` (Vanilla JS).
 
 ## 2. Деплой (Render)
-- Сервис **`iiko`**, serviceId `srv-d7vh5ipj2pic73eg10mg`, env Python.
+- Сервис **`iiko`**, serviceId `srv-d96bgc77f7vs73dadd50`, env Python.
+  (`srv-d7vh5ipj2pic73eg10mg` из прежней редакции неверен — API отдаёт по нему `not found`.)
 - **Auto-deploy с ветки `deploy-cashshifts`** (НЕ main!). Пуш в эту ветку триггерит сборку.
+- Render собирает то, что лежит НА ВЕТКЕ. Render API ключом код не задеплоить: `POST /deploys`
+  пересоберёт текущий коммит ветки, то есть старый код. Пуш на GitHub обязателен в любом случае.
+- Перед пушем: `cd web && npm run build` и коммит `web/dist` — FastAPI отдаёт сайт из собранной
+  папки в репозитории. Проверять деплой по имени бандла в HTML (`assets/index-*.js`).
 - **БД на проде:** persistent disk, `DB_PATH=/data/iiko_boss.db`. `ENCRYPTION_KEY` (Fernet) шифрует iiko-пароли — должен совпадать локально и на проде.
 - **Ручной деплой / статус через Render API** (нужен Render API key `rnd_…`, держится у владельца, в репо НЕ хранить):
-  - статусы: `GET https://api.render.com/v1/services/srv-d7vh5ipj2pic73eg10mg/deploys?limit=5` (заголовок `Authorization: Bearer <rnd_…>`)
+  - статусы: `GET https://api.render.com/v1/services/srv-d96bgc77f7vs73dadd50/deploys?limit=5` (заголовок `Authorization: Bearer <rnd_…>`)
   - отмена зависшей сборки: `POST .../deploys/<dep-id>/cancel`
-  - Deploy Hook (стартует сборку): `https://api.render.com/deploy/srv-d7vh5ipj2pic73eg10mg?key=<KEY>`
+  - Deploy Hook (стартует сборку): `https://api.render.com/deploy/srv-d96bgc77f7vs73dadd50?key=<KEY>`
 - **Render Shell** (Dashboard → сервис → Shell): есть `sqlite3` и `python3`, можно читать прод-БД и запускать ad-hoc скрипты.
 - Сборки иногда подвисают в `build_in_progress` — лечится отменой зависшей + повторным триггером.
 

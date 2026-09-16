@@ -8617,33 +8617,34 @@ def _fot_of_segments(segments: List[Dict[str, Any]], roles: Dict[str, Dict[str, 
     такие часы в сумму не идут, но и молчать о них нельзя: иначе неполный ФОТ
     выдавался бы за полный. Покрытие считаем в ЧАСАХ, а не в людях: кассир со
     106 часами и бухгалтер с двумя — разного веса дыры.
+
+    Считаем ПО СОТРУДНИКУ целиком, а не по отдельным отрезкам: правка за период
+    задаёт итог по человеку, и если он часть смен отработал должностью без
+    ставки, эти часы тоже закрыты — сумма по нему известна. Иначе правка сама
+    себе рисовала бы дыру и занижала покрытие.
     """
-    hours_total = hours_priced = 0.0
-    amount = 0.0
-    by_emp: Dict[str, float] = {}
-    gaps: Dict[str, float] = {}
+    by_emp: Dict[str, List[Dict[str, Any]]] = {}
     for seg in segments:
-        h = seg["hours"]
-        hours_total += h
-        eid = seg["employee_id"]
-        role = roles.get(seg["role_id"] or "") or {}
-        rate = rates.get(eid) or role.get("payment_per_hour") or 0.0
-        if rate:
-            hours_priced += h
-            by_emp[eid] = by_emp.get(eid, 0.0) + h * float(rate) * coef.get(seg["type_id"] or "", 1.0)
-        else:
-            name = role.get("name") or "без должности"
-            gaps[name] = gaps.get(name, 0.0) + h
-    for eid, sum_ in by_emp.items():
-        amount += float(overrides[eid] or 0) if eid in overrides else sum_
-    # Правка за период на того, у кого часы есть, а ставки нет: сумма теперь
-    # известна, значит и часы покрыты.
-    for eid in overrides:
-        if eid not in by_emp:
-            extra = sum(s["hours"] for s in segments if s["employee_id"] == eid)
-            if extra:
-                amount += float(overrides[eid] or 0)
-                hours_priced += extra
+        by_emp.setdefault(seg["employee_id"], []).append(seg)
+    hours_total = hours_priced = amount = 0.0
+    gaps: Dict[str, float] = {}
+    for eid, segs in by_emp.items():
+        hours = sum(s["hours"] for s in segs)
+        hours_total += hours
+        if eid in overrides:
+            amount += float(overrides[eid] or 0)
+            hours_priced += hours
+            continue
+        own = rates.get(eid)
+        for s_ in segs:
+            role = roles.get(s_["role_id"] or "") or {}
+            rate = own or role.get("payment_per_hour") or 0.0
+            if rate:
+                hours_priced += s_["hours"]
+                amount += s_["hours"] * float(rate) * coef.get(s_["type_id"] or "", 1.0)
+            else:
+                name = role.get("name") or "без должности"
+                gaps[name] = gaps.get(name, 0.0) + s_["hours"]
     return {"amount": round(amount), "priced": round(hours_priced),
             "total": round(hours_total), "unit": "hour",
             "complete": hours_total > 0 and round(hours_priced) >= round(hours_total),
@@ -8725,7 +8726,6 @@ async def _fot_by_branch(branches: List[Dict[str, str]], d_from: date, d_to: dat
             return key, None
 
     pulled = dict(await asyncio.gather(*(pull(k, orgs[0]) for k, orgs in by_server.items())))
-    rates = get_salary_rates()
     out: Dict[str, Dict[str, Any]] = {}
     for key, orgs in by_server.items():
         got = pulled.get(key)
@@ -8734,7 +8734,9 @@ async def _fot_by_branch(branches: List[Dict[str, str]], d_from: date, d_to: dat
             if not segments:
                 out[org] = _fot_from_schedule(org, d1, d2)
                 continue
-            out[org] = _fot_of_segments(segments, got[1], got[2], rates,
+            # Ставки — СВОЕГО филиала: один и тот же сотрудник на двух точках
+            # может стоить по-разному.
+            out[org] = _fot_of_segments(segments, got[1], got[2], get_salary_rates(org),
                                         get_salary_overrides(f"{org}:{d1}:{d2}"))
     return out
 
@@ -10279,7 +10281,7 @@ async def salary(org_id: str, response: Response,
     from database import get_salary_overrides
     period_key = f"{real_org}:{from_}:{to}"
     overrides = get_salary_overrides(period_key)
-    rates = get_salary_rates()
+    rates = get_salary_rates(real_org)
     rows = []
     for eid, w in worked.items():
         h, days = w["hours"], int(w["days"])
@@ -10308,18 +10310,17 @@ class SalaryOverrideIn(BaseModel):
     amount: Optional[float] = None  # None = убрать ручную правку
 
 
-# ВНИМАНИЕ (остаточный зазор, задокументирован): таблицы salary_rates/salary_overrides
-# ключуются только по employee_id (без org). Проверки ниже не дают писать демо-юзеру
-# и не-владельцу филиала, но владелец org A, узнавший employee_id из org B (iiko-UUID,
-# не перечисляем), технически может записать ставку для чужого сотрудника. Полный фикс —
-# добавить org_id в схему salary и/или проверять employee_id ∈ employees(real_org).
+# Зазор закрыт: salary_rates ключуется парой (organization_id, employee_id), а
+# salary_overrides — через period_key, в котором филиал уже есть. Запись чужому
+# employee_id теперь может испортить только СВОЙ филиал пишущего, а на чужой не
+# влияет и в чужой ФОТ не попадает.
 @app.post("/api/salary/rate")
 async def salary_rate(payload: SalaryRateIn, user: Dict = Depends(get_current_user)):
     real_org = _get_org_id(payload.org_id, user)  # 404, если вызывающий не владелец
     if real_org == "demo" or _is_demo_user(user):
         raise HTTPException(status_code=403, detail="Salary write not allowed in demo")
     from database import set_salary_rate
-    set_salary_rate(payload.employee_id, payload.rate)
+    set_salary_rate(real_org, payload.employee_id, payload.rate)
     return {"ok": True}
 
 

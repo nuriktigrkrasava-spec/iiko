@@ -2368,6 +2368,13 @@ def get_social_growth(org_id: str, platform: str, days: int = 30):
 
 # ==== Ставки для расчёта зарплаты (вкладка «Смены») ====
 
+# Ставка принадлежит ФИЛИАЛУ. Первая версия таблицы ключевалась одним
+# employee_id, то есть была общей на всю базу: владелец org A, узнавший
+# employee_id из org B (это iiko-UUID), мог перебить чужую ставку, а у двух
+# сетей на одном iiko-сервере ставки просто смешивались.
+LEGACY_RATE_ORG = ""   # строки из той версии: чей это филиал, уже не узнать
+
+
 def init_salary_db():
     conn = get_db()
     conn.executescript("""
@@ -2376,21 +2383,51 @@ def init_salary_db():
         rate REAL NOT NULL DEFAULT 0
     );
     """)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(salary_rates)")}
+    if "organization_id" not in cols:
+        # Переносим, а не пересоздаём с нуля: старые строки писал владелец для
+        # СВОИХ сотрудников, просто филиал тогда не сохранялся. Оставляем их
+        # общим запасным вариантом (organization_id = ''), чтобы уже заведённые
+        # ставки не пропали; новые пишутся сразу в свой филиал.
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS salary_rates_v2 (
+            organization_id TEXT NOT NULL,
+            employee_id TEXT NOT NULL,
+            rate REAL NOT NULL DEFAULT 0,
+            PRIMARY KEY (organization_id, employee_id)
+        );
+        """)
+        conn.execute("INSERT OR IGNORE INTO salary_rates_v2 (organization_id, employee_id, rate) "
+                     "SELECT ?, employee_id, rate FROM salary_rates", (LEGACY_RATE_ORG,))
+        conn.execute("DROP TABLE salary_rates")
+        conn.execute("ALTER TABLE salary_rates_v2 RENAME TO salary_rates")
     conn.commit()
     conn.close()
 
 
-def get_salary_rates() -> dict:
+def get_salary_rates(org_id: str) -> dict:
+    """Ставки филиала: {employee_id: rate}.
+
+    Строки без филиала (LEGACY_RATE_ORG) подмешиваются запасным вариантом и
+    проигрывают своей: пока ставку филиала не завели, старая продолжает
+    работать, а как только завели — перебивает её.
+    """
     conn = get_db()
-    rows = conn.execute("SELECT employee_id, rate FROM salary_rates").fetchall()
+    rows = conn.execute(
+        "SELECT organization_id, employee_id, rate FROM salary_rates "
+        "WHERE organization_id IN (?, ?)", (org_id, LEGACY_RATE_ORG)).fetchall()
     conn.close()
-    return {r["employee_id"]: r["rate"] for r in rows}
+    out = {r["employee_id"]: r["rate"] for r in rows
+           if r["organization_id"] == LEGACY_RATE_ORG}
+    out.update({r["employee_id"]: r["rate"] for r in rows
+                if r["organization_id"] != LEGACY_RATE_ORG})
+    return out
 
 
-def set_salary_rate(employee_id: str, rate: float):
+def set_salary_rate(org_id: str, employee_id: str, rate: float):
     conn = get_db()
-    conn.execute("INSERT OR REPLACE INTO salary_rates(employee_id, rate) VALUES(?,?)",
-                 (employee_id, rate))
+    conn.execute("INSERT OR REPLACE INTO salary_rates(organization_id, employee_id, rate) "
+                 "VALUES(?,?,?)", (org_id, employee_id, rate))
     conn.commit()
     conn.close()
 

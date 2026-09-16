@@ -483,7 +483,7 @@ def test_our_own_rate_beats_the_one_from_iiko():
     """Пока должность в iiko без ставки, её можно закрыть у себя — и наша
     ставка должна побеждать, иначе исправить чужой ноль было бы нечем."""
     from database import set_salary_rate
-    set_salary_rate("e2", 700)
+    set_salary_rate("org-a", "e2", 700)
     got = _fot([att("e2", "2026-09-14", "09:00", "19:00", "Алиева", "r-cashier", "t-day")])
     assert got["amount"] == 7000, got
     assert got["complete"] is True, got
@@ -551,6 +551,57 @@ def test_fot_of_a_broken_iiko_does_not_break_the_week():
     got = _fot(RuntimeError("iiko лежит"), org="org-down", name="Лежит")
     assert got["amount"] == 5000 and got["unit"] == "shift", got
     print("  [OK] упавший iiko не роняет вкладку, ФОТ падает на график")
+
+
+def test_a_rate_of_one_branch_does_not_leak_into_another():
+    """Ставки лежали в таблице БЕЗ organization_id — общие на всю базу. Владелец
+    org A, узнавший employee_id из org B (это iiko-UUID), мог перебить чужую
+    ставку, а у двух сетей на одном сервере ставки просто смешивались."""
+    from database import get_salary_rates, set_salary_rate
+    set_salary_rate("org-A", "shared-eid", 1000)
+    set_salary_rate("org-B", "shared-eid", 400)
+    assert get_salary_rates("org-A")["shared-eid"] == 1000
+    assert get_salary_rates("org-B")["shared-eid"] == 400
+    assert "shared-eid" not in get_salary_rates("org-C")
+    print("  [OK] ставка живёт в своём филиале и в чужой не течёт")
+
+
+def test_fot_uses_only_the_rates_of_its_own_branch():
+    """Тот же сотрудник на двух филиалах может стоить по-разному. ФОТ обязан
+    брать ставку своего филиала, а не первую попавшуюся."""
+    from database import set_salary_rate
+    set_salary_rate("org-r1", "e-dual", 1000)
+    set_salary_rate("org-r2", "e-dual", 500)
+    rows = [att("e-dual", "2026-09-14", "09:00", "19:00", "Первый", "r-cashier", "t-day"),
+            att("e-dual", "2026-09-14", "09:00", "19:00", "Второй", "r-cashier", "t-day")]
+    import asyncio as aio
+    with _iiko_attendance(rows, {"org-r1": "Первый", "org-r2": "Второй"}, ROLES, COEF):
+        got = aio.run(api._fot_by_branch(
+            [{"organization_id": "org-r1", "name": "Первый"},
+             {"organization_id": "org-r2", "name": "Второй"}],
+            date(2026, 9, 14), date(2026, 9, 20), {"id": 1}))
+    assert got["org-r1"]["amount"] == 10000, got["org-r1"]
+    assert got["org-r2"]["amount"] == 5000, got["org-r2"]
+    print("  [OK] каждый филиал считается по своей ставке: 10 000 и 5 000")
+
+
+def test_manual_correction_covers_all_hours_of_that_employee():
+    """Ручная правка суммы за период — это ИТОГ по человеку. Если он часть смен
+    отработал должностью без ставки, эти часы всё равно закрыты: сумма известна.
+    Иначе правка занижала бы покрытие и сама себе рисовала дыру."""
+    from database import set_salary_override
+    set_salary_override("e-mix", "org-ov:2026-09-14:2026-09-20", 30000)
+    rows = [att("e-mix", "2026-09-14", "09:00", "14:00", "Смесь", "r-sushi", "t-day"),
+            att("e-mix", "2026-09-15", "09:00", "14:00", "Смесь", "r-cashier", "t-day")]
+    import asyncio as aio
+    with _iiko_attendance(rows, {"org-ov": "Смесь"}, ROLES, COEF):
+        got = aio.run(api._fot_by_branch([{"organization_id": "org-ov", "name": "Смесь"}],
+                                         date(2026, 9, 14), date(2026, 9, 20), {"id": 1}))
+    assert got["org-ov"]["amount"] == 30000, got["org-ov"]
+    assert got["org-ov"]["priced"] == 10 and got["org-ov"]["total"] == 10, got["org-ov"]
+    assert got["org-ov"]["complete"] is True, got["org-ov"]
+    assert got["org-ov"]["gaps"] == [], got["org-ov"]
+    print("  [OK] правка за период закрывает все 10 ч, дыры не рисует")
 
 
 def test_fot_window_matches_the_closed_days_of_the_orders():
@@ -667,6 +718,9 @@ if __name__ == "__main__":
               test_fot_falls_back_to_the_schedule_when_iiko_has_no_attendance,
               test_fot_without_any_source_is_not_reported_as_zero,
               test_fot_of_a_broken_iiko_does_not_break_the_week,
+              test_a_rate_of_one_branch_does_not_leak_into_another,
+              test_fot_uses_only_the_rates_of_its_own_branch,
+              test_manual_correction_covers_all_hours_of_that_employee,
               test_fot_window_matches_the_closed_days_of_the_orders,
               test_fot_of_a_week_without_closed_days_asks_iiko_for_nothing,
               test_future_week_asks_iiko_for_nothing,
