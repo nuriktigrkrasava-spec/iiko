@@ -82,7 +82,26 @@ app = FastAPI(
 )
 
 # Rate limiter
-limiter = Limiter(key_func=get_remote_address)
+def _client_ip(request: Request) -> str:
+    """Адрес ПОСЕТИТЕЛЯ, а не прокси Render.
+
+    uvicorn на проде запущен без --proxy-headers, поэтому request.client.host —
+    это внутренний адрес прокси, один и тот же у всех. На нём лимитер считал
+    всех посетителей как одного: пять попыток кем угодно закрывали форму
+    регистрации для всего мира на пятнадцать минут.
+
+    Берём ПОСЛЕДНЮЮ запись X-Forwarded-For: её дописывает прокси по адресу
+    сокета. Подделать заголовок можно, но подделка окажется левее — и в ключ
+    не попадёт.
+    """
+    xff = request.headers.get("X-Forwarded-For") or ""
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    if parts:
+        return parts[-1]
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_client_ip)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -1134,7 +1153,9 @@ async def demo_trial(user: Dict = Depends(get_current_user)):
 
 
 @app.post("/api/setup/validate")
-@limiter.limit("5/15 minutes")
+# Проверка доступов — это набор адреса и пароля руками, с опечатками. Пять
+# попыток человек тратит, ещё не дойдя до своей организации.
+@limiter.limit("30/15 minutes")
 async def setup_validate(request: Request, payload: SetupValidate, user: Dict = Depends(get_current_user)):
     if DEMO_ONLY and (payload.api_login == "demo" or payload.api_login == DEMO_API_LOGIN):
         return {"valid": True, "organizations": [{"id": "demo-org-1", "name": "Демо Ресторан"}]}
@@ -1150,7 +1171,9 @@ async def setup_validate(request: Request, payload: SetupValidate, user: Dict = 
 
 
 @app.post("/api/signup")
-@limiter.limit("5/15 minutes")
+# Тут лимит строже: ручка создаёт аккаунты. Но считается он теперь по адресу
+# посетителя, а не по прокси, поэтому чужие попытки соседа не задевают.
+@limiter.limit("10/hour")
 async def site_signup(request: Request, payload: SiteSignup):
     """Регистрация прямо с сайта, без Telegram.
 

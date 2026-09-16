@@ -17,7 +17,15 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error((data as { detail?: string }).detail || `HTTP ${res.status}`)
+  if (!res.ok) {
+    // Лимитер отвечает {error}, а не {detail}, и его текст на английском.
+    // «HTTP 429» посреди формы читается как поломка, хотя это «подождите».
+    if (res.status === 429) {
+      throw new Error('Слишком много попыток подряд. Подождите пятнадцать минут и повторите.')
+    }
+    const d = data as { detail?: string; error?: string }
+    throw new Error(d.detail || d.error || `Не получилось (${res.status})`)
+  }
   return data as T
 }
 
