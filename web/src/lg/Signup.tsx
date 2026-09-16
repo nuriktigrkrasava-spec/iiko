@@ -132,26 +132,35 @@ export default function Signup({ onClose }: { onClose: () => void }) {
               <input style={inp} type="password" value={pass}
                      onChange={(e) => setPass(e.target.value)} autoComplete="off" />
             </div>
-            <Btn busy={busy} disabled={!server || !login || !pass}
-                 onClick={check}>Проверить доступы</Btn>
+            <Btn busy={busy} onClick={check}
+                 missing={!server ? 'Укажите адрес сервера'
+                   : !login ? 'Укажите логин'
+                   : !pass ? 'Укажите пароль' : ''}>Проверить доступы</Btn>
           </>
         ) : (
           <>
             <div style={{ marginTop: 16 }}>
-              <label style={lab}>Организация</label>
+              <label style={lab}>Организация — выберите свою</label>
               <select style={inp} value={org?.id || ''}
                       onChange={(e) => setOrg(orgs.find((o) => o.id === e.target.value) || null)}>
                 <option value="">Выберите…</option>
                 {orgs.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
+              <div style={{ marginTop: 6, fontSize: 12, color: 'var(--mute)' }}>
+                iiko вернул {orgs.length}{orgs.length === 1 ? ' организацию' : ' организаций'} по этим доступам.
+              </div>
             </div>
             <div style={{ marginTop: 12 }}>
               <label style={lab}>Ваш телеграм — туда придут уведомления</label>
               <input style={inp} value={tg} onChange={(e) => setTg(e.target.value)}
                      placeholder="@username" autoComplete="off" />
             </div>
-            <Btn busy={busy} disabled={!org || tg.trim().length < 4}
-                 onClick={save}>Открыть мои данные</Btn>
+            <Btn busy={busy} onClick={save}
+                 missing={!org ? 'Выберите организацию из списка выше'
+                   : tg.trim().replace(/^@/, '').length < 4
+                     ? 'Укажите телеграм — не меньше четырёх знаков' : ''}>
+              Открыть мои данные
+            </Btn>
           </>
         )}
 
@@ -171,17 +180,30 @@ export default function Signup({ onClose }: { onClose: () => void }) {
   )
 }
 
-function Btn({ busy, disabled, onClick, children }: {
-  busy: boolean; disabled: boolean; onClick: () => void; children: React.ReactNode
+/* Кнопка НЕ молчит, когда заблокирована.
+
+   Организаций у сети двадцать три, поэтому список открывается на «Выберите…».
+   Раньше до выбора кнопка просто не нажималась: человек жал, ничего не
+   происходило, и это читалось как «сайт сломан». Теперь под кнопкой всегда
+   написано, чего именно не хватает. */
+function Btn({ busy, missing, onClick, children }: {
+  busy: boolean; missing?: string; onClick: () => void; children: React.ReactNode
 }) {
+  const off = busy || !!missing
   return (
-    <button onClick={onClick} disabled={busy || disabled}
-            style={{ marginTop: 16, width: '100%', padding: '12px 16px', borderRadius: 13,
-                     border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))',
-                     color: 'var(--on-acc)', font: 'inherit', fontSize: 14, fontWeight: 700,
-                     cursor: busy || disabled ? 'default' : 'pointer',
-                     opacity: busy || disabled ? 0.55 : 1 }}>
-      {busy ? 'Проверяем…' : children}
-    </button>
+    <>
+      <button onClick={onClick} disabled={off}
+              style={{ marginTop: 16, width: '100%', padding: '12px 16px', borderRadius: 13,
+                       border: 'none', background: 'linear-gradient(135deg,var(--acc),var(--acc-2))',
+                       color: 'var(--on-acc)', font: 'inherit', fontSize: 14, fontWeight: 700,
+                       cursor: off ? 'default' : 'pointer', opacity: off ? 0.55 : 1 }}>
+        {busy ? 'Проверяем…' : children}
+      </button>
+      {!!missing && !busy && (
+        <div style={{ marginTop: 7, fontSize: 12.5, color: 'var(--amb)', textAlign: 'center' }}>
+          {missing}
+        </div>
+      )}
+    </>
   )
 }
