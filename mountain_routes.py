@@ -1,3 +1,4 @@
+from fastapi import BackgroundTasks
 """«Гора» — задачи филиалам, баллы и уровень, плюс чек-листы из чата.
 
 Доступ по личной подписанной ссылке, как у виджета и журналов: `/m/{token}`,
@@ -25,7 +26,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -41,6 +42,7 @@ from database import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+from rate_limits import limiter
 
 # ── Гора: 40 отметок по 10 баллов, вершина — 400 ─────────────────────────────
 # Считано по потолку месяца: идеальные чек-листы дают 360 баллов, задачи ещё
@@ -81,7 +83,10 @@ CHECKLIST_PENALTY = -1     # пропущенный
 
 
 def _secret() -> bytes:
-    return (os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY") or "iiko-widget-fallback").encode()
+    value = os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY")
+    if not value:
+        raise RuntimeError("Configure WIDGET_SECRET or ENCRYPTION_KEY")
+    return value.encode()
 
 
 def _sign(uid: int) -> str:
@@ -1482,7 +1487,7 @@ class NoticePayload(BaseModel):
 
 
 @router.post("/api/mountain/notice/{token}")
-async def notice_send(token: str, payload: NoticePayload):
+async def notice_send(token: str, payload: NoticePayload, background_tasks: BackgroundTasks):
     sc = scope_of_token(token)
     uid = sc["uid"]
     if not sc["valid"]:
@@ -1498,6 +1503,8 @@ async def notice_send(token: str, payload: NoticePayload):
     if org and org not in {b["organization_id"] for b in sc["branches"]}:
         return JSONResponse({"error": "чужой филиал"}, status_code=403)
     nid = add_branch_notice(text, uid, org)
+    from push_routes import send_notice
+    background_tasks.add_task(send_notice, uid, [org] if org else [b["organization_id"] for b in sc["branches"]])
     sent = await _notice_to_telegram(sc, org, text, author=uid)
     return JSONResponse({"ok": True, "id": nid, "telegram": sent})
 
@@ -1614,11 +1621,14 @@ class ChecklistPayload(BaseModel):
 
 
 @router.post("/api/mountain/checklist/{token}")
-async def checklist_upload(token: str, payload: ChecklistPayload):
+@limiter.limit("6/minute")
+async def checklist_upload(request: Request, token: str, payload: ChecklistPayload):
     sc = scope_of_token(token)
     uid = sc["uid"]
     if not sc["valid"]:
         return JSONResponse({"error": "bad token"}, status_code=404)
+    if sc.get("demo"):
+        return JSONResponse({"error": "Загрузка фото недоступна в демо"}, status_code=403)
     b = _branch_or_403(sc, payload.org)
     if not b:
         return JSONResponse({"error": "нет доступа к филиалу"}, status_code=403)
@@ -1639,11 +1649,15 @@ async def checklist_upload(token: str, payload: ChecklistPayload):
     saved: List[Dict[str, Any]] = []
     for i, raw in enumerate(payload.photos):
         try:
-            data = _b64.b64decode((raw or "").split(",", 1)[-1], validate=False)
+            data = _b64.b64decode((raw or "").split(",", 1)[-1], validate=True)
         except Exception:
             return JSONResponse({"error": "файл не читается"}, status_code=400)
         if len(data) > MAX_PHOTO_MB * 1024 * 1024:
             return JSONResponse({"error": f"кадр больше {MAX_PHOTO_MB} МБ — сожми"}, status_code=413)
+        try:
+            data, _ = _C.shrink(data)
+        except ValueError:
+            return JSONResponse({"error": "Нужно корректное фото JPEG, PNG или WebP"}, status_code=400)
         blobs.append((data, ZONES[payload.zone]))
         # В базе остаётся след кадра — хеш и вес, — но не сам кадр. Хеш ещё и
         # ключ кэша вердиктов: тот же снимок второй раз не оплачивается.

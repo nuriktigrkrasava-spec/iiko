@@ -4,6 +4,7 @@
 снапшоты рейтинга для определения динамики (упал/вырос).
 """
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,9 +17,9 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit
 BRAND_QUERY = "Saya Sushi"
 
 # Ключ публичного API отзывов 2ГИС (используется их собственным виджетом)
-REVIEWS_2GIS_KEY = "6e7e1929-4ea9-4a5d-8c05-d601860389bd"
+REVIEWS_2GIS_KEY = os.getenv("REVIEWS_2GIS_KEY", "")
 # Каталожный ключ — вытаскивается со страницы 2gis.kz; этот служит запасным
-_catalog_key_cache: Dict[str, Any] = {"key": "292d0592-6e9a-4882-b2c6-5979d678ddea", "ts": 0}
+_catalog_key_cache: Dict[str, Any] = {"key": os.getenv("CATALOG_2GIS_KEY", ""), "ts": 0}
 
 CITY_COORDS = {
     "астана": (51.1605, 71.4704),

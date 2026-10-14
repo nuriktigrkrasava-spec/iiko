@@ -1,4 +1,6 @@
 import asyncio
+from outbound_security import trusted_url, fetch_csv
+from contextlib import asynccontextmanager
 import logging
 import httpx
 import os
@@ -70,38 +72,45 @@ from foodcost_calc import compute_recipe_foodcost
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 IS_PROD = os.getenv("ENVIRONMENT") == "production"
+
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_background(coro):
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+@asynccontextmanager
+async def lifespan(app):
+    await startup()
+    try:
+        yield
+    finally:
+        pending = list(_background_tasks)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        _background_tasks.clear()
+
 
 # Swagger отключён в production
 app = FastAPI(
     title="iikoBoss Analytics",
     version="1.0.0",
+    lifespan=lifespan,
+    openapi_url=None if IS_PROD else "/openapi.json",
     docs_url=None if IS_PROD else "/docs",
     redoc_url=None if IS_PROD else "/redoc",
 )
 
-# Rate limiter
-def _client_ip(request: Request) -> str:
-    """Адрес ПОСЕТИТЕЛЯ, а не прокси Render.
-
-    uvicorn на проде запущен без --proxy-headers, поэтому request.client.host —
-    это внутренний адрес прокси, один и тот же у всех. На нём лимитер считал
-    всех посетителей как одного: пять попыток кем угодно закрывали форму
-    регистрации для всего мира на пятнадцать минут.
-
-    Берём ПОСЛЕДНЮЮ запись X-Forwarded-For: её дописывает прокси по адресу
-    сокета. Подделать заголовок можно, но подделка окажется левее — и в ключ
-    не попадёт.
-    """
-    xff = request.headers.get("X-Forwarded-For") or ""
-    parts = [p.strip() for p in xff.split(",") if p.strip()]
-    if parts:
-        return parts[-1]
-    return get_remote_address(request)
-
-
-limiter = Limiter(key_func=_client_ip)
+from rate_limits import limiter, _client_ip
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -347,7 +356,7 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None, al
             return {"id": sc["uid"], "username": "site", "first_name": "Site",
                     "only_org": sc["org"]}
         raise HTTPException(status_code=401, detail="Ссылка недействительна")
-    if not BOT_TOKEN:
+    if not BOT_TOKEN and not IS_PROD:
         # dev-режим без Telegram: DEV_TID позволяет действовать как владелец
         # (видеть его реальные филиалы из локальной БД). По умолчанию 0.
         dev_tid = int(os.getenv("DEV_TID", "0") or 0)
@@ -1027,8 +1036,7 @@ def _iiko_unavailable() -> Dict[str, Any]:
 def _check_required_secrets() -> None:
     """Fail-closed в проде: без BOT_TOKEN авторизация отключается (все становятся
     user id 0), без ENCRYPTION_KEY пароли iiko пишутся в БД открытым текстом.
-    Лучше не подняться, чем тихо работать дырявым. Webhook-секрет — громкое
-    предупреждение (его отсутствие открывает вебхук, но не валит прод)."""
+    Лучше не подняться, чем тихо работать без защиты вебхука."""
     if not IS_PROD:
         return
     missing = []
@@ -1036,14 +1044,12 @@ def _check_required_secrets() -> None:
         missing.append("TELEGRAM_BOT_TOKEN (без него авторизация выключена)")
     if not os.getenv("ENCRYPTION_KEY"):
         missing.append("ENCRYPTION_KEY (без него пароли iiko в БД открытым текстом)")
+    if not TELEGRAM_WEBHOOK_SECRET:
+        missing.append("TELEGRAM_WEBHOOK_SECRET (без него нельзя проверить отправителя)")
     if missing:
         raise RuntimeError("Отказ запуска (fail-closed): не заданы " + "; ".join(missing))
-    if not TELEGRAM_WEBHOOK_SECRET:
-        logger.warning("[security] TELEGRAM_WEBHOOK_SECRET не задан — вебхук бота "
-                       "принимает запросы без проверки. Задайте секрет в проде.")
 
 
-@app.on_event("startup")
 async def startup():
     _check_required_secrets()
     init_db()
@@ -1052,30 +1058,30 @@ async def startup():
     init_salary_db()
     init_salary_overrides_db()
     # Фоновый планировщик воскресного отчёта ген.директору
-    asyncio.create_task(_weekly_report_scheduler())
+    _start_background(_weekly_report_scheduler())
     # Понедельничные итоги недели — каждому владельцу по его филиалам
-    asyncio.create_task(_weekly_users_report_scheduler())
+    _start_background(_weekly_users_report_scheduler())
     # Ночная сводка кассовых смен (00:05)
-    asyncio.create_task(_daily_shifts_scheduler())
+    _start_background(_daily_shifts_scheduler())
     # Утренняя сводка: вчерашняя выручка, сравнения, прогноз месяца, стоп-лист
-    asyncio.create_task(_morning_report_scheduler())
+    _start_background(_morning_report_scheduler())
     # Триггеры в течение дня: касса молчит / выручка проваливается
-    asyncio.create_task(_trigger_scheduler())
+    _start_background(_trigger_scheduler())
     # Журналы: задание на слот тем, кто ещё не сдал
-    asyncio.create_task(_journal_scheduler())
+    _start_background(_journal_scheduler())
     # Ежедневная сводка владельцу — на ОБОИХ деплоях: демо шлёт юзеров,
     # основной — квоты накладных (см. _build_stats_text, БД у сервисов разные).
-    asyncio.create_task(_daily_stats_scheduler())
+    _start_background(_daily_stats_scheduler())
     # Ночная оценка филиалов + вторничная средняя
-    asyncio.create_task(_daily_scores_scheduler())
+    _start_background(_daily_scores_scheduler())
     # Опоздания сотрудников: управляющему сразу, владельцу — сводка в 21:00.
     # За рубильником: без реальных telegram id управляющих слать некому.
     if os.getenv("LATE_ALERTS") == "1":
-        asyncio.create_task(_late_alerts_scheduler())
+        _start_background(_late_alerts_scheduler())
     # «Завтра у вас смена» — сотрудникам, привязавшим личную ссылку
-    asyncio.create_task(_shift_reminders_scheduler())
+    _start_background(_shift_reminders_scheduler())
     if DEMO_ONLY:
-        asyncio.create_task(_demo_sales_scheduler())
+        _start_background(_demo_sales_scheduler())
 
 
 # ── Сайт ──
@@ -1152,11 +1158,17 @@ async def demo_trial(user: Dict = Depends(get_current_user)):
     return _demo_trial_state(int(user.get("id", 0) or 0))
 
 
+def _require_network_owner(user):
+    if user.get("only_org"):
+        raise HTTPException(status_code=403, detail="Требуется доступ владельца сети")
+
+
 @app.post("/api/setup/validate")
 # Проверка доступов — это набор адреса и пароля руками, с опечатками. Пять
 # попыток человек тратит, ещё не дойдя до своей организации.
 @limiter.limit("30/15 minutes")
 async def setup_validate(request: Request, payload: SetupValidate, user: Dict = Depends(get_current_user)):
+    _require_network_owner(user)
     if DEMO_ONLY and (payload.api_login == "demo" or payload.api_login == DEMO_API_LOGIN):
         return {"valid": True, "organizations": [{"id": "demo-org-1", "name": "Демо Ресторан"}]}
     try:
@@ -1219,9 +1231,24 @@ async def site_signup(request: Request, payload: SiteSignup):
 
 @app.post("/api/setup/save")
 async def setup_save(payload: SetupSave, user: Dict = Depends(get_current_user)):
+    _require_network_owner(user)
+    # /validate is optional client UI, not an authorization boundary.
+    # Recheck credentials and organization before granting access to local records.
+    demo_setup = DEMO_ONLY and payload.organization_id == "demo-org-1" and payload.api_login in ("demo", DEMO_API_LOGIN)
+    organization_name = "Демо Ресторан"
+    if not demo_setup:
+        try:
+            client = get_client(payload.api_login, payload.iiko_server, payload.api_password)
+            organizations = await client.get_organizations()
+        except Exception:
+            raise HTTPException(status_code=400, detail="iiko не подтвердил доступ к организации")
+        matched = next((o for o in organizations if o.get("id") == payload.organization_id), None)
+        if not matched:
+            raise HTTPException(status_code=403, detail="Эта организация недоступна по указанным реквизитам")
+        organization_name = matched.get("name") or payload.organization_id
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
-    add_restaurant(tid, payload.api_login, payload.organization_id, payload.organization_name,
+    add_restaurant(tid, payload.api_login, payload.organization_id, organization_name,
                    payload.iiko_server, payload.api_password, payload.cloud_api_login)
     set_demo_mode(tid, 0)
     return {"success": True}
@@ -1404,6 +1431,7 @@ async def hall(org_id: str, user: Dict = Depends(get_current_user)):
 
 @app.delete("/api/restaurants/{rest_id}")
 async def remove_restaurant(rest_id: int, user: Dict = Depends(get_current_user)):
+    _require_network_owner(user)
     delete_restaurant(rest_id, user.get("id", 0))
     return {"success": True}
 
@@ -1421,6 +1449,7 @@ async def enable_demo(user: Dict = Depends(get_current_user)):
 @app.post("/api/logout")
 async def logout(user: Dict = Depends(get_current_user)):
     """Полный логаут: удаляем все рестораны юзера + сбрасываем демо-флаг."""
+    _require_network_owner(user)
     tid = user.get("id", 0)
     create_user(tid, user.get("username"), user.get("first_name"))
     n = delete_all_restaurants(tid)
@@ -1788,6 +1817,12 @@ async def widget(org_id: str, response: Response, user: Dict = Depends(get_curre
 # ==== «Гора»: задачи филиалам, баллы, чек-листы. Доступ по личной ссылке ====
 import mountain_routes
 app.include_router(mountain_routes.router)
+import push_routes
+app.include_router(push_routes.router)
+import native_staff_auth
+app.include_router(native_staff_auth.router)
+import native_join_auth
+app.include_router(native_join_auth.router)
 
 
 @app.get("/api/mountain/links")
@@ -1960,13 +1995,14 @@ async def mountain_propose(token: str, force: bool = Query(False),
 @app.post("/api/widget/token")
 async def widget_token(request: Request, user: Dict = Depends(get_current_user)):
     """Личная ссылка на виджет владельца + ссылки по каждому филиалу."""
+    _require_network_owner(user)
     uid = int(user.get("id", 0) or 0)
     if not uid:
         raise HTTPException(status_code=401, detail="no user")
     t = widget_routes.widget_token_for(uid)
     base = str(request.base_url).rstrip("/")
     branches = [{"id": o["organization_id"], "name": o["organization_name"],
-                 "url": f"{base}/w/{t}/{o['organization_id']}"}
+                 "url": f"{base}/w/{widget_routes.widget_branch_token_for(uid, o['organization_id'])}/{o['organization_id']}"}
                 for o in get_restaurants(uid)]
     return {"token": t, "url": f"{base}/w/{t}", "branches": branches}
 
@@ -2006,7 +2042,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             return r.get("data", [])
         except Exception as e:
             logger.warning(f"[dashboard] {real_org}: {e}")
-            return []
+            raise
 
     # Выручка = кассовые смены (операционный день), как в кассе. SALES OLAP режет
     # по дате открытия заказа и расходится с кассой; смены — эталон. Каждый филиал
@@ -2016,7 +2052,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
     # иначе цифры на графике и в карточке расходятся.
     today = local_now().date()
     chart_days = [(today - timedelta(days=i)) for i in range(6, -1, -1)]
-    win_from = min(date_from, chart_days[0].isoformat())
+    win_from = min(date_from, chart_days[0].isoformat(), today.replace(day=1).isoformat())
     win_to = max(date_to, today.isoformat())
 
     async def fetch_sessions(real_org: str):
@@ -2042,7 +2078,7 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
         all_rows = [row for batch in results for row in batch]
         # Откат считаем по оплаченному, а не по проданному до скидок: иначе при
         # отказе от смен выручка филиала подскакивает на величину всех скидок.
-        olap_total = sum(float(r.get("DishDiscountSumInt") or r.get("DishAmountSum") or 0)
+        olap_total = sum(float(r.get("DishDiscountSumInt") if r.get("DishDiscountSumInt") is not None else r.get("DishAmountSum") or 0)
                          for r in all_rows)
         guests = sum(float(r.get("GuestNum") or 0) for r in all_rows)
         orders = sum(float(r.get("OrdersCount") or 0) for r in all_rows)
@@ -2061,14 +2097,14 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
 
         # график: те же смены, что и карточка; без смен — OLAP
         per_day: Dict[str, float] = {}
-        if got_sessions:
+        if got_sessions and len(got_sessions) == len(orgs):
             for s in all_sessions:
                 d = _sess_day(s)
                 per_day[d] = per_day.get(d, 0.0) + float(s.get("payOrders") or 0)
         else:
             for r in all_rows:
                 d = str(r.get("OpenDate.Typed") or "")[:10]
-                per_day[d] = per_day.get(d, 0.0) + float(r.get("DishAmountSum") or 0)
+                per_day[d] = per_day.get(d, 0.0) + float(r.get("DishDiscountSumInt") if r.get("DishDiscountSumInt") is not None else r.get("DishAmountSum") or 0)
 
         # Дни графика = выбранный период, иначе сумма столбцов не сходится с
         # карточкой. Однодневные периоды (Сегодня/Вчера/Позавчера) — один столбец
@@ -2093,6 +2129,11 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
                           for g in groups],
                  "highlight": highlight}
 
+        forecast = None
+        if got_sessions and len(got_sessions) == len(orgs) and today.day > 1:
+            month_closed_total = sum(float(s.get("payOrders") or 0) for s in all_sessions
+                if today.replace(day=1).isoformat() <= _sess_day(s) < today.isoformat())
+            forecast = round(month_closed_total / (today.day - 1) * calendar.monthrange(today.year, today.month)[1], 2)
         resp = {
             "revenue_today": total,
             "revenue_change": 0,
@@ -2102,7 +2143,8 @@ async def dashboard(org_id: str, response: Response, period: str = "today",
             "guests_change": 0,
             "open_orders": orders,
             "revenue_yesterday": 0,
-            "forecast": total * 1.4,
+            "forecast": forecast,
+            "forecast_method": "monthly_closed_days" if forecast is not None else "unavailable",
             "chart_7days": chart,
             "branches_count": len(orgs),
             # Откуда взялась выручка: смены (как в кассе) или откат на OLAP.
@@ -2730,6 +2772,7 @@ async def chaspik_export(
 ) -> dict:
     """Прокси к saya-kds /admin/analytics/export. Виден только CHASPIK_TG_IDS.
     Ключ X-API-Key держим на бэке и не отдаём во фронт."""
+    _require_network_owner(user)
     # Карточки считаются по данным НАШЕГО КДС (saya-kds) и остаются закрытыми
     # для всех остальных. Текст человеческий: «forbidden» на экране выглядит
     # поломкой продукта, хотя это не поломка, а другой продукт.
@@ -2857,6 +2900,14 @@ async def foodcost(org_id: str, period: str = "month", compute: int = 0, user: D
     except Exception as e:
         print(f"[foodcost] {e}")
         return _iiko_unavailable()
+
+
+# Static path must precede /expenses/{org_id}; otherwise "manual" is parsed as an org.
+@app.get("/api/expenses/manual")
+async def list_manual_expenses(org_id: str, date_from: str, date_to: str, user: Dict = Depends(get_current_user)):
+    _get_org_id(org_id, user)  # проверка доступа
+    items = get_manual_expenses(org_id, date_from, date_to)
+    return {"items": items}
 
 
 @app.get("/api/expenses/{org_id}")
@@ -3324,6 +3375,7 @@ async def weekly_user_report_preview(
         user: Dict = Depends(get_current_user)):
     """Предпросмотр понедельничного отчёта: юзер видит ТОЛЬКО свой (по своим
     филиалам), чужие данные недоступны. send=true — прислать себе в Telegram."""
+    _require_network_owner(user)
     tg_id = int(user.get("id", 0))
     owner_rests = [r for r in get_all_restaurants()
                    if int(r.get("telegram_id") or 0) == tg_id]
@@ -3336,60 +3388,6 @@ async def weekly_user_report_preview(
     if send:
         result["sent"] = await _tg_send(tg_id, text) is not None
     return result
-
-
-# ── ВРЕМЕННОЕ: миграция SQLite между хостингами ──
-# Включается ТОЛЬКО env-переменной MIGRATE_TOKEN (fail-closed: без неё 404).
-# dump — целостная копия БД (sqlite backup) на скачивание; restore — принять
-# файл БД и подменить DB_PATH (после restore сервис нужно перезапустить).
-# После переезда: удалить env MIGRATE_TOKEN, затем выпилить этот блок.
-MIGRATE_TOKEN = os.getenv("MIGRATE_TOKEN", "")
-
-
-def _migrate_auth(token: str):
-    if not MIGRATE_TOKEN or not hmac.compare_digest(token.encode(), MIGRATE_TOKEN.encode()):
-        raise HTTPException(status_code=404, detail="Not Found")
-
-
-@app.get("/api/admin/migrate/dump")
-async def migrate_dump(token: str = Query("")):
-    _migrate_auth(token)
-    import sqlite3 as _sq
-    from database import DB_PATH as _dbp
-    dst = _dbp + ".dump"
-    src = _sq.connect(_dbp)
-    out = _sq.connect(dst)
-    with out:
-        src.backup(out)
-    out.close(); src.close()
-    return FileResponse(dst, filename="db.sqlite",
-                        media_type="application/octet-stream")
-
-
-@app.post("/api/admin/migrate/restore")
-async def migrate_restore(request: Request, token: str = Query("")):
-    _migrate_auth(token)
-    import sqlite3 as _sq
-    from database import DB_PATH as _dbp
-    body = await request.body()
-    if not body.startswith(b"SQLite format 3\x00"):
-        raise HTTPException(status_code=400, detail="not a sqlite db")
-    tmp = _dbp + ".incoming"
-    with open(tmp, "wb") as f:
-        f.write(body)
-    con = _sq.connect(tmp)
-    n = con.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
-    con.close()
-    if not n:
-        raise HTTPException(status_code=400, detail="empty db")
-    # хвосты WAL от старого файла не должны примениться к новому
-    for suf in ("-wal", "-shm"):
-        try:
-            os.remove(_dbp + suf)
-        except FileNotFoundError:
-            pass
-    os.replace(tmp, _dbp)
-    return {"ok": True, "tables": n, "bytes": len(body)}
 
 
 @app.get("/api/withdrawals/{org_id}")
@@ -3776,6 +3774,17 @@ def _parse_plan_csv(text: str, org_name: str):
     return plan, date2week, week_meta
 
 
+def _plan_order_count(value) -> int:
+    """A missing/invalid order count is unavailable data, never a zero."""
+    import math
+    if isinstance(value, bool) or value is None:
+        raise ValueError("Missing order count")
+    count = float(value)
+    if not math.isfinite(count) or count < 0 or not count.is_integer():
+        raise ValueError("Invalid order count")
+    return int(count)
+
+
 @app.post("/api/plan/{org_id}")
 async def plan_set_link(org_id: str, payload: Dict[str, Any],
                         user: Dict = Depends(get_current_user)):
@@ -3784,8 +3793,9 @@ async def plan_set_link(org_id: str, payload: Dict[str, Any],
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
-    if url and not url.lower().startswith("http"):
-        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с http")
+    if url:
+        try: trusted_url(_gsheet_csv_url(url), 'csv')
+        except ValueError as error: raise HTTPException(status_code=400, detail=str(error))
     set_plan_url(real_org, url)
     return {"ok": True, "url": url}
 
@@ -3812,8 +3822,7 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
     week_meta: Dict[int, Dict[str, str]] = {}
     plan_error = None
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as cli:
-            resp = await cli.get(_gsheet_csv_url(url))
+        resp = await fetch_csv(_gsheet_csv_url(url))
         if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
             plan, date2week, week_meta = _parse_plan_csv(resp.text, org_name)
             if not any(plan[b] for b in PLAN_BUCKETS):
@@ -3827,21 +3836,26 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
 
     # 2) Факт из iiko — один OLAP по филиалу, бакечим по неделям той же карты
     fact: Dict[str, Dict[int, float]] = {b: {} for b in PLAN_BUCKETS}
+    fact_error = None
     try:
         client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
         res = await client.olap_report(
             _olap_dept(real_org, info), f"{yr}-01-01", f"{yr}-12-31",
             group_by=["OrderType.Name", "OpenDate.Typed"], aggregates=["OrdersCount"]
         )
-        for d in res.get("data", []):
+        if not isinstance(res, dict) or not isinstance(res.get("data"), list) or res.get("_iiko_error"):
+            raise ValueError("Incomplete iiko order report")
+        for d in res["data"]:
+            count = _plan_order_count(d.get("OrdersCount"))
             bucket = _plan_bucket(d.get("OrderType.Name"))
             iso = (d.get("OpenDate.Typed") or "")[:10]
             week = date2week.get(iso)
             if not bucket or week is None:
                 continue
-            fact[bucket][week] = fact[bucket].get(week, 0.0) + float(d.get("OrdersCount", 0) or 0)
+            fact[bucket][week] = fact[bucket].get(week, 0.0) + count
     except Exception as e:
         logger.warning(f"[plan] olap failed org={real_org}: {e}")
+        fact_error = "Факт iiko недоступен. План сохранён; обновите данные позже."
 
     # 3) Сборка недельной таблицы (только недели, где ЕСТЬ план — это план-период)
     rows_out = []
@@ -3854,8 +3868,8 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
         has_plan = False
         for b in PLAN_BUCKETS:
             p = round(plan[b].get(wk, 0))
-            f = round(fact[b].get(wk, 0))
-            pct = round(f / p * 100) if p else None
+            f = round(fact[b].get(wk, 0)) if fact_error is None else None
+            pct = round(f / p * 100) if p and f is not None else None
             bk[b] = {"plan": p, "fact": f, "pct": pct}
             if p:
                 has_plan = True
@@ -3869,6 +3883,8 @@ async def plan_comparison(org_id: str, year: Optional[int] = Query(None),
         "buckets": PLAN_BUCKETS,
         "rows": rows_out,
         "error": plan_error,
+        "fact_status": "unavailable" if fact_error else "available",
+        "fact_error": fact_error,
     }
 
 
@@ -4029,8 +4045,9 @@ async def clients_set_link(org_id: str, payload: Dict[str, Any],
         return {"ok": False, "error": "demo"}
     real_org = _get_org_id(org_id, user)
     url = (payload.get("url") or "").strip()
-    if url and not url.lower().startswith("http"):
-        raise HTTPException(status_code=400, detail="Ссылка должна начинаться с http")
+    if url:
+        try: trusted_url(_gsheet_csv_url(url), 'csv')
+        except ValueError as error: raise HTTPException(status_code=400, detail=str(error))
     set_client_url(real_org, url)
     return {"ok": True, "url": url}
 
@@ -4060,8 +4077,7 @@ async def clients_loyalty(org_id: str, source: str = "iiko", period: str = "year
         agg: Dict[str, Dict[str, float]] = {}
         error = None
         try:
-            async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as cli:
-                resp = await cli.get(_gsheet_csv_url(url))
+            resp = await fetch_csv(_gsheet_csv_url(url))
             if resp.status_code == 200 and "text/csv" in resp.headers.get("content-type", ""):
                 agg = _parse_clients_csv(resp.text, org_name)
                 if not agg:
@@ -4204,13 +4220,6 @@ async def create_manual_expense(org_id: str, payload: ExpenseCreate, user: Dict 
     return {"success": True}
 
 
-@app.get("/api/expenses/manual")
-async def list_manual_expenses(org_id: str, date_from: str, date_to: str, user: Dict = Depends(get_current_user)):
-    _get_org_id(org_id, user)  # проверка доступа
-    items = get_manual_expenses(org_id, date_from, date_to)
-    return {"items": items}
-
-
 @app.delete("/api/expenses/manual/{exp_id}")
 async def remove_manual_expense(exp_id: int, org_id: str, user: Dict = Depends(get_current_user)):
     _get_org_id(org_id, user)  # проверка доступа
@@ -4279,6 +4288,7 @@ async def export_report(report_type: str, org_id: str = "demo-org-1", period: st
 async def export_send(request: Request, payload: ExportSendPayload,
                       user: Dict = Depends(get_current_user)):
     """Отправляет CSV/текстовый файл в чат с пользователем через бота."""
+    _require_network_owner(user)
     chat_id = user.get("id")
     if not chat_id:
         raise HTTPException(status_code=400, detail="no chat_id")
@@ -4328,6 +4338,7 @@ class InvoiceEditPayload(BaseModel):
 async def invoice_edit_get(pending_id: str, user: Dict = Depends(get_current_user)):
     """Возвращает данные pending-накладной для редактирования в Mini App.
     Доступ только владельцу (по telegram_id из initData)."""
+    _require_network_owner(user)
     pending = _get_pending_by_id(pending_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending invoice not found or expired")
@@ -4360,6 +4371,7 @@ async def invoice_edit_post(pending_id: str, payload: InvoiceEditPayload,
     """Принимает обновлённую накладную из Mini App (fallback к WebApp.sendData).
     После обновления pending — бот сам перерисует превью при следующем callback'е,
     но для лучшего UX делаем edit прямо здесь."""
+    _require_network_owner(user)
     pending = _get_pending_by_id(pending_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Pending invoice not found")
@@ -4458,6 +4470,7 @@ async def invoice_recognize(org_id: str, payload: RecognizePayload,
     исправлений → скоринг по словам) по локальной базе закупаемых товаров.
     В iiko отсюда ничего не уходит: это разбор, отправку делает оператор.
     """
+    _get_org_id(org_id, user)  # Authorize before decoding or paid OCR.
     # base64, а не multipart: python-multipart в зависимостях нет, а падать
     # на импорте из-за одной ручки нельзя — это уронило бы весь сервис.
     if not payload.images:
@@ -6945,9 +6958,11 @@ async def _handle_demo_registration(chat_id: int, telegram_id: int, username: st
 @app.post("/telegram/webhook")
 async def telegram_webhook(request: Request):
     """Обработчик сообщений и callback_query Telegram бота."""
-    if TELEGRAM_WEBHOOK_SECRET:
-        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != TELEGRAM_WEBHOOK_SECRET:
-            raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    if not TELEGRAM_WEBHOOK_SECRET or not hmac.compare_digest(
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token", "").encode(),
+        (TELEGRAM_WEBHOOK_SECRET or "").encode()
+    ):
+        raise HTTPException(status_code=403, detail="Invalid webhook secret")
     try:
         data = await request.json()
 
@@ -7291,6 +7306,15 @@ async def telegram_webhook(request: Request):
             raw_source = parts[1].strip() if len(parts) > 1 else ""
             source = re.sub(r"[^0-9A-Za-z_\-]", "", raw_source)[:64] or "direct"
 
+            # Native app: Telegram only confirms identity; the app keeps its own secret.
+            if source.startswith("nativejoin_"):
+                await native_join_auth.handle_bot_start(source, chat_id, telegram_id, request)
+                return {"ok": True}
+
+            if source.startswith("native_"):
+                await native_staff_auth.handle_bot_start(source, chat_id, telegram_id, request)
+                return {"ok": True}
+
             # Мини-апп смен. Обычная https-ссылка сюда не годится: открытая
             # даже внутри Telegram, она попадает во встроенный браузер, а не в
             # Mini App, и подписи там нет. Поэтому сотрудник приходит к боту, а
@@ -7600,8 +7624,7 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
 # ==== Отзывы с внешних площадок (2ГИС, Wolt) ====
@@ -7696,6 +7719,7 @@ class ReviewBrandIn(BaseModel):
 @app.post("/api/reviews/brand")
 async def set_review_brand(payload: ReviewBrandIn, user: Dict = Depends(get_current_user)):
     """Название бренда для поиска точек на площадках отзывов (для любых клиентов)."""
+    _require_network_owner(user)
     set_app_state(f"review_brand:{user.get('id', 0)}", payload.brand.strip()[:60])
     return {"ok": True}
 
@@ -8190,7 +8214,7 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
             # прошлый снимок → «стало лучше, чем было»; затем кладём текущий.
             # Снимок пишем ПОСЛЕ чтения, иначе сравнивали бы сами с собой.
             snap = get_signal_snapshot(tid, r["name"]) if tid else None
-            if snap:
+            if snap and os.getenv("ASSISTANT_SNAPSHOT_OWNER_ID") == str(user.get("id", 0)):
                 r["prev"] = {"taken_at": snap["taken_at"], **snap["payload"]}
             if tid:
                 save_signal_snapshot(tid, r["name"], _snapshot_of(r))
@@ -8384,6 +8408,7 @@ async def director_plan(org_id: str, user: Dict = Depends(get_current_user)):
 @app.get("/api/assistant")
 async def assistant(user: Dict = Depends(get_current_user)):
     """Проактивные советы ИИ-ассистента по всем филиалам залогиненного клиента."""
+    _require_network_owner(user)
     # демо-режим: не зовём Claude, отдаём демо-советы
     rests = get_restaurants(user.get("id", 0))
     if not rests or _use_demo_data(user, (rests[0].get("organization_id") if rests else "demo-org-1")):
@@ -8395,7 +8420,7 @@ async def assistant(user: Dict = Depends(get_current_user)):
     # недоступна (кончился баланс), а показать живой разбор надо сейчас —
     # отдаём последний удачный ответ вместо шаблонных правил.
     snap = os.getenv("ASSISTANT_SNAPSHOT")
-    if snap:
+    if snap and os.getenv("ASSISTANT_SNAPSHOT_OWNER_ID") == str(user.get("id", 0)):
         try:
             with open(snap, encoding="utf-8") as f:
                 return json.load(f)
@@ -8488,21 +8513,34 @@ async def plan_get(org_id: str, month: Optional[str] = None, user: Dict = Depend
         if wk in plan and r["ch_type"] in PLAN_TYPES:
             plan[wk][r["ch_type"]] = r["planned"]
 
-    fact = _empty_plan_grid(weeks)
+    fact = {str(w["widx"]): {t: None for t in PLAN_TYPES} for w in weeks}
+    fact_errors = {}
 
     async def _wk_fact(w):
         f = {t: 0 for t in PLAN_TYPES}
         try:
-            s = await sales(org_id, "custom", w["from"], w["to"], None, user=user)
-            for c in s.get("channels", []):
-                f[_classify_channel(c.get("name"))] += int(c.get("orders", 0) or 0)
+            # The sales presentation endpoint swallows individual OLAP failures.
+            # Query order counts directly so an outage cannot become an empty sale.
+            info = _get_restaurant_info(real_org, user)
+            client = get_client(info["api_login"], info.get("iiko_server"), info.get("api_password"))
+            result = await client.olap_report(_olap_dept(real_org, info), w["from"], w["to"],
+                group_by=["OrderType.Name"], aggregates=["OrdersCount"])
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list) or result.get("_iiko_error"):
+                raise ValueError("Incomplete iiko order report")
+            for c in result["data"]:
+                f[_classify_channel(c.get("OrderType.Name"))] += _plan_order_count(c.get("OrdersCount"))
+            return w["widx"], f, None
         except Exception as e:
             logger.warning(f"[plan] факт неделя {w['widx']} {real_org}: {e!r}")
-        return w["widx"], f
+            return w["widx"], {t: None for t in PLAN_TYPES}, "Факт iiko за эту неделю недоступен."
 
-    for widx, f in await asyncio.gather(*(_wk_fact(w) for w in weeks)):
+    for widx, f, error in await asyncio.gather(*(_wk_fact(w) for w in weeks)):
         fact[str(widx)] = f
-    return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": False}
+        if error:
+            fact_errors[str(widx)] = error
+    return {"month": ym, "weeks": weeks, "types": PLAN_TYPES, "plan": plan, "fact": fact, "demo": False,
+            "fact_status": ("unavailable" if len(fact_errors) == len(weeks) else "partial") if fact_errors else "available",
+            "fact_errors": fact_errors}
 
 
 # ============ ПЛАН ПО ДНЯМ НЕДЕЛИ (вкладка «План» = таблица владельца) ============
@@ -9521,9 +9559,12 @@ async def attendance_mark(org_id: str, payload: AttendanceMarkIn,
 async def get_staff(
     x_staff_code: Optional[str] = Header(None, alias="X-Staff-Code"),
     x_telegram_init_data: Optional[str] = Header(None, alias="X-Telegram-Init-Data"),
+    x_native_session: Optional[str] = Header(None, alias="X-Native-Session"),
 ) -> Dict[str, Any]:
     """Кто из сотрудников спрашивает: {org, employee_id, name, telegram_id}."""
     from database import staff_access_by_code, bind_staff_access
+    if isinstance(x_native_session, str):
+        return native_staff_auth.authenticate(x_native_session)
     if not x_staff_code:
         raise HTTPException(status_code=401, detail="Нужна личная ссылка")
     row = staff_access_by_code(x_staff_code)
@@ -11398,6 +11439,7 @@ async def admin_branches(user: Dict = Depends(get_current_user)):
     Только владельцу: управляющий видит свой филиал в мини-аппе, но раздавать
     доступы и смотреть чужие отметки не должен.
     """
+    _require_network_owner(user)
     tid = int(user.get("id", 0) or 0)
     owned = [r for r in get_all_restaurants() if r["telegram_id"] == tid]
     if not owned:
@@ -11593,3 +11635,7 @@ async def site_files(path: str):
     if os.path.exists(index):
         return FileResponse(index, headers={"Cache-Control": "no-store, must-revalidate"})
     raise HTTPException(status_code=404, detail="Not Found")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
