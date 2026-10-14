@@ -1,5 +1,7 @@
 
 import httpx
+import os
+from outbound_security import trusted_url
 import asyncio
 import hashlib
 import re
@@ -26,6 +28,8 @@ def _normalize_iiko_url(url: str) -> str:
     # iikoServer endpoints always live under /resto
     if not u.endswith("/resto"):
         u = u + "/resto"
+    if os.getenv("ENVIRONMENT") == "production":
+        trusted_url(u, "iiko")
     return u
 
 
@@ -532,7 +536,7 @@ class IikoWebClient:
     supports_cost = False  # DishCostSumInt нет в iikoWeb без отдельной лицензии
 
     def __init__(self, base_url: str, login: str, password: str):
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _normalize_iiko_url(base_url)
         self.login = login
         self.password = password
         self.token: Optional[str] = None
@@ -555,7 +559,7 @@ class IikoWebClient:
                 return self.token
             host = urlparse(self.base_url).hostname or self.base_url
             try:
-                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                     resp = await client.get(
                         f"{self.base_url}/api/auth",
                         params={"login": self.login, "pass": self._sha1(self.password)}
@@ -669,7 +673,7 @@ class IikoWebClient:
 
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/v2/reports/olap",
                     params={"key": token},
@@ -704,7 +708,7 @@ class IikoWebClient:
         }
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/v2/reports/olap",
                     params={"key": token}, json=payload
@@ -754,7 +758,7 @@ class IikoWebClient:
         }
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=90.0, verify=True) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/v2/reports/olap",
                     params={"key": token}, json=payload
@@ -786,7 +790,7 @@ class IikoWebClient:
         }
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=90.0, verify=True) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/v2/reports/olap",
                     params={"key": token}, json=payload
@@ -818,7 +822,7 @@ class IikoWebClient:
         }
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=90.0, verify=True) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/v2/reports/olap",
                     params={"key": token}, json=payload
@@ -838,7 +842,7 @@ class IikoWebClient:
         """Список торговых точек (DEPARTMENT) из iikoWeb."""
         import xml.etree.ElementTree as ET
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
             resp = await client.get(
                 f"{self.base_url}/api/corporation/departments",
                 params={"key": token}
@@ -886,7 +890,7 @@ class IikoWebClient:
     async def get_products(self) -> List[Dict[str, Any]]:
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/v2/entities/products/list",
                     params={"key": token, "includeDeleted": "false"}
@@ -906,7 +910,7 @@ class IikoWebClient:
         """Развёрнутая техкарта блюда на дату → [{productId, amount(норма на 1 порцию)}]."""
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/v2/assemblyCharts/getPrepared",
                     params={"key": token, "date": date, "productId": product_id}
@@ -929,7 +933,7 @@ class IikoWebClient:
         """Сырые остатки складов на дату: [{store, product, amount, sum}]. timestamp — 'YYYY-MM-DDTHH:MM:SS.000'."""
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=90.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=90.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/v2/reports/balance/stores",
                     params={"key": token, "timestamp": timestamp}
@@ -947,7 +951,7 @@ class IikoWebClient:
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.000")
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/v2/reports/balance/stores",
                     params={"key": token, "timestamp": ts}
@@ -1016,7 +1020,7 @@ class IikoWebClient:
             "filters": filters,
         }
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v2/reports/olap",
                 params={"key": token},
@@ -1077,7 +1081,7 @@ class IikoWebClient:
             "filters": filters,
         }
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v2/reports/olap",
                 params={"key": token},
@@ -1122,7 +1126,7 @@ class IikoWebClient:
             "filters": filters,
         }
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v2/reports/olap",
                 params={"key": token},
@@ -1160,7 +1164,7 @@ class IikoWebClient:
         """
         iso_from, iso_to = date_from[:10], date_to[:10]
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(
                 f"{self.base_url}/api/v2/cashshifts/list",
                 params={"key": token, "openDateFrom": iso_from,
@@ -1173,7 +1177,7 @@ class IikoWebClient:
     async def get_payment_types_map(self) -> Dict[str, str]:
         """id → название типа оплаты (entities/list PaymentType)."""
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/v2/entities/list",
                                     params={"key": token, "rootType": "PaymentType",
                                             "includeDeleted": "false"})
@@ -1184,7 +1188,7 @@ class IikoWebClient:
         """Платежи кассовой смены: безнал по записям, original vs actual/edited
         (следы исправлений типов оплат при принятии смены в офисе)."""
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(
                 f"{self.base_url}/api/v2/cashshifts/payments/list/{session_id}",
                 params={"key": token, "hideAccepted": "false"},
@@ -1196,7 +1200,7 @@ class IikoWebClient:
         """id → имя сотрудника (XML /api/employees)."""
         import xml.etree.ElementTree as ET
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/employees",
                                     params={"key": token})
             resp.raise_for_status()
@@ -1218,7 +1222,7 @@ class IikoWebClient:
         """
         import xml.etree.ElementTree as ET
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/employees/attendance",
                                     params={"key": token, "from": date_from[:10],
                                             "to": date_to[:10]})
@@ -1252,7 +1256,7 @@ class IikoWebClient:
         if self._roles_cache and datetime.now() - self._roles_cache[0] < self.REF_TTL:
             return self._roles_cache[1]
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/employees/roles",
                                     params={"key": token})
             resp.raise_for_status()
@@ -1278,7 +1282,7 @@ class IikoWebClient:
         if self._att_types_cache and datetime.now() - self._att_types_cache[0] < self.REF_TTL:
             return self._att_types_cache[1]
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/employees/attendance/types",
                                     params={"key": token})
             resp.raise_for_status()
@@ -1311,7 +1315,7 @@ class IikoWebClient:
                 (datetime.now() - self._conceptions_cache[0]) < timedelta(hours=6):
             return self._conceptions_cache[1]
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=40.0, verify=True) as client:
             resp = await client.get(
                 f"{self.base_url}/api/v2/entities/list",
                 params={"key": token, "rootType": "Conception", "includeDeleted": "false"},
@@ -1348,7 +1352,7 @@ class IikoWebClient:
             "filters": filters,
         }
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v2/reports/olap",
                 params={"key": token},
@@ -1417,7 +1421,7 @@ class IikoWebClient:
         Используется в диагностике при ошибках 'Unknown OLAP field'."""
         token = await self._ensure_token()
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                 # iikoServer 9.x использует query-style: ?reportType=…
                 resp = await client.get(
                     f"{self.base_url}/api/v2/reports/olap/columns",
@@ -1466,7 +1470,7 @@ class IikoWebClient:
             "filters": filters,
         }
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(
                 f"{self.base_url}/api/v2/reports/olap",
                 params={"key": token},
@@ -1581,7 +1585,7 @@ class IikoWebClient:
             return cached[1]
         token = await self._ensure_token()
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/suppliers",
                     params={"key": token}
@@ -1615,7 +1619,7 @@ class IikoWebClient:
         token = await self._ensure_token()
         units: Dict[str, str] = {}
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/v2/entities/list",
                     params={"key": token, "rootType": "MeasureUnit", "includeDeleted": "false"})
@@ -1630,7 +1634,7 @@ class IikoWebClient:
         """Склады; если передано имя филиала — только его склады (по parentId
         через corporation/departments), иначе все."""
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/corporation/stores",
                                     params={"key": token})
             items = self._xml_to_list_of_dicts(resp.text, "corporateItemDto") or                     self._xml_to_list_of_dicts(resp.text, "store")
@@ -1656,7 +1660,7 @@ class IikoWebClient:
             return stores[0]["id"] if stores else None
         token = await self._ensure_token()
         try:
-            async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/corporation/stores",
                     params={"key": token}
@@ -1694,7 +1698,7 @@ class IikoWebClient:
             if types:
                 params["types"] = sorted(types)
             try:
-                async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+                async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
                     resp = await client.get(
                         f"{self.base_url}/api/v2/entities/products/list",
                         params=params
@@ -1793,7 +1797,7 @@ class IikoWebClient:
                 ET.SubElement(el, "productId").text = str(it.get("productId") or "")
                 ET.SubElement(el, "amount").text = str(it.get("amount") or 0)
         body = ET.tostring(root, encoding="utf-8")
-        async with httpx.AsyncClient(timeout=60.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, verify=True) as client:
             resp = await client.post(f"{self.base_url}/api/documents/import/productionDocument",
                                      params={"key": token}, content=body,
                                      headers={"Content-Type": "application/xml"})
@@ -1809,7 +1813,7 @@ class IikoWebClient:
     async def get_account_for_production(self) -> str:
         """Счёт для акта: берём «производство», иначе первый доступный."""
         token = await self._ensure_token()
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+        async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
             resp = await client.get(f"{self.base_url}/api/v2/entities/list",
                                     params={"key": token, "rootType": "Account",
                                             "includeDeleted": "false"})
@@ -1867,7 +1871,7 @@ class IikoWebClient:
             # На 401 (протухшая сессия iikoServer) — сбрасываем токен и повторяем 1 раз.
             for attempt in range(2):
                 tok = await self._ensure_token()
-                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                     resp = await client.post(
                         f"{self.base_url}/api/documents/import/incomingInvoice",
                         params={"key": tok},
@@ -1936,7 +1940,7 @@ class IikoWebClient:
             return None
         try:
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=40.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/documents/export/incomingInvoice",
                     params={"key": token, "from": date, "to": date})
@@ -1954,7 +1958,7 @@ class IikoWebClient:
         """Сырые <document>-блоки экспорта входящих накладных за дату."""
         for attempt in range(2):
             token = await self._ensure_token()
-            async with httpx.AsyncClient(timeout=40.0, verify=False) as client:
+            async with httpx.AsyncClient(timeout=40.0, verify=True) as client:
                 resp = await client.get(
                     f"{self.base_url}/api/documents/export/incomingInvoice",
                     params={"key": token, "from": date, "to": date})
@@ -2075,7 +2079,7 @@ class IikoWebClient:
             xml = b'<?xml version="1.0" encoding="UTF-8"?>' + ET.tostring(root, encoding="utf-8")
             for attempt in range(2):
                 tok = await self._ensure_token()
-                async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+                async with httpx.AsyncClient(timeout=30.0, verify=True) as client:
                     resp = await client.post(
                         f"{self.base_url}/api/documents/import/incomingInvoice",
                         params={"key": tok},

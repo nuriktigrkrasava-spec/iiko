@@ -1,3 +1,4 @@
+from fastapi import BackgroundTasks
 """«Гора» — задачи филиалам, баллы и уровень, плюс чек-листы из чата.
 
 Доступ по личной подписанной ссылке, как у виджета и журналов: `/m/{token}`,
@@ -1486,7 +1487,7 @@ class NoticePayload(BaseModel):
 
 
 @router.post("/api/mountain/notice/{token}")
-async def notice_send(token: str, payload: NoticePayload):
+async def notice_send(token: str, payload: NoticePayload, background_tasks: BackgroundTasks):
     sc = scope_of_token(token)
     uid = sc["uid"]
     if not sc["valid"]:
@@ -1502,6 +1503,8 @@ async def notice_send(token: str, payload: NoticePayload):
     if org and org not in {b["organization_id"] for b in sc["branches"]}:
         return JSONResponse({"error": "чужой филиал"}, status_code=403)
     nid = add_branch_notice(text, uid, org)
+    from push_routes import send_notice
+    background_tasks.add_task(send_notice, uid, [org] if org else [b["organization_id"] for b in sc["branches"]])
     sent = await _notice_to_telegram(sc, org, text, author=uid)
     return JSONResponse({"ok": True, "id": nid, "telegram": sent})
 

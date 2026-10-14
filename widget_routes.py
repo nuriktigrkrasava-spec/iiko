@@ -9,6 +9,8 @@ import hmac
 import hashlib
 import base64
 import asyncio
+import json
+import html
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Response
@@ -34,7 +36,10 @@ _WIDGET_TPL = _read_site("widget.html")
 
 def _widget_secret() -> bytes:
     # ENCRYPTION_KEY одинаков на локали и на проде → токен совпадает везде, без БД.
-    return (os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY") or "iiko-widget-fallback").encode()
+    secret = os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY")
+    if not secret:
+        raise RuntimeError("Configure WIDGET_SECRET or ENCRYPTION_KEY")
+    return secret.encode()
 
 
 def _widget_sign(uid: int) -> str:
@@ -58,6 +63,33 @@ def _uid_from_token(token: str) -> Optional[int]:
         return None
     # bytes-сравнение: строковое compare_digest падает на не-ASCII подписи
     return uid if hmac.compare_digest(sig.encode("utf-8", "ignore"), _widget_sign(uid).encode()) else None
+
+
+def widget_branch_token_for(uid: int, org_id: str) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps([uid, org_id], separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(_widget_secret(), ("widget-branch:" + payload).encode(), hashlib.sha256).hexdigest()
+    return f"b.{payload}.{signature}"
+
+
+def _widget_scope(token: str, requested_org: Optional[str] = None):
+    if not token.startswith("b."):
+        uid = _uid_from_token(token)
+        return (uid, requested_org) if uid is not None else None
+    try:
+        prefix, payload, signature = token.split(".")
+        if len(payload) > 2048:
+            return None
+        expected = hmac.new(_widget_secret(), ("widget-branch:" + payload).encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature.encode(), expected.encode()):
+            return None
+        uid, org = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        if type(uid) is not int or not isinstance(org, str) or not org:
+            return None
+        if requested_org is not None and requested_org != org:
+            return None
+        return uid, org
+    except (ValueError, TypeError, UnicodeError):
+        return None
 
 
 async def _gather(uid: int, only_org: Optional[str] = None) -> Dict[str, Any]:
@@ -124,7 +156,7 @@ def _render(data: Dict[str, Any]) -> str:
     for k, v in {
         "__REV__": rev_html, "__CUR__": ("₸" if data.get("connected") else ""),
         "__SUB__": sub, "__DELTA__": delta_html, "__SPARK__": spark_html,
-        "__LABEL__": label, "__DATE__": date_lbl, "__TIME__": time_lbl, "__BOT__": _WIDGET_BOT_URL,
+        "__LABEL__": html.escape(str(label)), "__DATE__": date_lbl, "__TIME__": time_lbl, "__BOT__": html.escape(_WIDGET_BOT_URL, quote=True),
     }.items():
         tpl = tpl.replace(k, v)
     return tpl
@@ -134,46 +166,46 @@ def _render(data: Dict[str, Any]) -> str:
 async def widget_page(token: str):
     """Публичная страница-виджет (без Telegram-заголовка). Токен = авторизация."""
     import api
-    uid = _uid_from_token(token)
-    if uid is None:
+    scope = _widget_scope(token)
+    if scope is None:
         return HTMLResponse(_render({"connected": False}), status_code=404)
     cache_key = f"widgetpage:{token}"
     data = api._get_cached(cache_key)
     if data is None:
-        data = await _gather(uid)
+        data = await _gather(scope[0], only_org=scope[1])
         api._set_cached(cache_key, data)
-    return HTMLResponse(_render(data), headers={"Cache-Control": "max-age=120"})
+    return HTMLResponse(_render(data), headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/w/{token}/{org_id}")
 async def widget_page_branch(token: str, org_id: str):
     """То же, но по одному филиалу (org_id должен принадлежать владельцу токена)."""
     import api
-    uid = _uid_from_token(token)
-    if uid is None:
+    scope = _widget_scope(token, org_id)
+    if scope is None:
         return HTMLResponse(_render({"connected": False}), status_code=404)
     cache_key = f"widgetpage:{token}:{org_id}"
     data = api._get_cached(cache_key)
     if data is None:
-        data = await _gather(uid, only_org=org_id)
+        data = await _gather(scope[0], only_org=scope[1])
         api._set_cached(cache_key, data)
-    return HTMLResponse(_render(data), headers={"Cache-Control": "max-age=120"})
+    return HTMLResponse(_render(data), headers={"Cache-Control": "private, no-store"})
 
 
 # ---- JSON для настоящего тайла (Scriptable / WidgetKit): виджет как «Погода» ----
 
 async def _json_payload(token: str, only_org: Optional[str]):
     import api
-    uid = _uid_from_token(token)
-    if uid is None:
+    scope = _widget_scope(token, only_org)
+    if scope is None:
         return JSONResponse({"connected": False}, status_code=404)
     ck = f"widgetjson:{token}:{only_org or 'all'}"
     data = api._get_cached(ck)
     if data is None:
-        data = await _gather(uid, only_org=only_org)
+        data = await _gather(scope[0], only_org=scope[1])
         api._set_cached(ck, data)
     return JSONResponse({**data, "bot": _WIDGET_BOT_URL},
-                        headers={"Cache-Control": "max-age=120"})
+                        headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/api/widget/data/{token}")
