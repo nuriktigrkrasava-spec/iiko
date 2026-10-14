@@ -82,7 +82,10 @@ CHECKLIST_PENALTY = -1     # пропущенный
 
 
 def _secret() -> bytes:
-    return (os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY") or "iiko-widget-fallback").encode()
+    value = os.getenv("WIDGET_SECRET") or os.getenv("ENCRYPTION_KEY")
+    if not value:
+        raise RuntimeError("Configure WIDGET_SECRET or ENCRYPTION_KEY")
+    return value.encode()
 
 
 def _sign(uid: int) -> str:
