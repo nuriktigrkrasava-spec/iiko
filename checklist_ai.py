@@ -101,6 +101,14 @@ def photo_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:32]
 
 
+class _PreparedPhoto(bytes):
+    """In-memory marker for a supported image already decoded and re-encoded.
+
+    HTTP/base64 input and files are plain bytes and cannot supply this marker.
+    It must never be reconstructed from a client-provided flag or MIME type.
+    """
+
+
 def shrink(data: bytes, max_side: int = MAX_SIDE) -> Tuple[bytes, str]:
     """Decode only supported still images; malformed input must never reach AI."""
     import warnings
@@ -118,7 +126,7 @@ def shrink(data: bytes, max_side: int = MAX_SIDE) -> Tuple[bytes, str]:
                     im = im.resize((max(1, int(im.width*k)), max(1, int(im.height*k))), Image.Resampling.LANCZOS)
                 buf = io.BytesIO()
                 im.save(buf, format="JPEG", quality=72, optimize=True)
-                return buf.getvalue(), "image/jpeg"
+                return _PreparedPhoto(buf.getvalue()), "image/jpeg"
     except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ValueError("Unsupported or invalid image") from exc
 
@@ -169,7 +177,7 @@ async def review_slot(photos: List[Tuple[bytes, str]],
 
     content: List[Dict[str, Any]] = []
     for data, zone in photos[:MAX_PHOTOS_PER_SLOT]:
-        small, mime = shrink(data)
+        small, mime = (data, "image/jpeg") if isinstance(data, _PreparedPhoto) else shrink(data)
         import base64
         content.append({"type": "text", "text": f"Зона: {zone}"})
         content.append({"type": "image", "source": {
