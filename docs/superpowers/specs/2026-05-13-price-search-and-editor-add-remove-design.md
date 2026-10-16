@@ -2,7 +2,7 @@
 
 **Дата:** 2026-05-13
 **Статус:** design — на ревью у пользователя
-**Базовый каталог:** `/Users/kiluazoldik/Desktop/iiiko`
+**Базовый каталог:** `/path/to/workspace/iiiko`
 
 ---
 

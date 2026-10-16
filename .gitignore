@@ -49,3 +49,36 @@ checklists/
 # Состояние инструментов и вендоринг: в репозитории им делать нечего
 .claude-flow/
 vendor/
+
+# Local secrets, data and delivery packages
+.env.*
+!.env.example
+!.env.local.example
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
+**/key.properties
+**/local.properties
+**/*service-account*.json
+**/*service_account*.json
+*.db-*
+*.sqlite-*
+*.sqlite3-*
+*.sql.gz
+*.dump
+*.backup
+*.bak
+*.apk
+*.aab
+*.ipa
+*.xcarchive/
+/backups/
+/artifacts/
+
+# Local automation state
+.codex/

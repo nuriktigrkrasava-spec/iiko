@@ -48,7 +48,7 @@
 ```python
 import os, sys, tempfile
 os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(), "x.db")
-sys.path.insert(0, "/Users/kiluazoldik/Desktop/Work/iiiko")
+sys.path.insert(0, "/path/to/workspace/Work/iiiko")
 from iiko import IikoWebClient
 
 agg = IikoWebClient._aggregate_stock_prices
@@ -197,7 +197,7 @@ git commit -m "feat(foodcost): IikoWebClient — products/list, getPrepared те
 
 ```python
 import sys
-sys.path.insert(0, "/Users/kiluazoldik/Desktop/Work/iiiko")
+sys.path.insert(0, "/path/to/workspace/Work/iiiko")
 from foodcost_calc import compute_recipe_foodcost as f
 
 # Блюдо А: 2 ингр, оба с ценой. норма*цена = 0.05*3000 + 0.1*200 = 150+20 = 170 за порцию.

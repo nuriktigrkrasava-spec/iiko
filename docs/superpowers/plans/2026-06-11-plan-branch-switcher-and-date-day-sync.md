@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Дать шефу (tg id 355897224) переключатель филиала в суб-вкладке «План», и для всех — выбор одного дня + произвольного периода в модалке дат с синхроном между Главной и Продажами.
+**Goal:** Дать шефу (tg id 123456789) переключатель филиала в суб-вкладке «План», и для всех — выбор одного дня + произвольного периода в модалке дат с синхроном между Главной и Продажами.
 
 **Architecture:** Чистый фронтенд (`index.html`, Vanilla JS, единый `state`). Бэкенд не меняем. Период становится единым источником правды через центральный сеттер `applyGlobalPeriod`, держащий пары полей main/sales в жёсткой синхронизации. Модалка дат получает тумблер «День/Период». «План» получает session-only `state.planOrgId` и UI-чип, видимый только шефу.
 
@@ -14,7 +14,7 @@
 
 ## File Structure
 
-Единственный изменяемый файл — `/Users/kiluazoldik/Desktop/iiiko/index.html`:
+Единственный изменяемый файл — `/path/to/workspace/iiiko/index.html`:
 
 - **STATE** (`~1450`): добавить `planOrgId`.
 - **Helpers** (`~1637`): добавить `getMyTgId()`, `applyGlobalPeriod()`, `renderDateFilters()`, константу `PLAN_BRANCH_SWITCHER_TG_ID`, `formatPeriodChipLabel()`.
@@ -276,7 +276,7 @@ git commit -m "feat(dates): модалка с тумблером «День/Пе
 
 ```javascript
 // Telegram id, которому показываем переключатель филиалов в «Плане». См. spec 2026-06-11.
-const PLAN_BRANCH_SWITCHER_TG_ID = 355897224;
+const PLAN_BRANCH_SWITCHER_TG_ID = 123456789;
 function getMyTgId() {
   return window.Telegram?.WebApp?.initDataUnsafe?.user?.id || null;
 }
@@ -284,7 +284,7 @@ function getMyTgId() {
 
 - [ ] **Step 2: Проверка**
 
-В консоли браузера: `typeof getMyTgId === 'function' && PLAN_BRANCH_SWITCHER_TG_ID === 355897224` → `true`.
+В консоли браузера: `typeof getMyTgId === 'function' && PLAN_BRANCH_SWITCHER_TG_ID === 123456789` → `true`.
 
 - [ ] **Step 3: Commit**
 
@@ -433,7 +433,7 @@ function selectPlanBranch(orgId) {
 
 Для аккаунта с несколькими филиалами:
 1. Подменить id шефа в консоли для теста UI:
-   `window.Telegram.WebApp.initDataUnsafe = { user: { id: 355897224 } };`
+   `window.Telegram.WebApp.initDataUnsafe = { user: { id: 123456789 } };`
    затем открыть «Год/год» → «План». Над таблицей виден чип `🏢 <Филиал> ▾`.
 2. Тап по чипу → sheet со списком филиалов, текущий помечен `active`. Выбрать другой →
    sheet закрылся, план перезагрузился, чип показывает новый филиал, данные плана сменились.
@@ -444,7 +444,7 @@ function selectPlanBranch(orgId) {
 
 ```bash
 git add index.html
-git commit -m "feat(plan): чип выбора филиала в суб-вкладке «План» (только шеф 355897224)"
+git commit -m "feat(plan): чип выбора филиала в суб-вкладке «План» (только шеф 123456789)"
 ```
 
 ---

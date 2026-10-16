@@ -147,7 +147,7 @@ Expected: тесты выполняются. Если какой-то падае
 - [ ] **Step 6: Коммит**
 
 ```bash
-cd /Users/kiluazoldik/Desktop/Work/iiiko
+cd /path/to/workspace/Work/iiiko
 git add web/package.json web/package-lock.json web/vite.config.ts web/src/lib/format.test.ts
 git commit -m "test(web): каркас Vitest + покрытие format.ts"
 ```
@@ -1146,7 +1146,7 @@ Expected: все четыре команды проходят без ошибо�
 - [ ] **Step 3: Поднять приложение и посмотреть глазами**
 
 ```bash
-cd /Users/kiluazoldik/Desktop/Work/iiiko
+cd /path/to/workspace/Work/iiiko
 uvicorn api:app --port 8000 &
 cd web && npm run dev
 ```

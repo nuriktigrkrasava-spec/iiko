@@ -34,11 +34,11 @@
 
 - [ ] **Step 1: Locate insertion point**
 
-Run: `grep -n "^@app.get(\"/api/invoices/{org_id}\")\|^async def invoices(" /Users/kiluazoldik/Desktop/iiiko/api.py`
+Run: `grep -n "^@app.get(\"/api/invoices/{org_id}\")\|^async def invoices(" /path/to/workspace/iiiko/api.py`
 Expected: 2 lines (decorator + handler) around line 938-940. New endpoint goes right after the `invoices()` handler closes (look for the matching `return` and blank line).
 
 Also note the path of imports — find `from iiko import` to confirm the import structure of `get_client`. Run:
-`grep -n "^from iiko" /Users/kiluazoldik/Desktop/iiiko/api.py`
+`grep -n "^from iiko" /path/to/workspace/iiiko/api.py`
 
 - [ ] **Step 2: Add the cache dict + endpoint**
 
@@ -166,19 +166,19 @@ If any of these imports are missing at the top of `api.py`, add them:
 - `from fastapi import Query` (likely already present)
 - `from datetime import datetime, timedelta` (almost certainly already present)
 
-Run: `grep -n "^from typing\|^from datetime\|^from fastapi" /Users/kiluazoldik/Desktop/iiiko/api.py | head -5`
+Run: `grep -n "^from typing\|^from datetime\|^from fastapi" /path/to/workspace/iiiko/api.py | head -5`
 If `Tuple` is missing from `typing` imports, add it.
 
 - [ ] **Step 3: Verify api.py parses**
 
-Run: `python -c "import ast; ast.parse(open('/Users/kiluazoldik/Desktop/iiiko/api.py').read()); print('OK')"`
+Run: `python -c "import ast; ast.parse(open('/path/to/workspace/iiiko/api.py').read()); print('OK')"`
 Expected output: `OK`.
 
 - [ ] **Step 4: Smoke test endpoint registration**
 
 Run:
 ```bash
-cd /Users/kiluazoldik/Desktop/iiiko && python -c "
+cd /path/to/workspace/iiiko && python -c "
 import sys; sys.path.insert(0, '.')
 from api import app
 routes = [(r.path, r.methods) for r in app.routes if hasattr(r, 'path')]
@@ -192,7 +192,7 @@ Expected output: contains `('/api/price-stats/{org_id}', {'GET'})` or similar.
 
 Run:
 ```bash
-cd /Users/kiluazoldik/Desktop/iiiko && python -c "
+cd /path/to/workspace/iiiko && python -c "
 import sys; sys.path.insert(0, '.')
 from fastapi.testclient import TestClient
 from api import app
@@ -231,10 +231,10 @@ No changes to existing endpoints or iiko.py — reuses IikoClient.get_invoices."
 
 - [ ] **Step 1: Locate the invoices subtab in index.html**
 
-Run: `grep -n "subtab.*invoices\|invoice-list\|invoices-list" /Users/kiluazoldik/Desktop/iiiko/index.html | head -10`
+Run: `grep -n "subtab.*invoices\|invoice-list\|invoices-list" /path/to/workspace/iiiko/index.html | head -10`
 Expected: shows where `id="invoices-list"` is rendered (around line ~1100-1200). The whole subtab markup is around that area.
 
-Run: `grep -n 'data-subtab="invoices"\|state.expenseTab' /Users/kiluazoldik/Desktop/iiiko/index.html | head -10`
+Run: `grep -n 'data-subtab="invoices"\|state.expenseTab' /path/to/workspace/iiiko/index.html | head -10`
 Expected: shows the subtab container element. Identify the `<div>` that wraps the existing list — we'll add markup BEFORE it.
 
 - [ ] **Step 2: Add CSS for subview toggle and price-search panel**
@@ -308,7 +308,7 @@ without a wrapping div, wrap it:
 
 - [ ] **Step 4: Add `switchInvoiceSubview` JS**
 
-In the JS section (find by `grep -n "function switchTab\|function loadExpenses" /Users/kiluazoldik/Desktop/iiiko/index.html`), append near other invoice-tab functions:
+In the JS section (find by `grep -n "function switchTab\|function loadExpenses" /path/to/workspace/iiiko/index.html`), append near other invoice-tab functions:
 
 ```javascript
 // Invoices subview (📋 Список / 📊 Цены)
@@ -328,7 +328,7 @@ function switchInvoiceSubview(view) {
 
 Run: `python -c "
 import re, sys
-html = open('/Users/kiluazoldik/Desktop/iiiko/index.html').read()
+html = open('/path/to/workspace/iiiko/index.html').read()
 # Sanity: balanced div tags (approximation, not full XML parser)
 opens = len(re.findall(r'<div\b', html))
 closes = len(re.findall(r'</div>', html))
@@ -473,13 +473,13 @@ function fmtMoney(n) {
 
 **Important:** if `escapeHtml` or `fmtMoney` is already defined elsewhere in `index.html` (likely — there's `ieEscape` and `ieFormatMoney` at line 3309/3305), DO NOT redefine. In that case, use the existing names `ieEscape` / `ieFormatMoney` in the code above (replace all `escapeHtml` with `ieEscape` and all `fmtMoney` with `ieFormatMoney`).
 
-Run: `grep -n "^function escapeHtml\|^function fmtMoney\|^function ieEscape\|^function ieFormatMoney" /Users/kiluazoldik/Desktop/iiiko/index.html`
+Run: `grep -n "^function escapeHtml\|^function fmtMoney\|^function ieEscape\|^function ieFormatMoney" /path/to/workspace/iiiko/index.html`
 If `ieEscape` and `ieFormatMoney` exist (they should), substitute them in the new code; if neither pair exists, keep `escapeHtml`/`fmtMoney` as defined.
 
 - [ ] **Step 2: Basic JS sanity check**
 
 Run: `python -c "
-html = open('/Users/kiluazoldik/Desktop/iiiko/index.html').read()
+html = open('/path/to/workspace/iiiko/index.html').read()
 for fn in ['psSearchProducts', 'psSelectProduct', 'psRenderCard']:
     assert f'function {fn}' in html, f'{fn} not defined'
 print('OK — all 3 functions defined')
@@ -508,7 +508,7 @@ and existing ieEscape/ieFormatMoney helpers where available."
 
 - [ ] **Step 1: Locate `ieRenderItems` and read the exact current template**
 
-Run: `sed -n '3267,3293p' /Users/kiluazoldik/Desktop/iiiko/index.html`
+Run: `sed -n '3267,3293p' /path/to/workspace/iiiko/index.html`
 Expected: shows the current template that renders each `.ie-item` row.
 
 - [ ] **Step 2: Replace `ieRenderItems` to include 🗑 button**
@@ -608,7 +608,7 @@ Find the `.ie-` CSS block (around line 425-456) and append:
 - [ ] **Step 5: Verify**
 
 Run: `python -c "
-html = open('/Users/kiluazoldik/Desktop/iiiko/index.html').read()
+html = open('/path/to/workspace/iiiko/index.html').read()
 assert 'function ieDeleteItem' in html, 'ieDeleteItem missing'
 assert 'function ieAddItem' in html or 'ieAddItem' in html, 'ieAddItem referenced but not yet defined (will be added in Task 5)'
 assert '🗑' in html, '🗑 button missing'
@@ -639,11 +639,11 @@ referenced but defined in the next commit (paired feature)."
 
 - [ ] **Step 1: Locate `ieCloseModal` and `ieSaveItem`**
 
-Run: `grep -n "^function ieCloseModal\|^function ieSaveItem" /Users/kiluazoldik/Desktop/iiiko/index.html`
+Run: `grep -n "^function ieCloseModal\|^function ieSaveItem" /path/to/workspace/iiiko/index.html`
 Expected: shows their line numbers. Read them with `sed -n` to know their current bodies.
 
-Run: `sed -n '3325,3340p' /Users/kiluazoldik/Desktop/iiiko/index.html` to see `ieCloseModal`.
-Run: `sed -n '3370,3395p' /Users/kiluazoldik/Desktop/iiiko/index.html` to see `ieSaveItem` (adjust offset if needed).
+Run: `sed -n '3325,3340p' /path/to/workspace/iiiko/index.html` to see `ieCloseModal`.
+Run: `sed -n '3370,3395p' /path/to/workspace/iiiko/index.html` to see `ieSaveItem` (adjust offset if needed).
 
 - [ ] **Step 2: Add `ieAddItem` and patch `ieCloseModal` + `ieSaveItem`**
 
@@ -729,7 +729,7 @@ Be careful: this exact sequence (`ieRenderItems(); ieRecalcTotals(); ieCloseModa
 - [ ] **Step 3: Verify**
 
 Run: `python -c "
-html = open('/Users/kiluazoldik/Desktop/iiiko/index.html').read()
+html = open('/path/to/workspace/iiiko/index.html').read()
 assert 'function ieAddItem' in html, 'ieAddItem missing'
 assert '_addingNew' in html, '_addingNew flag missing'
 # Make sure _addingNew is reset in ieSaveItem

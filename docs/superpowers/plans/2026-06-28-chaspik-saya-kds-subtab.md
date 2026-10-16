@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Добавить под главной вкладкой «Сотрудники» новую суб-вкладку «saya-kds», видимую только tg-id `355897224` и `8727082281`, которая через серверный прокси показывает аналитику доставки/кухни из внешнего сервиса saya-kds.
+**Goal:** Добавить под главной вкладкой «Сотрудники» новую суб-вкладку «saya-kds», видимую только tg-id `123456789` и `123456789`, которая через серверный прокси показывает аналитику доставки/кухни из внешнего сервиса saya-kds.
 
 **Architecture:** Тонкий серверный прокси `GET /api/chaspik` в `api.py` держит секрет `X-API-Key` на бэке, проверяет tg-id и прозрачно отдаёт JSON из `saya-kds.onrender.com/admin/analytics/export`. Фронт (`index.html`, vanilla JS) добавляет сабтаб (кнопка удаляется из DOM для чужих id), грузит `/api/chaspik` обычным `X-Telegram-Init-Data`-путём и рендерит 4 секции чистым JS.
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Секрет `X-API-Key` НЕ попадает во фронт/URL — только в заголовке серверного запроса.
-- Разрешённые tg-id (один и тот же набор на фронте и бэке): `355897224`, `8727082281`.
+- Разрешённые tg-id (один и тот же набор на фронте и бэке): `123456789`, `123456789`.
 - Часовой пояс/даты — на стороне saya-kds (UTC+5); дефолты периода (7 дней / сегодня / sla 45) не дублируем у себя.
 - Единицы из ответа saya-kds: `*_seconds`/`avg`/`median`/`p95` — секунды; `sla.rate` — доля 0–1.
 - Прод деплоится Render'ом с ветки `deploy-cashshifts`.
@@ -28,7 +28,7 @@
 **Interfaces:**
 - Consumes: `get_current_user` (Depends), `httpx` (импортирован), `HTTPException`, `Query` (уже импортированы в `api.py`).
 - Produces:
-  - `CHASPIK_TG_IDS: set[int]` — `{355897224, 8727082281}`
+  - `CHASPIK_TG_IDS: set[int]` — `{123456789, 123456789}`
   - `ANALYTICS_API_KEY: str` (env, дефолт `""`), `CHASPIK_ORG_ID: str` (env, дефолт `""`), `CHASPIK_BASE_URL: str` (env, дефолт `"https://saya-kds.onrender.com"`)
   - `async def chaspik_export(from_=Query(None, alias="from"), to=Query(None), sla_minutes=Query(None), user=Depends(get_current_user)) -> dict` — маршрут `GET /api/chaspik`. Гейт по id → 403; не настроено → 503; ошибка upstream → 502; иначе JSON saya-kds.
 
@@ -52,7 +52,7 @@ import database; database.init_db()
 import api
 from fastapi import HTTPException
 
-ALLOWED = {"id": 355897224, "username": "boss", "first_name": "B"}
+ALLOWED = {"id": 123456789, "username": "boss", "first_name": "B"}
 OTHER = {"id": 111, "username": "x", "first_name": "X"}
 
 
@@ -166,7 +166,7 @@ Expected: FAIL/ERROR — `api.chaspik_export` ещё не существует (
 ANALYTICS_API_KEY = os.getenv("ANALYTICS_API_KEY", "")
 CHASPIK_ORG_ID = os.getenv("CHASPIK_ORG_ID", "")
 CHASPIK_BASE_URL = os.getenv("CHASPIK_BASE_URL", "https://saya-kds.onrender.com")
-CHASPIK_TG_IDS = {355897224, 8727082281}
+CHASPIK_TG_IDS = {123456789, 123456789}
 ```
 
 - [ ] **Step 4: Добавить эндпоинт в `api.py`**
@@ -231,16 +231,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `getMyTgId()` (строка 1746), `setStaffSubtab(view, el)` (строка 3027), `apiGet(path)`.
 - Produces:
-  - `CHASPIK_TG_IDS` (JS, массив) — `[355897224, 8727082281]`
+  - `CHASPIK_TG_IDS` (JS, массив) — `[123456789, 123456789]`
   - `applyChaspikGate()` — удаляет кнопку `#staff-sub-kds` из DOM, если `getMyTgId()` не в наборе
   - `loadChaspik()` — заглушка (наполняется в Task 3), вызывается из `setStaffSubtab` при `view === 'kds'`
 
 - [ ] **Step 1: Добавить JS-константу разрешённых id**
 
-После строки `const PLAN_BRANCH_SWITCHER_TG_ID = 355897224;` (строка 1745) добавить:
+После строки `const PLAN_BRANCH_SWITCHER_TG_ID = 123456789;` (строка 1745) добавить:
 
 ```javascript
-const CHASPIK_TG_IDS = [355897224, 8727082281];  // кому видна суб-вкладка «saya-kds»
+const CHASPIK_TG_IDS = [123456789, 123456789];  // кому видна суб-вкладка «saya-kds»
 ```
 
 - [ ] **Step 2: Добавить кнопку сабтаба**
