@@ -1,4 +1,3 @@
-from fastapi import BackgroundTasks
 """«Гора» — задачи филиалам, баллы и уровень, плюс чек-листы из чата.
 
 Доступ по личной подписанной ссылке, как у виджета и журналов: `/m/{token}`,
@@ -17,6 +16,7 @@ from fastapi import BackgroundTasks
 Уровень на горе — 40 отметок по 25 баллов: три закрытые задачи не поднимают на
 вершину, подъём должен быть виден месяцами, а штрафы тянут вниз.
 """
+from fastapi import BackgroundTasks
 import base64
 import hashlib
 import hmac

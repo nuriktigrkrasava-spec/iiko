@@ -11,6 +11,7 @@ import base64
 import asyncio
 import json
 import html
+from functools import lru_cache
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter, Response
@@ -42,8 +43,30 @@ def _widget_secret() -> bytes:
     return secret.encode()
 
 
+@lru_cache(maxsize=8)
+def _owner_versions(raw: str) -> Dict[str, int]:
+    """Operator-controlled revocation epochs; malformed settings fail closed."""
+    try:
+        versions = json.loads(raw)
+        if not isinstance(versions, dict) or any(
+            not isinstance(uid, str) or str(int(uid)) != uid
+            or type(version) is not int or version < 0
+            for uid, version in versions.items()
+        ):
+            raise ValueError()
+        return versions
+    except (ValueError, TypeError):
+        raise RuntimeError("Invalid WIDGET_OWNER_VERSIONS configuration") from None
+
+
+def _owner_version(uid: int) -> int:
+    return _owner_versions(os.getenv("WIDGET_OWNER_VERSIONS") or "{}").get(str(uid), 0)
+
+
 def _widget_sign(uid: int) -> str:
-    mac = hmac.new(_widget_secret(), f"widget:{uid}".encode(), hashlib.sha256).digest()
+    version = _owner_version(uid)
+    message = f"widget:{uid}" + (f":v{version}" if version else "")
+    mac = hmac.new(_widget_secret(), message.encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(mac).decode().rstrip("=")[:20]
 
 
@@ -67,8 +90,14 @@ def _uid_from_token(token: str) -> Optional[int]:
 
 def widget_branch_token_for(uid: int, org_id: str) -> str:
     payload = base64.urlsafe_b64encode(json.dumps([uid, org_id], separators=(",", ":")).encode()).decode().rstrip("=")
-    signature = hmac.new(_widget_secret(), ("widget-branch:" + payload).encode(), hashlib.sha256).hexdigest()
+    signature = _branch_sign(payload, uid)
     return f"b.{payload}.{signature}"
+
+
+def _branch_sign(payload: str, uid: int) -> str:
+    version = _owner_version(uid)
+    message = "widget-branch:" + payload + (f":v{version}" if version else "")
+    return hmac.new(_widget_secret(), message.encode(), hashlib.sha256).hexdigest()
 
 
 def _widget_scope(token: str, requested_org: Optional[str] = None):
@@ -79,11 +108,11 @@ def _widget_scope(token: str, requested_org: Optional[str] = None):
         prefix, payload, signature = token.split(".")
         if len(payload) > 2048:
             return None
-        expected = hmac.new(_widget_secret(), ("widget-branch:" + payload).encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature.encode(), expected.encode()):
-            return None
         uid, org = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
         if type(uid) is not int or not isinstance(org, str) or not org:
+            return None
+        expected = _branch_sign(payload, uid)
+        if not hmac.compare_digest(signature.encode(), expected.encode()):
             return None
         if requested_org is not None and requested_org != org:
             return None

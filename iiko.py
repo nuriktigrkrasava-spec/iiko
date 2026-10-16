@@ -78,11 +78,13 @@ def get_client(api_login: str, iiko_server: str = None, api_password: str = None
         iiko_server = _normalize_iiko_url(iiko_server)
         key = f"web:{api_login}@{iiko_server}"
         cached = _client_cache.get(key)
-        # Если пароль изменился — пересоздать клиент
-        if cached and api_password and getattr(cached, "password", None) != api_password:
+        # Missing/empty passwords use the login, just as a new connection does.
+        # Never let that request inherit another account's authenticated client.
+        effective_password = api_password or api_login
+        if cached is not None and getattr(cached, "password", None) != effective_password:
             cached = None
         if cached is None:
-            _client_cache[key] = IikoWebClient(iiko_server, api_login, api_password or api_login)
+            _client_cache[key] = IikoWebClient(iiko_server, api_login, effective_password)
         return _client_cache[key]
     key = f"cloud:{api_login}"
     if key not in _client_cache:

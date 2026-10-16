@@ -1,4 +1,5 @@
-# Candidate configuration only. Applying this blueprint requires a separate deployment.
+# Candidate for a NEW service only; do not sync it over an existing service.
+# Verify its existing disk name/size and make a tested backup before migration.
 services:
   - type: web
     name: iiko
@@ -18,7 +19,7 @@ services:
       - key: ENCRYPTION_KEY
         sync: false
       - key: DB_PATH
-        value: /data/iiko.db
+        value: /data/iiko_boss.db
     disk:
       name: iiko-data
       mountPath: /data

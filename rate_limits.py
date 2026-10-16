@@ -13,10 +13,18 @@ def _trusted(value):
 def _client_ip(request: Request) -> str:
     peer = get_remote_address(request)
     try:
-        trusted = any(ipaddress.ip_address(peer) in network for network in _trusted(os.getenv("TRUSTED_PROXY_CIDRS", "")))
+        networks = _trusted(os.getenv("TRUSTED_PROXY_CIDRS", ""))
+        current = ipaddress.ip_address(peer)
+        trusted = any(current in network for network in networks)
         parts = [p.strip() for p in request.headers.get("X-Forwarded-For", "").split(",") if p.strip()]
         if trusted and parts:
-            return str(ipaddress.ip_address(parts[-1]))
+            # Walk from the socket through known proxies. The first untrusted
+            # address is the visitor; never trust arbitrary leftmost entries.
+            for part in reversed(parts):
+                current = ipaddress.ip_address(part)
+                if not any(current in network for network in networks):
+                    return str(current)
+            return str(current)
     except ValueError:
         pass
     return peer

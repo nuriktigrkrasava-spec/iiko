@@ -8214,7 +8214,7 @@ async def _gather_assistant_signals(user: Dict[str, Any]) -> Dict[str, Any]:
             # прошлый снимок → «стало лучше, чем было»; затем кладём текущий.
             # Снимок пишем ПОСЛЕ чтения, иначе сравнивали бы сами с собой.
             snap = get_signal_snapshot(tid, r["name"]) if tid else None
-            if snap and os.getenv("ASSISTANT_SNAPSHOT_OWNER_ID") == str(user.get("id", 0)):
+            if snap:
                 r["prev"] = {"taken_at": snap["taken_at"], **snap["payload"]}
             if tid:
                 save_signal_snapshot(tid, r["name"], _snapshot_of(r))

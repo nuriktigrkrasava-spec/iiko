@@ -41,7 +41,7 @@ type DashT = {
   revenue_today: number; revenue_change: number
   avg_check: number; avg_check_change: number
   guests: number; guests_change: number
-  open_orders: number; forecast: number
+  open_orders: number; forecast: number | null
   chart_7days: { labels: string[]; data: number[] }
 }
 function Tile({ label, value, delta, invert }: { label: string; value: string; delta?: number; invert?: boolean }) {
